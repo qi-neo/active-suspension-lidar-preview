@@ -1,52 +1,50 @@
-# Maixcam Pro 与 ESP32 通过 socket TCP 通信来控制步进电机（一）
+# Maixcam Pro + ESP32 通过 socket TCP 通信控制步进电机（完整教程）
 
-> 原文发布于 CSDN（2024-12-17）：<https://blog.csdn.net/2401_84550508/article/details/144541721>
-> 本文由 CSDN 迁移至 GitHub，**已对原文中的 Wi-Fi 密码进行脱敏处理**（占位符 `<YOUR_WIFI_PASSWORD>`）。
+> 原两篇 CSDN 博客合并版：
+> - （一）ESP32 端：<https://blog.csdn.net/2401_84550508/article/details/144541721>（2024-12-17）
+> - （二）Maixcam 端：<https://blog.csdn.net/2401_84550508/article/details/144566530>（2024-12-18）
+>
+> 本文由 CSDN 迁移至 GitHub 并合并为单篇。**已对原文中的 Wi-Fi 密码进行脱敏处理**（占位符 `<YOUR_WIFI_PASSWORD>`）。
 
-## 前言
+## 概述
 
-本文通过 socket TCP 通信，实现 Maixcam 与 ESP32 之间相互发送信息的功能，主要讲述 **ESP32 端** 的主要操作和代码。
+通过 socket TCP 通信，实现 Maixcam 与 ESP32 之间相互发送信息，进而由 ESP32 控制步进电机带动机械臂运动。整体分工：
 
-可拓展功能：Maixcam 识别物体坐标信息和种类后，传输给 ESP32，ESP32 控制步进电机带动机械臂到物体上方实现抓取功能……
+- **Maixcam Pro**：作为 **TCP 服务器**，识别物体坐标与类别后，向 ESP32 发送 `x,y,category` 形式的数据；
+- **ESP32**：作为 **TCP 客户端**，连接 Maixcam 后接收数据并驱动两台步进电机移动到对应位置，完成后归零并反馈。
 
-## 一、TCP 介绍
+可拓展：Maixcam 识别物体坐标与种类 → 传输给 ESP32 → ESP32 控制步进电机带动机械臂到物体上方实现抓取。
 
-### 1. TCP 协议的定义
-TCP（Transmission Control Protocol，传输控制协议）是一种面向连接的、可靠的、基于字节流的传输层通信协议。它负责在源主机和目标主机之间建立可靠的、有序的、错误检查的数据传输通道。TCP 协议通过确认应答、超时重传、滑动窗口等机制来保证数据的可靠传输。
+## 硬件清单
 
-### 2. TCP 协议的工作原理
-1. **建立连接**：TCP 在数据传输前，会通过“三次握手”与对方建立连接，确保双方都已准备好进行通信。
-2. **数据传输**：连接建立后，TCP 会将数据分成多个数据包进行传输。每个数据包都会加上序列号，以确保接收方能够按照正确的顺序重新组装数据。
-3. **确认应答**：接收方在收到数据包后，会向发送方发送确认应答。如果发送方在一段时间内没有收到确认应答，它会认为数据包丢失，并重新发送该数据包。
-4. **流量控制**：TCP 会根据接收方的处理能力，动态调整发送方的发送速度，避免发送过快导致接收方处理不过来。
-5. **断开连接**：当数据传输完成后，TCP 会通过“四次挥手”与对方断开连接。
-
-### 3. TCP 协议的特性
-1. **可靠性**：通过确认应答和重传机制确保数据包的可靠传输。
-2. **有序性**：采用序列号对数据包进行排序，确保数据顺序正确。
-3. **流量控制**：通过滑动窗口机制实现流量控制。
-4. **拥塞控制**：通过滑动窗口、慢启动、拥塞避免等算法来防止网络拥塞。
-
-## 二、器材选用
 1. ESP32 Dev Module
 2. Maixcam Pro
 3. 多路开关电源
 4. 杜邦线若干
 5. 57 步进闭环驱动电机
 
-## 三、代码及操作
+## 通信协议
 
-### （一）具体步骤
+- 数据格式：`像素X,像素Y,类别\n`（逗号分隔，换行符 `\n` 作为一帧结束标志）
+- 示例：`2560,2560,1`
+- 类别 `1~4` 对应四个预设位置；ESP32 收到后驱动两台电机到位并归零。
 
-#### 1. 引入库
+---
+
+## 第一部分：ESP32 端（TCP 客户端 · C++ / Arduino）
+
+### 1. 引入库
+
 ```cpp
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <AccelStepper.h>
 ```
 
-#### 2. 定义电机引脚和参数
-通过脉冲来控制步进电机转动，其中一圈设置为 3200 个脉冲。
+### 2. 定义电机引脚和参数
+
+通过脉冲控制步进电机转动，一圈设为 3200 个脉冲。
+
 ```cpp
 // 定义电机引脚
 #define En_Pin2     17   // 电机1使能引脚
@@ -62,13 +60,15 @@ TCP（Transmission Control Protocol，传输控制协议）是一种面向连接
 #define MAX_PIXEL_Y        2560   // Y轴最大像素点坐标
 ```
 
-#### 3. 创建 AccelStepper 对象
+### 3. 创建 AccelStepper 对象
+
 ```cpp
 AccelStepper stepper1(AccelStepper::DRIVER, Stp_Pin1, Dir_Pin1);  // 电机1
 AccelStepper stepper2(AccelStepper::DRIVER, Stp_Pin2, Dir_Pin2);  // 电机2
 ```
 
-#### 4. 定义其它变量
+### 4. 定义其它变量
+
 ```cpp
 long targetPosition1 = 0;  // 初始化电机1位置
 long targetPosition2 = 0;  // 初始化电机2位置
@@ -78,33 +78,33 @@ unsigned long lastDataProcessTime = 0;
 const unsigned long dataProcessInterval = 10000;  // 数据处理间隔(ms)
 ```
 
-#### 5. Wi-Fi 设置
-WiFi 的主要作用是建立网络连接，实现 ESP32 与 Maixcam 之间的数据通信。
+### 5. Wi-Fi 设置
+
 ```cpp
 // ⚠️ 以下 Wi-Fi 信息已从原文脱敏，请替换为你自己的网络
 const char* ssid = "205-03";
 const char* password = "<YOUR_WIFI_PASSWORD>";   // 原文为明文密码，已脱敏
 
-const char* targetIP = "192.168.10.5";
+const char* targetIP = "192.168.10.5";   // Maixcam 的 IP（TCP 服务器）
 const uint16_t targetPort = 8080;
 
 WiFiClient client;  // ESP32 作为 TCP 客户端
 ```
 
-#### 6. 初始化设置（setup）
-连接指定 Wi-Fi，连接 TCP 服务器（Maixcam），配置电机参数（最大速度、初始速度、最大加速度），初始化电机位置，并用 LED 指示连接状态。完整代码见文末。
+### 6. 初始化设置（setup）
 
-#### 7. 处理 TCP 数据并控制重连（loop）
-循环接收数据、以换行符 `\n` 为完整数据包标志进行处理，断线自动重连。完整代码见文末。
+连接指定 Wi-Fi，连接 TCP 服务器（Maixcam），配置电机参数（最大速度、初始速度、最大加速度），初始化电机位置，并用 LED 指示连接状态。
 
-#### 8. processReceivedData 函数
-解析像素坐标与类别，驱动两台电机移动到计算出的位置，执行特定动作后归零，并通过串口反馈状态。完整代码见文末。
+### 7. 处理 TCP 数据并控制重连（loop）
 
-### （二）注意事项
-1. 电机接电前应按一下 ESP32 的 boot 键，且不要在开始通信后才给电机通电，防止电机接收到脉冲信号后转动，带动组件与其它组件发生冲突；
-2. Maixcam 在重新连接 Wi-Fi 以传输代码时，会出现 IP 改变的情况，需同步修改目标 IP，否则 ESP32 将无法连接到 Maixcam。
+循环接收数据、以换行符 `\n` 为完整数据包标志进行处理，断线自动重连。
 
-### （三）完整代码
+### 8. processReceivedData 函数
+
+解析像素坐标与类别，驱动两台电机移动到计算出的位置，执行特定动作后归零，并通过串口反馈状态。
+
+### 9. 完整代码（ESP32）
+
 ```cpp
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -305,5 +305,151 @@ void processReceivedData(String data) {
 }
 ```
 
+---
+
+## 第二部分：Maixcam 端（TCP 服务器 · Python）
+
+### 1. 导入必要模块
+
+```python
+import socket
+import threading
+import time
+```
+
+### 2. 服务器配置
+
+`local_ip` 和 `local_port` 定义了服务器监听的 IP 地址和端口。`data_set` 是一个包含四个字符串的列表，每个字符串由三个数字组成，以逗号分隔。
+
+```python
+local_ip = "192.168.10.5"
+local_port = 8080
+
+# 数据集，包含四个由三个数字构成的组合
+data_set = [
+    "2560,2560,1",
+    "2560,2560,2",
+    "2560,2560,3",
+    "2560,2560,4",
+]
+```
+
+> 这里为了方便调试只是简单列了四组数据，实际上可以用 Maixcam 的识别功能进行拓展，如：识别完物体种类、尺寸以及坐标后，发送给 ESP32，ESP32 控制电机驱动机械臂实现对物体的精准抓取（多个物体可以考虑优先级）。
+
+### 3. 接收线程函数 receiveThread
+
+负责处理来自单个客户端的连接：遍历 `data_set` 逐条发送；每条发送后等待 18 秒再尝试从客户端接收数据；若收到数据则打印，否则继续发送下一条；异常则打印错误；最后关闭连接。
+
+```python
+def receiveThread(conn, addr):
+    try:
+        for message in data_set:
+            # 发送数据给客户端
+            conn.sendall(message.encode('utf-8') + b"\n")
+            print(f"Sent {message} to {addr}")
+            # 等待一段时间再尝试接收来自客户端的数据
+            time.sleep(18)
+            # 尝试接收来自客户端的数据
+            client_data = conn.recv(1024)
+            if client_data:
+                print(f"Received {client_data.decode('utf-8')} from {addr}")
+                print("Received!")
+            else:
+                print("No data received from client, continuing to send next message.")
+    except Exception as e:
+        print(f"Error in communication with {addr}: {e}")
+    finally:
+        print(f"Client {addr} disconnected")
+        conn.close()
+```
+
+### 4. 服务器设置和监听
+
+```python
+ip_port = (local_ip, local_port)
+sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sk.bind(ip_port)
+sk.listen(50)
+```
+
+### 5. 主循环
+
+无限循环等待客户端连接；每接受一个新的客户端连接，起一个守护线程运行 `receiveThread`。
+
+```python
+print("Server is listening on", ip_port)
+while True:
+    conn, addr = sk.accept()
+    print(f"Client {addr} connected")
+    t = threading.Thread(target=receiveThread, args=(conn, addr))
+    t.daemon = True
+    t.start()
+```
+
+### 6. 完整代码（Maixcam）
+
+```python
+import socket
+import threading
+import time
+
+local_ip = "192.168.10.5"
+local_port = 8080
+
+data_set = [
+    "2560,2560,1",
+    "2560,2560,2",
+    "2560,2560,3",
+    "2560,2560,4",
+]
+
+def receiveThread(conn, addr):
+    try:
+        for message in data_set:
+            # 发送数据给客户端
+            conn.sendall(message.encode('utf-8') + b"\n")
+            print(f"Sent {message} to {addr}")
+            # 等待一段时间再尝试接收来自客户端的数据
+            time.sleep(18)
+            # 尝试接收来自客户端的数据
+            client_data = conn.recv(1024)
+            if client_data:
+                print(f"Received {client_data.decode('utf-8')} from {addr}")
+                print("Received!")
+            else:
+                print("No data received from client, continuing to send next message.")
+    except Exception as e:
+        print(f"Error in communication with {addr}: {e}")
+    finally:
+        print(f"Client {addr} disconnected")
+        conn.close()
+
+ip_port = (local_ip, local_port)
+sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sk.bind(ip_port)
+sk.listen(50)
+
+print("Server is listening on", ip_port)
+while True:
+    conn, addr = sk.accept()
+    print(f"Client {addr} connected")
+    t = threading.Thread(target=receiveThread, args=(conn, addr))
+    t.daemon = True
+    t.start()
+```
+
+---
+
+## 注意事项（两端通用）
+
+1. 电机接电前应按一下 ESP32 的 boot 键，且不要在开始通信后才给电机通电，防止电机接收到脉冲信号后转动，带动组件与其它组件发生冲突；
+2. Maixcam 在重新连接 Wi-Fi 以传输代码时，会出现 IP 改变的情况，需同步修改目标 IP（ESP32 端 `targetIP` / Maixcam 端 `local_ip`），否则 ESP32 将无法连接到 Maixcam；
+3. 服务器在发送完 `data_set` 中的所有数据后，不会主动关闭连接；若客户端未发送数据或关闭连接，服务器将无限期等待下一个 `recv`，可能导致资源占用；
+4. 代码未处理客户端发送的数据内容，仅检查是否收到；按实际需求应添加响应处理逻辑；
+5. 服务器未实现并发控制或数据完整性检查；硬编码 IP/端口限制了灵活性。
+
 ## 总结
-以上就是 Maixcam 和 ESP32 通信之间有关 ESP32 的内容。本文仅仅简单介绍了 TCP 通信和 ESP32 在通信中的功能。如有错误，敬请批评指正！
+
+以上就是 Maixcam 与 ESP32 通过 TCP 通信控制步进电机的完整实现：ESP32 作为 TCP 客户端驱动步进电机，Maixcam 作为 TCP 服务器下发坐标与类别。本文合并了原 CSDN 的（一）ESP32 端与（二）Maixcam 端两篇。如有错误，敬请批评指正！

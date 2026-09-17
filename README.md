@@ -160,10 +160,11 @@ ros2 run car_balancer test_imu_node
 
 ## 📝 技术博客
 
-由 CSDN 迁移而来（已对原文 Wi-Fi 密码脱敏）：
+由 CSDN 迁移并合并为单篇（已对原文 Wi-Fi 密码脱敏）：
 
-- [Maixcam Pro 与 ESP32 通过 socket TCP 通信控制步进电机（一）](docs/blog/2024-12-17-maixcam-esp32-tcp-stepper-motor-part1.md)
-- [Maixcam Pro 与 ESP32 通过 socket TCP 通信控制步进电机（二）](docs/blog/2024-12-18-maixcam-esp32-tcp-stepper-motor-part2.md)
+- [Maixcam Pro + ESP32 通过 socket TCP 通信控制步进电机（完整教程）](docs/blog/maixcam-esp32-tcp-stepper-motor.md)
+  - 原（一）ESP32 端：<https://blog.csdn.net/2401_84550508/article/details/144541721>
+  - 原（二）Maixcam 端：<https://blog.csdn.net/2401_84550508/article/details/144566530>
 
 ## 📄 许可证
 
