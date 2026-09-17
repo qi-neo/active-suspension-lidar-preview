@@ -73,8 +73,7 @@ active-suspension-lidar-preview/
 │       ├── test_imu_node.py
 │       └── test/
 └── docs/
-    ├── paper/                     # 项目论文（文字版）
-    └── blog/                      # 迁移自 CSDN 的技术博客
+    └── paper/                     # 项目论文（文字版）
 ```
 
 ## 🧩 模块说明
@@ -158,14 +157,6 @@ ros2 run car_balancer test_imu_node
 > 论文原文为 PDF（已脱敏），文字版见
 > `docs/paper/基于多级抗扰滤波与IMU姿态反馈的四轮小车主动悬架控制研究.md`。
 
-## 📝 技术博客
-
-由 CSDN 迁移并合并为单篇（已对原文 Wi-Fi 密码脱敏）：
-
-- [Maixcam Pro + ESP32 通过 socket TCP 通信控制步进电机（完整教程）](docs/blog/maixcam-esp32-tcp-stepper-motor.md)
-  - 原（一）ESP32 端：<https://blog.csdn.net/2401_84550508/article/details/144541721>
-  - 原（二）Maixcam 端：<https://blog.csdn.net/2401_84550508/article/details/144566530>
-
 ## 📄 许可证
 
 [MIT](LICENSE) — 转载 / 二次开发请保留出处；论文与硬件设计版权归项目团队所有。
@@ -181,4 +172,4 @@ filtering controller (Gram-Schmidt gravity calibration, complementary filter, de
 kinematic decoupling, hysteresis PWM) to suppress body vibration on unstructured terrain.
 The `suspension_preview` C++ node extracts left/right wheel-track road-height profiles from the
 UniLiDAR point cloud and streams them over UART to the actuator controller. See `docs/paper/` for
-the full paper and `docs/blog/` for migrated CSDN posts.
+the full paper.
