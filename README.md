@@ -24,6 +24,7 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 ## 系统架构
 
 ```mermaid
+%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart TB
     subgraph S1["感知层"]
         L["UniLiDAR<br/>点云 + IMU"]
@@ -43,10 +44,9 @@ flowchart TB
     W --> F
     F --> P
     F --> A
-    P --> C
-    A --> C
+    P -->|预瞄前馈 · 串口 0xAA55| C
+    A -->|姿态反馈| C
     C --> K --> D
-    P -.->|串口 0xAA55| K
     classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
     class F,P inrepo
 ```
@@ -56,14 +56,14 @@ flowchart TB
 ### 预瞄节点数据流
 
 ```mermaid
+%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart LR
-    A["/unilidar/cloud<br/>PointCloud2"] --> B["TF 变换<br/>→ base_link"]
+    A["/unilidar/cloud"] --> B["TF 变换<br/>→ base_link"]
     B --> C["轮迹 ROI<br/>±0.1 m / 前方 5 m"]
     C --> D["5 cm 分箱<br/>格内取中位数"]
     D --> E["剖面 100 格<br/>NaN + 有效掩码"]
-    E --> F["CRC16 编码<br/>int16 毫米"]
-    F --> G["串口下发<br/>115200 bps"]
-    E --> H["ROS 话题<br/>/suspension/road_profile"]
+    E --> F["串口输出<br/>CRC16 · int16 毫米"]
+    E --> G["话题输出<br/>/suspension/road_profile"]
 ```
 
 控制节点以 200 Hz（5 ms）周期运行，论文给出三阶状态机 `CALIBRATING → LEVELING → BALANCING`。
@@ -102,13 +102,24 @@ active-suspension-lidar-preview/
 无效格静默填 0 等问题。
 
 ```mermaid
+%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart LR
-    subgraph CORE["suspension_core（不依赖 ROS）"]
-        E["IRoadProfileExtractor"] --> PL["PreviewPipeline"] --> S["IProfileSink"]
-        S --> R["RosTopicSink"]
-        S --> SE["SerialProfileSink"]
-        D["ISuspensionDriver"] --> SD["SerialSuspensionDriver"]
+    subgraph CORE["suspension_core · 不依赖 ROS"]
+        EX["IRoadProfileExtractor"] --> PP["PreviewPipeline"] --> SK["IProfileSink"]
+        DR["ISuspensionDriver"]
     end
+    subgraph LAYER["ROS 接线层"]
+        N["road_preview_node"]
+        RS["RosTopicSink"]
+    end
+    N -->|组装| EX
+    N -->|组装| SK
+    GF["GridRoadProfileExtractor"] -->|实现| EX
+    SF["SerialProfileSink"] -->|实现| SK
+    SD["SerialSuspensionDriver"] -->|实现| DR
+    RS -->|实现| SK
+    classDef impl fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    class GF,SF,SD,RS impl
 ```
 
 | 接口 | 职责 | 实现 |
