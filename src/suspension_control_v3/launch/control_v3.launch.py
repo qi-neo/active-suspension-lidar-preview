@@ -42,11 +42,14 @@ def generate_launch_description() -> LaunchDescription:
         ],
     )
 
+    # 预瞄节点在闭环链路里只负责发话题：串口由控制节点独占，
+    # 两边同时打开同一设备会互相抢占
     preview_node = Node(
         package='suspension_preview_v2',
         executable='road_preview_node',
         name='road_preview_node',
         output='screen',
+        parameters=[{'enable_serial': False}],
         condition=IfCondition(LaunchConfiguration('preview_node')),
     )
 

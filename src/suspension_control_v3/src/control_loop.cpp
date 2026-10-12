@@ -65,12 +65,21 @@ bool SuspensionControlLoop::submit_attitude(const Attitude& attitude, double now
 }
 
 void SuspensionControlLoop::apply_command(
-    const std::array<double, kWheelCount>& height_mm) {
+    const std::array<double, kWheelCount>& height_mm, bool force) {
+    std::array<int, kWheelCount> next{};
     for (int i = 0; i < kWheelCount; ++i) {
-        last_command_[static_cast<std::size_t>(i)] =
+        next[static_cast<std::size_t>(i)] =
             static_cast<int>(std::lround(height_mm[static_cast<std::size_t>(i)]));
     }
-    status_.commanded_mm = last_command_;
+
+    status_.commanded_mm = next;
+
+    // 命令没变就不重复下发。控制环 200 Hz 时，零位或降级保持值会被连发几百次，
+    // 白白占用总线带宽，也淹没有效帧。
+    // force 用于状态跃迁：进入回中/急停时哪怕数值相同也必须发一次，
+    // 否则初始 last_command_ 就是全零，回中指令会被去重吞掉，作动器永远收不到
+    if (!force && next == last_command_) return;
+    last_command_ = next;
 
     if (!params_.enable_driver || !driver_) return;
     std::array<int, suspension_preview_v2::kSuspensionWheelCount> cmd{};
@@ -86,6 +95,11 @@ void SuspensionControlLoop::apply_command(
 
 const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) {
     ++status_.ticks;
+
+    // 周期时长封顶后再往下传。dt 异常大时（抖动、卡顿、断点），状态机里所有
+    // "累计时长"型判据都会被一次性推过阈值，速率限制也会按它放行一个大跳变。
+    // 宁可让计时少推进一拍，也不能让它跳过去
+    const double step_dt = std::clamp(dt, 0.0, params_.max_step_dt);
 
     // ---- 组装状态机输入 ----
     // 质量分取"手上这帧可用数据"的，而不是最近一次校验结果：
@@ -106,13 +120,17 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     in.pitch_rad = attitude_.pitch_rad;
     in.roll_rate = attitude_.roll_rate;
     in.pitch_rate = attitude_.pitch_rate;
-    // 只有"确实挂了驱动器"才做链路判断：没挂驱动器是"只算不下发"的软件联调模式，
-    // 不能因此判成链路丢失而误触发急停
-    in.actuator_connected =
-        (params_.enable_driver && driver_) ? driver_->is_connected() : true;
+    // require_driver 为真时，"声明要驱动却没驱动"按链路丢失上报并最终急停；
+    // 纯软件联调模式（require_driver=false）不参与该判定
+    const bool driver_ready =
+        params_.enable_driver && driver_ && driver_->is_connected();
+    in.actuator_connected = driver_ready || !params_.require_driver;
 
-    const StateMachineOutput sm = state_machine_->tick(in, dt);
+    const StateMachineOutput sm = state_machine_->tick(in, step_dt);
 
+    // 状态跃迁要在覆盖 status_ 之前捕获：回中/急停进入时要强制下发一次，
+    // 否则去重会吞掉与 last_command_ 相同的回中指令
+    const bool state_changed = (sm.state != status_.state);
     status_.state = sm.state;
     status_.mode = sm.mode;
     status_.faults = sm.faults;
@@ -130,9 +148,55 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         }
     }
 
+    // ---- 进入 Emergency 时触发硬件急停 ----
+    // 只下发目标高度 0 是不够的：那是位置伺服指令，作动器按自身速度慢慢走回零位；
+    // 硬件急停是毫秒级的切断使能/泄压，两者安全等级不同，不能互相替代。
+    // 只在跃迁进来的第一拍调用一次：200 Hz 下每拍重复调用既淹没总线，
+    // 也不符合硬件急停"一次触发即保持"的语义
+    if (sm.state == ControlState::kEmergency && state_changed) {
+        if (params_.enable_driver && driver_) {
+            if (driver_->emergency_stop()) {
+                ++status_.estop_commands_sent;
+            } else {
+                ++status_.driver_errors;
+            }
+        }
+    }
+
+    // ---- 零位标定：只在 Calibrating 阶段、姿态可信时累计 ----
+    // 必须放在输出契约分支之前：Calibrating 阶段走的是 output_zero 分支，
+    // 放到后面会被提前 return 掉，一帧都采不到。
+    // 车停在斜坡上时 IMU 读到的不是 0，把这个基准测出来，控制器才能以它为水平
+    if (sm.state == ControlState::kCalibrating && attitude_.valid) {
+        calibration_sum_roll_ += attitude_.roll_rad;
+        calibration_sum_pitch_ += attitude_.pitch_rad;
+        ++status_.calibration_samples;
+        status_.calibrated_roll_rad =
+            calibration_sum_roll_ / static_cast<double>(status_.calibration_samples);
+        status_.calibrated_pitch_rad =
+            calibration_sum_pitch_ / static_cast<double>(status_.calibration_samples);
+    }
+
     // ---- 按输出契约决定这一拍做什么 ----
     if (sm.hold_output) {
-        status_.output = ControlOutput{};  // 不重新计算，保持上一次下发值
+        // 不重新计算，保持上一次下发值。
+        // 诊断字段要填真实保持的值而不是清零：降级期间状态消息若显示全零，
+        // 会让人误以为作动器已回中，而它其实停在降级前的行程上
+        ControlOutput held_out;
+        for (int i = 0; i < kWheelCount; ++i) {
+            held_out.height_mm[static_cast<std::size_t>(i)] =
+                static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
+        }
+        status_.output = held_out;
+
+        // 控制器内部的速率限制基准仍停留在降级前的值，与实际下发值脱节。
+        // 不同步的话，恢复闭环后的第一拍会从旧值起步，产生超过速率限制的跳变
+        std::array<double, kWheelCount> held{};
+        for (int i = 0; i < kWheelCount; ++i) {
+            held[static_cast<std::size_t>(i)] =
+                static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
+        }
+        controller_->sync_reference(held);
         return status_;
     }
 
@@ -140,7 +204,10 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         ControlOutput zero;
         status_.output = zero;
         const std::array<double, kWheelCount> zeros{0.0, 0.0, 0.0, 0.0};
-        apply_command(zeros);
+        controller_->sync_reference(zeros);
+        // 首次进入该状态时强制下发：last_command_ 初值就是全零，
+        // 不强制的话回中/急停指令会被去重判为"没变化"而吞掉
+        apply_command(zeros, state_changed);
         return status_;
     }
 
@@ -150,11 +217,13 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     ci.pitch_rad = attitude_.pitch_rad;
     ci.roll_rate = attitude_.roll_rate;
     ci.pitch_rate = attitude_.pitch_rate;
+    ci.roll_offset_rad = status_.calibrated_roll_rad;
+    ci.pitch_offset_rad = status_.calibrated_pitch_rad;
     ci.lookahead_m = params_.lookahead_m;
 
     ci.profile = has_held ? &held : nullptr;
 
-    status_.output = controller_->compute(ci, dt);
+    status_.output = controller_->compute(ci, step_dt);
     if (sm.allow_control) {
         apply_command(status_.output.height_mm);
     }
@@ -180,6 +249,11 @@ bool SuspensionControlLoop::request_reset() {
         last_command_ = {0, 0, 0, 0};
         status_.commanded_mm = last_command_;
         mode_pushed_ = false;
+        calibration_sum_roll_ = 0.0;
+        calibration_sum_pitch_ = 0.0;
+        status_.calibration_samples = 0;
+        status_.calibrated_roll_rad = 0.0;
+        status_.calibrated_pitch_rad = 0.0;
 
         // 复位是外部可见的状态跃迁，立刻反映到 status_，
         // 不必等到下一个控制周期才更新

@@ -143,14 +143,28 @@ private:
                                 kRadToDeg;
         sm_.link_lost_timeout_s = declare_parameter<double>("link_lost_timeout_s",
                                                             sm_.link_lost_timeout_s);
+        // 降级后"保持上次输出"的最长时间，超时转急停回中。<=0 表示不限时，仅限调试：
+        // 正常上线必须有时限，否则输入断流时作动器会一直停在旧行程上
+        sm_.degraded_hold_timeout_s = declare_parameter<double>(
+            "degraded_hold_timeout_s", sm_.degraded_hold_timeout_s);
     }
 
     void build_loop() {
         loop_params_.lookahead_m = ctrl_.lookahead_m;
         loop_params_.enable_driver = enable_driver_;
+        // 节点层面声明了要驱动作动器：串口打不开就必须报错，
+        // 不能静默退化成"只算不下发"继续跑
+        loop_params_.require_driver = enable_driver_;
         loop_params_.max_attitude_age_ms =
             declare_parameter<double>("max_attitude_age_ms",
                                       loop_params_.max_attitude_age_ms);
+        loop_params_.max_step_dt =
+            declare_parameter<double>("max_step_dt", loop_params_.max_step_dt);
+        // 封顶值不能低于名义控制周期：否则每一拍都被钳制，累计时间推进慢于真实时间，
+        // 降级、链路超时这些基于时长的判据会成比例地延迟触发。
+        // 低控制频率下这一步尤其关键
+        const double nominal_dt = 1.0 / std::max(1.0, control_rate_hz_);
+        loop_params_.max_step_dt = std::max(loop_params_.max_step_dt, nominal_dt);
 
         loop_ = std::make_unique<suspension_control_v3::SuspensionControlLoop>(
             loop_params_, val_, sm_, ctrl_);
@@ -162,7 +176,7 @@ private:
                 RCLCPP_INFO(get_logger(), "作动器已连接: %s @ %d bps", serial_port_.c_str(),
                             baud_rate_);
             } else {
-                RCLCPP_ERROR(get_logger(), "作动器连接失败，本次只计算不下发: %s",
+                RCLCPP_ERROR(get_logger(), "作动器连接失败，节点将进入安全态: %s",
                              driver->last_error().c_str());
             }
         }
@@ -248,6 +262,11 @@ private:
         out.commanded_mm.assign(st.commanded_mm.begin(), st.commanded_mm.end());
         out.roll_deg = static_cast<float>(angle_.roll_deg);
         out.pitch_deg = static_cast<float>(angle_.pitch_deg);
+        out.calibrated_roll_deg =
+            static_cast<float>(st.calibrated_roll_rad * kRadToDeg);
+        out.calibrated_pitch_deg =
+            static_cast<float>(st.calibrated_pitch_rad * kRadToDeg);
+        out.calibration_samples = static_cast<uint32_t>(st.calibration_samples);
         out.profile_quality = st.last_validation.quality;
         out.reject_reason = static_cast<uint8_t>(st.last_validation.reason);
         out.ticks = static_cast<uint32_t>(st.ticks);
@@ -256,6 +275,7 @@ private:
         out.attitude_rejected = static_cast<uint32_t>(st.attitude_rejected);
         out.commands_sent = static_cast<uint32_t>(st.commands_sent);
         out.driver_errors = static_cast<uint32_t>(st.driver_errors);
+        out.estop_commands_sent = static_cast<uint32_t>(st.estop_commands_sent);
         status_pub_->publish(out);
         return state_changed;
     }

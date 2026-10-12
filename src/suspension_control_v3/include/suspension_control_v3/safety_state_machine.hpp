@@ -29,6 +29,10 @@ struct StateMachineParams {
     // 同一帧会被多个周期复用，按帧计数会误判
     double degrade_after_unhealthy_s{0.15};
     double recover_duration_s{0.5};       // 恢复正常多久后回闭环
+    // Degraded 状态下"保持上次输出"的最长时间，超过则转 Emergency 强制回中。
+    // 输入长时间不恢复时，作动器会一直停在降级前的行程上，那可能是 ±40 mm 的极值，
+    // 车身持续歪着比回到中位更危险。<=0 表示不限时（保持旧行为），用于纯调试
+    double degraded_hold_timeout_s{5.0};
     double max_abs_roll_rad{0.35};        // 姿态安全阈值（约 20°）
     double max_abs_pitch_rad{0.35};
     double link_lost_timeout_s{0.5};      // 作动器链路中断多久后急停

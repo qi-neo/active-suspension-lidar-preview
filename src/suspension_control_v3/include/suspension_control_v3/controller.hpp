@@ -23,7 +23,6 @@ struct ControlParams {
     // 预瞄前馈：把路面高程按比例转成目标行程
     double feedforward_gain{1.0};
     double feedforward_sign{1.0};   // 依作动器安装方向在台架上确认
-    double min_feedforward_speed{0.0};  // 预留：低于该车速可不做前馈
 
     // 输出限制
     double height_limit_mm{40.0};
@@ -31,6 +30,10 @@ struct ControlParams {
 
     // 前馈只在前方这段距离内取样，超出则退回最近的有效格
     double max_lookahead_m{5.0};
+
+    // 姿态一阶低通系数，1.0 为直通（默认）。D 项直接吃陀螺仪角速度，
+    // 低成本 IMU 的噪声会被放大成抖动，必要时调小
+    double attitude_filter_alpha{1.0};
 };
 
 class IController {
@@ -43,6 +46,12 @@ public:
     // 计算一次控制量。dt 为控制周期，用于速率限制
     virtual ControlOutput compute(const ControlInput& in, double dt) = 0;
 
+    // 把作动器实际位置同步给控制器，作为速率限制的基准。
+    // 回中、降级保持等路径不会调用 compute()，控制器内部的记忆值会与
+    // 实际下发值脱节；不同步的话，恢复闭环的第一拍会从旧值起步，
+    // 产生一个超过速率限制的跳变
+    virtual void sync_reference(const std::array<double, kWheelCount>& height_mm) = 0;
+
     virtual const ControlParams& params() const = 0;
 };
 
@@ -52,6 +61,13 @@ public:
 
     void reset() override;
     ControlOutput compute(const ControlInput& in, double dt) override;
+
+    // 把实际下发值回灌给控制器，作为速率限制的基准。
+    // 回中、急停、降级保持这些路径不会调用 compute()，控制器内部的 last_output_
+    // 会停留在旧值；不回灌的话，恢复闭环的第一拍会从旧值起步，
+    // 产生一个超过 rate_limit 的跳变
+    void sync_reference(const std::array<double, kWheelCount>& height_mm) override;
+
     const ControlParams& params() const override { return params_; }
 
     // 当前输出（供状态机决定是否下发时参考）
@@ -64,6 +80,11 @@ private:
 
     ControlParams params_;
     std::array<double, kWheelCount> last_output_{0.0, 0.0, 0.0, 0.0};
+    // 滤波后的姿态，仅用于内部递推
+    double filtered_roll_{0.0};
+    double filtered_pitch_{0.0};
+    double filtered_roll_rate_{0.0};
+    double filtered_pitch_rate_{0.0};
 };
 
 }  // namespace suspension_control_v3

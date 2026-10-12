@@ -35,6 +35,13 @@ struct ControlLoopParams {
     double max_attitude_age_ms{50.0};    // 姿态数据最大有效期
     double max_abs_attitude_rad{1.2};    // 单帧姿态的物理上限（约 69°）
     bool enable_driver{true};            // false 时只算不下发，便于纯软件联调
+    // 是否要求必须挂上驱动器。true 时"声明要驱动却没驱动"按链路丢失处理并最终急停，
+    // 避免串口打开失败后仍若无其事地继续算
+    bool require_driver{false};
+    // 单个控制周期的最大时长。定时器抖动、系统卡顿或调试断点会让某一拍的 dt
+    // 远大于控制周期，若不封顶，链路丢失计时、降级计时会被一次性推过阈值而误动作，
+    // 速率限制也会按这个大 dt 放行一个本不该有的跳变。取名义周期的若干倍
+    double max_step_dt{0.05};
 };
 
 struct ControlLoopStatus {
@@ -53,12 +60,18 @@ struct ControlLoopStatus {
     bool attitude_accepted{false};
     double attitude_age_ms{0.0};
 
+    // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
+    std::size_t calibration_samples{0};
+    double calibrated_roll_rad{0.0};
+    double calibrated_pitch_rad{0.0};
+
     std::size_t ticks{0};
     std::size_t profiles_accepted{0};
     std::size_t profiles_rejected{0};
     std::size_t attitude_rejected{0};
     std::size_t commands_sent{0};
     std::size_t driver_errors{0};
+    std::size_t estop_commands_sent{0};  // 下发给驱动器的硬件急停次数
 };
 
 class IControlLoop {
@@ -110,7 +123,8 @@ public:
     IController& controller() override { return *controller_; }
 
 private:
-    void apply_command(const std::array<double, kWheelCount>& height_mm);
+    void apply_command(const std::array<double, kWheelCount>& height_mm,
+                       bool force = false);
 
     ControlLoopParams params_;
     std::unique_ptr<RoadProfileValidator> validator_;
@@ -129,6 +143,10 @@ private:
     // 只在两个控制周期之间有效：本周期是否收到通过校验/被拒绝的剖面
     bool new_profile_valid_{false};
     bool new_profile_rejected_{false};
+
+    // 零位标定累加量
+    double calibration_sum_roll_{0.0};
+    double calibration_sum_pitch_{0.0};
 };
 
 }  // namespace suspension_control_v3

@@ -44,6 +44,11 @@ target_link_libraries(suspension_control_node suspension_control_core)
 ament_target_dependencies(suspension_control_node
   rclcpp std_msgs sensor_msgs suspension_preview_v2
 )
+# 节点用到 v2 的 RoadProfile 消息，必须显式链它的 typesupport，
+# 否则目标机上能编过但链接失败
+rosidl_get_typesupport_target(v2_typesupport suspension_preview_v2 "rosidl_typesupport_cpp")
+target_link_libraries(suspension_control_node "${v2_typesupport}")
+# 本包自己的 ControlStatus 消息同理
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(suspension_control_node "${cpp_typesupport_target}")
 

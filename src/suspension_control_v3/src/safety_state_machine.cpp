@@ -204,6 +204,13 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
             if (input_healthy && healthy_elapsed_ >= params_.recover_duration_s) {
                 // 先回中再重新进闭环，避免带着降级前的输出直接恢复控制
                 out.state = ControlState::kLeveling;
+            } else if (params_.degraded_hold_timeout_s > 0.0 &&
+                       time_in_state_ >= params_.degraded_hold_timeout_s) {
+                // 保持有时限：输入迟迟不恢复时，作动器会一直停在降级前的位置上，
+                // 那可能是 ±40 mm 的极限行程。宁可收回中位（output_zero），
+                // 也不要让车身长时间歪着跑。转 Emergency 的代价是需要显式复位——
+                // 输入断了这么久，本来就应当人工介入确认后再上电
+                out.state = ControlState::kEmergency;
             }
             break;
 

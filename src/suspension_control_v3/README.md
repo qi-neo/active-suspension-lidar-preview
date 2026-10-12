@@ -77,7 +77,17 @@ Boot ──► Calibrating ──► Leveling ──► Balancing
 
 - 连续不可信超过 `degrade_after_unhealthy_s`（默认 0.15 s）→ Degraded；
 - 恢复正常并持续 `recover_duration_s`（默认 0.5 s）→ 先回中找平，再回闭环；
+- 降级持续超过 `degraded_hold_timeout_s`（默认 5 s）仍不恢复 → Emergency 强制回中；
 - 姿态超过 `max_abs_roll_deg` / `max_abs_pitch_deg`、急停、链路中断超时 → Emergency。
+
+降级之所以有时限，是因为 Degraded 期间作动器保持的是降级前的行程，极端情况下可能是
+±`height_limit_mm` 的极限值。输入一直不回来时，让车身长时间歪着跑比回到中位更危险。
+代价是退出 Emergency 需要显式复位——输入断了这么久，本来就应当人工确认后再恢复。
+
+单拍时长由 `max_step_dt`（默认 0.05 s）封顶后再传给状态机与控制器。定时器抖动、系统卡顿
+或调试断点都可能让某一拍的 dt 远大于控制周期，若不封顶，上述所有基于时长的判据会被一次性
+推过阈值而误动作，速率限制也会按这个大 dt 放行一个本不该有的跳变。节点会保证封顶值不低于
+`control_rate_hz` 对应的名义周期，否则每一拍都被钳制反而会让判据整体延迟。
 
 急停是**锁存**的：`request_reset()` 会被拒绝，必须先 `clear_estop()`（对应实物"急停按钮已复位"）
 再复位。锁存类故障位在锁存解除前不会被周期清掉。
@@ -102,8 +112,9 @@ colcon build --packages-select suspension_control_v3
 source install/setup.bash
 ```
 
-**离线自检不需要 ROS、不需要硬件**，覆盖正常启动流程、九种坏数据拒绝、
-过期降级与恢复、姿态超限、急停锁存与复位、控制器数值共 48 项检查：
+**离线自检不需要 ROS、不需要硬件**，覆盖 14 个场景共 89 项检查：正常启动流程、九种坏数据拒绝、
+过期降级与恢复、姿态超限、急停锁存与复位、控制器数值、闭环下发去重、驱动缺失、零位标定、
+姿态低通、速率限制基准同步、降级保持时限、单拍时长封顶、急停与回中下发。
 
 ```bash
 ros2 run suspension_control_v3 control_selftest

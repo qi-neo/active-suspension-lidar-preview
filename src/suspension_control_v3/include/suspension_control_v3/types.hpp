@@ -56,6 +56,11 @@ struct ControlInput {
     double roll_rate{0.0};   // rad/s
     double pitch_rate{0.0};  // rad/s
 
+    // 零位基准：标定阶段测得的姿态偏置，控制器以它为"水平"。
+    // 车停在斜坡上时 IMU 读到的不是 0，不减掉这个偏置就会一直朝着一个方向纠偏
+    double roll_offset_rad{0.0};
+    double pitch_offset_rad{0.0};
+
     // 预瞄剖面，可为空表示本次没有可用前馈
     const suspension_preview_v2::RoadProfileFrame* profile{nullptr};
     // 前馈取样距离 (m)

@@ -63,13 +63,62 @@ RoadProfileFrame make_frame(double stamp, double amp = 0.0, double offset = 0.0)
     return f;
 }
 
-struct LoopFixture {
-    SuspensionControlLoop loop;
-    double t{0.0};
+// 假作动器：记录下发了什么、发了几次，用于验证闭环的输出链路
+class MockDriver : public suspension_preview_v2::ISuspensionDriver {
+public:
+    bool connect() override { connected_ = true; return true; }
+    void disconnect() override { connected_ = false; }
+    bool is_connected() const override { return connected_; }
 
-    LoopFixture()
-        : loop(ControlLoopParams{}, ValidatorParams{}, StateMachineParams{},
-               ControlParams{}) {}
+    bool set_mode(suspension_preview_v2::SuspensionMode mode) override {
+        mode_ = mode;
+        ++mode_calls_;
+        return connected_;
+    }
+    bool set_target_height(int /*wheel*/, int /*mm*/) override { return connected_; }
+    bool set_target_height(
+        const std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) override {
+        last_cmd_ = mm;
+        ++cmd_calls_;
+        return connected_;
+    }
+    bool emergency_stop() override {
+        ++estop_calls_;
+        return connected_;
+    }
+    const std::string& last_error() const override { return err_; }
+
+    bool connected_{false};
+    suspension_preview_v2::SuspensionMode mode_{suspension_preview_v2::SuspensionMode::Passive};
+    std::array<int, suspension_preview_v2::kSuspensionWheelCount> last_cmd_{};
+    int mode_calls_{0};
+    int cmd_calls_{0};
+    int estop_calls_{0};
+
+private:
+    std::string err_;
+};
+
+struct LoopFixture {
+    std::shared_ptr<MockDriver> driver;
+    double t{0.0};
+    SuspensionControlLoop loop;
+
+    explicit LoopFixture(bool attach_driver = false, bool require_driver = false)
+        : loop(make_params(require_driver), ValidatorParams{}, StateMachineParams{},
+               ControlParams{}) {
+        if (attach_driver) {
+            driver = std::make_shared<MockDriver>();
+            driver->connect();
+            loop.set_driver(driver);
+        }
+    }
+
+    static ControlLoopParams make_params(bool require_driver) {
+        ControlLoopParams p;
+        p.require_driver = require_driver;
+        return p;
+    }
 
     // 剖面 10 Hz，姿态与控制同频（实际 IMU 速率远高于控制环，每拍都有新值）。
     // duration 是"推进时长"，不是绝对时刻
@@ -356,6 +405,264 @@ void test_controller_math() {
 
 }  // namespace
 
+// ---------------------------------------------------------------- 场景 7
+void test_closed_loop_output() {
+    section("7. 闭环下发（假作动器）");
+    LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    // 恒定横滚，观察连续 1 秒的下发情况
+    const std::size_t ticks_before = fx.loop.status().ticks;
+    const int cmd_before = fx.driver->cmd_calls_;
+    fx.advance(1.0, 0.0, 0.1, 0.0);
+
+    check(fx.driver->cmd_calls_ > cmd_before, "闭环状态下应有指令下发");
+    check(fx.driver->last_cmd_[kFrontRight] > 0 && fx.driver->last_cmd_[kFrontLeft] < 0,
+          "横滚为正时指令应为右升左降");
+    check(fx.driver->mode_ == suspension_preview_v2::SuspensionMode::Balancing,
+          "作动器模式应切换为主动平衡");
+    check(fx.driver->mode_calls_ >= 1, "进入闭环时应下发过模式");
+
+    // 输入恒定时输出不再变化，不应每拍重发：200 Hz 下连发几百次没有意义
+    const std::size_t ticks = fx.loop.status().ticks - ticks_before;
+    const int cmds = fx.driver->cmd_calls_ - cmd_before;
+    check(static_cast<std::size_t>(cmds) < ticks / 4,
+          "输入恒定时不应每拍重复下发（去重生效）");
+    std::printf("  %zu 拍内只下发 %d 次，四轮指令 [%d, %d, %d, %d] mm\n", ticks, cmds,
+                fx.driver->last_cmd_[0], fx.driver->last_cmd_[1],
+                fx.driver->last_cmd_[2], fx.driver->last_cmd_[3]);
+}
+
+// ---------------------------------------------------------------- 场景 8
+void test_require_driver() {
+    section("8. 声明驱动但未挂驱动器");
+    LoopFixture fx(/*attach_driver=*/false, /*require_driver=*/true);
+    fx.advance(2.0);
+    check(fx.loop.status().state == ControlState::kEmergency,
+          "require_driver 为真而未挂驱动器应进入 EMERGENCY");
+    check((fx.loop.status().faults & kFaultActuatorLinkLost) != 0, "应置位链路丢失故障");
+
+    // 补挂驱动器后应能恢复
+    fx.driver = std::make_shared<MockDriver>();
+    fx.driver->connect();
+    fx.loop.set_driver(fx.driver);
+    check(fx.loop.request_reset(), "补挂驱动器后复位应成功");
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing,
+          "补挂驱动器并复位后应能重新进闭环");
+}
+
+// ---------------------------------------------------------------- 场景 9
+void test_zero_calibration() {
+    section("9. 零位标定");
+    // 车停在斜坡上：IMU 恒定读到 0.2 rad 横滚
+    LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
+    fx.advance(3.0, 0.0, 0.2, 0.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+    check(fx.loop.status().calibration_samples > 0, "标定阶段应采到样本");
+    check(std::fabs(fx.loop.status().calibrated_roll_rad - 0.2) < 0.05,
+          "标定出的横滚基准应接近真实偏置 0.2 rad");
+    std::printf("  标定基准 横滚 %.3f rad（真实 0.200）\n",
+                fx.loop.status().calibrated_roll_rad);
+
+    // 姿态等于基准时控制器不应输出修正量，否则会一直朝一个方向纠偏
+    fx.advance(1.0, 0.0, 0.2, 0.0);
+    check(std::fabs(fx.loop.status().output.roll_correction_mm) < 1e-6,
+          "姿态等于标定基准时修正量应为零");
+
+    // 姿态偏离基准时才动作
+    fx.advance(0.5, 0.0, 0.25, 0.0);
+    check(fx.loop.status().output.roll_correction_mm > 0.0,
+          "姿态高于基准时应产生正向横滚修正");
+    std::printf("  偏离 +0.05 rad -> 横滚修正 %.1f mm\n",
+                fx.loop.status().output.roll_correction_mm);
+
+    // 复位后标定基准清零
+    fx.loop.request_estop("test");
+    fx.loop.clear_estop();
+    check(fx.loop.request_reset(), "复位应成功");
+    check(fx.loop.status().calibration_samples == 0, "复位后标定样本应清零");
+}
+
+// ---------------------------------------------------------------- 场景 10
+void test_attitude_filter() {
+    section("10. 姿态低通滤波");
+    ControlParams p;
+    p.attitude_filter_alpha = 0.2;   // 强滤波
+    PreviewFeedbackController ctrl(p);
+
+    ControlParams p_raw;
+    p_raw.attitude_filter_alpha = 1.0;
+    PreviewFeedbackController raw(p_raw);
+
+    // 阶跃输入：滤波版首帧不应跳满（D 项吃角速度，噪声会被增益放大）
+    ControlInput in;
+    in.has_attitude = true;
+    in.roll_rad = 1.0;
+    const ControlOutput first = ctrl.compute(in, 0.005);
+    const ControlOutput first_raw = raw.compute(in, 0.005);
+    check(std::fabs(first.roll_correction_mm) < std::fabs(first_raw.roll_correction_mm),
+          "滤波版首帧输出应小于直通版");
+    std::printf("  阶跃首帧：直通 %.1f mm，滤波 %.1f mm\n", first_raw.roll_correction_mm,
+                first.roll_correction_mm);
+
+    // 稳态应收敛到同一值（一阶低通没有直流增益损失）
+    for (int i = 0; i < 200; ++i) ctrl.compute(in, 0.005);
+    const ControlOutput last = ctrl.compute(in, 0.005);
+    check(std::fabs(last.roll_correction_mm - first_raw.roll_correction_mm) < 1.0,
+          "稳态时滤波版与直通版应收敛到同一输出");
+
+    // 复位后滤波状态重新建立
+    ctrl.reset();
+    const ControlOutput after_reset = ctrl.compute(in, 0.005);
+    check(std::fabs(after_reset.roll_correction_mm) <
+              std::fabs(first_raw.roll_correction_mm),
+          "复位后滤波状态应重新建立");
+}
+
+// ---------------------------------------------------------------- 场景 11
+void test_reference_sync() {
+    section("11. 速率限制基准同步");
+    ControlParams p;
+    p.rate_limit_mm_per_s = 100.0;   // dt=0.005 时单周期最多 0.5 mm
+    p.height_limit_mm = 1000.0;
+    PreviewFeedbackController ctrl(p);
+
+    ControlInput in;
+    in.has_attitude = true;
+    in.roll_rad = 1.0;   // 需要 250 mm 修正量
+
+    // 不回灌实际下发值时，速率限制以内部记忆值为基准
+    const ControlOutput first = ctrl.compute(in, 0.005);
+    check(std::fabs(first.height_mm[kFrontRight]) <= 0.5 + 1e-9,
+          "首拍应从零起步并受速率限制");
+
+    // 回灌实际下发值后，下一拍必须从该值起步：
+    // 否则从降级/回中恢复时，实际已在 0 而控制器还以为在旧值，
+    // 第一拍就会产生一个远超速率限制的跳变
+    std::array<double, kWheelCount> applied{0.0, 0.0, 0.0, 0.0};
+    applied[kFrontRight] = 100.0;
+    ctrl.sync_reference(applied);
+    const ControlOutput second = ctrl.compute(in, 0.005);
+    check(second.height_mm[kFrontRight] <= 100.5 + 1e-9,
+          "回灌后应从实际下发值起步");
+    std::printf("  回灌 100 mm 后下一拍 -> %.2f mm（上限 100.50）\n",
+                second.height_mm[kFrontRight]);
+}
+
+// ---------------------------------------------------------------- 场景 12
+// DEGRADED 是"保持上次输出"，必须有时间上限：输入一直不回来时不能让作动器
+// 无限期停在降级前的行程上（可能是 ±40 mm 极限），否则车身长时间歪着跑
+void test_degraded_hold_timeout() {
+    section("12. 降级保持有时限");
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    // 给一段横滚让输出离开零位，这样"保持值"才有可观察的非零量
+    fx.advance(0.2, 0.0, 0.1, 0.0);
+    check(fx.loop.status().output.height_mm[kFrontRight] != 0.0, "闭环输出应已离开零位");
+
+    constexpr double kDt = 0.005;
+    auto idle = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.t += kDt;
+            fx.loop.step(fx.t, kDt);
+        }
+    };
+
+    idle(100);  // 0.5 s，超过剖面有效期
+    check(fx.loop.status().state == ControlState::kDegraded, "断流后先进入 DEGRADED");
+    check(fx.loop.status().hold_output, "DEGRADED 期间保持上次输出");
+
+    // 降级期间状态消息要显示真实保持的值，而不是全零——
+    // 否则会让人误以为作动器已经回中
+    fx.t += kDt;
+    fx.loop.step(fx.t, kDt);
+    check(fx.loop.status().output.height_mm[kFrontRight] != 0.0 ||
+              fx.loop.status().output.height_mm[kFrontLeft] != 0.0,
+          "降级期间诊断应显示真实保持值，而非全零");
+
+    idle(1400);  // 再 7 s，累计超过 degraded_hold_timeout_s(默认 5 s)
+    check(fx.loop.status().state == ControlState::kEmergency,
+          "断流超过保持时限应转 EMERGENCY");
+    check(fx.loop.status().output_zero, "EMERGENCY 时应强制回中");
+    std::printf("  降级 7.0 s 后转 %s\n", to_string(fx.loop.status().state));
+}
+
+// ---------------------------------------------------------------- 场景 13
+// 某一拍的 dt 可能因抖动、卡顿或调试断点变得很大。不封顶的话，状态机里所有
+// "累计时长"型判据会被一次性推过阈值而误动作，速率限制也会按它放行一个大跳变
+void test_dt_clamp() {
+    section("13. 单周期时长封顶");
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    // 抖动导致单拍 dt 达到 1 s。封顶后本拍只按 max_step_dt(0.05 s) 推进，
+    // 不足以跨过降级阈值(0.15 s)，因此不应被误判成长时间断流
+    fx.t += 1.0;
+    fx.loop.step(fx.t, 1.0);
+    check(fx.loop.status().state == ControlState::kBalancing,
+          "单次超大 dt 不应被当作长时间断流而误降级");
+
+    // 但异常确实存在：连续累积到阈值后仍须正常降级，封顶不能掩盖真实故障
+    for (int i = 0; i < 100; ++i) {
+        fx.t += 0.005;
+        fx.loop.step(fx.t, 0.005);
+    }
+    check(fx.loop.status().state == ControlState::kDegraded,
+          "持续断流累计到期后仍应正常降级");
+    std::printf("  单拍 dt=1.0 s 时按 %.2f s 计，未触发误降级\n",
+                ControlLoopParams{}.max_step_dt);
+}
+
+// ---------------------------------------------------------------- 场景 14
+// 两条真实下线路径：急停必须走硬件接口，回中指令不能被去重吞掉
+void test_emergency_output_path() {
+    section("14. 急停与回中下发");
+    LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
+    fx.advance(3.0);                  // 走完 Boot->Calibrating->Leveling
+    fx.advance(1.0, 0.0, 0.1, 0.0);   // roll=0.1，闭环输出非零
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+    check(fx.driver->last_cmd_[kFrontRight] != 0, "闭环时应有非零输出");
+
+    // 急停：位置伺服指令（目标高度 0）只能让作动器慢慢走回零位，
+    // 安全等级远低于硬件急停，两者都要有
+    fx.loop.request_estop("test");
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(fx.loop.status().state == ControlState::kEmergency, "请求急停后进入 EMERGENCY");
+    check(fx.driver->estop_calls_ == 1, "进入 EMERGENCY 应触发一次硬件急停");
+
+    bool all_zero = true;
+    for (int i = 0; i < 4; ++i) {
+        if (fx.driver->last_cmd_[static_cast<std::size_t>(i)] != 0) all_zero = false;
+    }
+    check(all_zero, "EMERGENCY 时四轮指令应为全零");
+
+    // 急停状态下不应每拍重复调用硬件急停：200 Hz 下重复调用会淹没总线，
+    // 也不符合硬件急停"一次触发即保持"的语义
+    for (int i = 0; i < 200; ++i) {
+        fx.t += 0.005;
+        fx.loop.step(fx.t, 0.005);
+    }
+    check(fx.driver->estop_calls_ == 1, "EMERGENCY 持续期间不应重复调用硬件急停");
+
+    // 关键路径：reset 会把下发记录归零，但作动器实际还停在急停前的位置。
+    // 若不强制发一次，Leveling 的回中指令会被去重判成"没变化"而吞掉，
+    // 作动器将一直停在旧行程上
+    fx.loop.clear_estop();
+    check(fx.loop.request_reset(), "解除急停后复位应成功");
+    const int cmd_before = fx.driver->cmd_calls_;
+    fx.advance(2.0);
+    fx.driver->last_cmd_[kFrontRight] = 37;
+    check(fx.driver->cmd_calls_ > cmd_before, "复位后 LEVELING 应真的下发回中指令");
+    std::printf("  硬件急停调用 %d 次，复位后回中下发 %d 次\n",
+                fx.driver->estop_calls_, fx.driver->cmd_calls_ - cmd_before);
+}
+
 int main() {
     std::printf("suspension_control_v3 离线自检\n");
     std::printf("（控制环 200 Hz，剖面 10 Hz，无 ROS / 无硬件）\n");
@@ -366,6 +673,14 @@ int main() {
     test_attitude_limit();
     test_estop_latch();
     test_controller_math();
+    test_closed_loop_output();
+    test_require_driver();
+    test_zero_calibration();
+    test_attitude_filter();
+    test_reference_sync();
+    test_degraded_hold_timeout();
+    test_dt_clamp();
+    test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d -> %s\n", g_checks, g_failed,
