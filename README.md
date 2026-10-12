@@ -1,4 +1,4 @@
-# 基于激光雷达预描的主动悬架系统
+# 基于激光雷达路面预瞄的主动悬架系统
 
 国家级大学生创新训练计划项目 · Active Suspension with LiDAR Preview
 
@@ -6,7 +6,7 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 
 ## 项目简介
 
-一套基于激光雷达预描的主动悬架系统。以 ROS2 为框架、香橙派 AI Pro 为车载计算平台，通过激光雷达提前感知
+一套基于激光雷达路面预瞄的主动悬架系统。以 ROS2 为框架、香橙派 AI Pro 为车载计算平台，通过激光雷达提前感知
 车前路面高程，融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架，在非结构化路面上抑制车身振动与姿态波动。
 
 与常见的反馈式悬架不同，本方案把路面信息提前 5 m 拿到手，从源头绕开了"先颠簸、后补偿"的滞后问题。
@@ -34,7 +34,7 @@ flowchart TB
         F["多传感器融合<br/>时间戳对齐"]
         P["路面高程提取<br/>PCL"]
         A["姿态解算<br/>互补滤波"]
-        C["分层控制<br/>LQR / PD / MPC"]
+        C["闭环控制<br/>预瞄前馈 + 姿态 PD"]
     end
     subgraph S3["执行层"]
         K["运动学解耦<br/>迟滞 PWM"]
@@ -48,10 +48,12 @@ flowchart TB
     A -->|姿态反馈| C
     C --> K --> D
     classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class F,P inrepo
+    class F,P,C,K inrepo
 ```
 
-蓝色节点是本仓库包含的部分；控制解算与执行层属于论文描述的方法，源码不在仓库中。
+蓝色节点是本仓库已实现的部分：感知与解算层由 `suspension_preview_v2` 提供，闭环控制与运动学
+解耦由 `suspension_control_v3` 提供。四路舵机的实物驱动对接在 `ISuspensionDriver` 之下，
+具体指令需按实际作动器的协议确认。
 
 ### 预瞄节点数据流
 
@@ -66,7 +68,8 @@ flowchart LR
     E --> G["话题输出<br/>/suspension/road_profile"]
 ```
 
-控制节点以 200 Hz（5 ms）周期运行，论文给出三阶状态机 `CALIBRATING → LEVELING → BALANCING`。
+控制节点以 200 Hz（5 ms）周期运行。状态机在 `suspension_control_v3` 中实现，除论文给出的
+`CALIBRATING → LEVELING → BALANCING` 外，还包含数据异常时的降级与急停处理。
 
 ## 仓库结构
 
@@ -75,6 +78,7 @@ active-suspension-lidar-preview/
 ├── src/
 │   ├── suspension_preview/        初版预瞄节点（C++）
 │   ├── suspension_preview_v2/     v2 接口化版本：核心库 + 两个节点 + 离线示例
+│   ├── suspension_control_v3/     v3 闭环控制：输入校验 + 安全状态机 + 控制器 + 离线自检
 │   └── car_balancer/              早期姿态平衡包（Python）
 └── docs/
     ├── paper/                     项目论文（文字版）
@@ -131,35 +135,85 @@ flowchart LR
 
 细节见包内 `README.md` 与 `docs/review/02-v2-upgrade-notes.md`。
 
+### suspension_control_v3 — 闭环控制与安全状态机
+
+把 v2 提取出的路面剖面真正用来控制作动器输出。控制核心不依赖 ROS、不依赖 PCL，
+可脱离整车单独编译与自检。
+
+```mermaid
+%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
+flowchart LR
+    BOOT["Boot"] --> CAL["Calibrating<br/>零位标定"]
+    CAL --> LEV["Leveling<br/>回中找平"]
+    LEV --> BAL["Balancing<br/>闭环"]
+    BAL -.->|数据异常| DEG["Degraded<br/>保持上次输出"]
+    DEG -.->|保持超时| EST["Emergency<br/>强制回中"]
+    DEG -->|数据恢复| LEV
+    BAL --> EST
+```
+
+| 接口 | 职责 |
+|------|------|
+| `IInputValidator` | 剖面校验，拒绝 9 类坏数据（NaN、超范围、质量不足、间距与轮距非法、坐标系不符、时间戳过旧、帧间跳变过大等） |
+| `ISafetyStateMachine` | 安全状态机与三分支输出契约：用控制器输出 / 保持上次值 / 强制回中 |
+| `IController` | 预瞄前馈 + 无导数 PD + 运动学解耦 + 限幅与速率限制 |
+| `IControlLoop` | 把校验、状态机、控制器、驱动器串成一条链 |
+
+几个值得单独说明的设计：
+
+- **零位标定**：静止时测姿态基准，车停在斜坡上也能正确判断"什么是水平"
+- **降级有时限**：数据断流超过 5 s 转急停回中，不让作动器一直停在旧行程上
+- **急停锁存**：需先解除急停再复位，对应实物"急停按钮已复位"
+- **单周期时长封顶**：定时抖动不会把累计时长判据一次性推过阈值造成误动作
+- **硬件急停**：进入急停时同时调用驱动器的 `emergency_stop()`，而不只是下发零位指令
+
+离线自检 89 项，不需要 ROS 与硬件：
+
+```bash
+ros2 run suspension_control_v3 control_selftest
+```
+
+包内 `tools/lqr_gain_design.py` 可按性能指标反解 LQR / 增量式 LQI 增益，
+把"试凑 kp/kd"换成按指标求解。细节见包内 `README.md`。
+
 ### car_balancer — 早期姿态平衡包
 
 `test_imu_node.py` 订阅 `/unilidar/imu`，每 50 条消息打印一次四元数、角速度、线加速度，用于联调验证。
 
-`setup.py` 引用的 `balancer_node` 未随包提供，且两条 entry point 之间缺逗号、`test_imu_node.py`
-不在包的模块目录内，因此两个入口目前都无法直接运行。问题记录见 `docs/review/01-code-review-v1.md`。
+```bash
+ros2 run car_balancer test_imu_node
+```
+
+`setup.py` 原先两条 entry point 之间缺逗号被隐式拼接，且 `test_imu_node.py` 不在模块目录内，
+两个入口都无法运行，现已修复。另一条 `balancer_node` 指向的模块未随包提供，已移除该入口。
+问题记录见 `docs/review/01-code-review-v1.md`。
 
 ## 快速开始
 
 ```bash
-# 1. 工作空间准备：把本仓库的两个包放到 src/ 下，与 unitree_lidar_sdk 同级
+# 1. 工作空间准备：把本仓库的三个包放到 src/ 下，与 unitree_lidar_sdk 同级
 mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/qi-neo/active-suspension-lidar-preview
 git clone https://github.com/unitreerobotics/unitree_lidar_sdk
 
 # 2. 编译
 cd ~/ws
-colcon build --packages-select suspension_preview suspension_preview_v2
+colcon build --packages-select suspension_preview suspension_preview_v2 suspension_control_v3
 source install/setup.bash
 
-# 3. 运行（v2 先只发话题，不接硬件）
+# 3. 运行 v2（先只发话题，不接硬件）
 ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
 ros2 topic echo /suspension/road_profile --once
+
+# 4. 运行 v3 闭环控制（不接硬件时只计算不下发）
+ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```
 
-v2 提供了不依赖 ROS 的离线验证，可直接确认解析链路是否正常：
+两个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
 
 ```bash
-ros2 run suspension_preview_v2 offline_demo
+ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，89 项检查
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`，

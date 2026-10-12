@@ -20,8 +20,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'balancer_node = car_balancer.balancer_node:main'
-            'test_imu_node = car_balancer.test_imu_node:main'  # 新增测试节点
+            # 原先两条入口之间缺逗号，被 Python 隐式拼接成一条，两个命令都不存在。
+            # balancer_node 模块未随包提供，一并去掉，只留下实际可用的那条
+            'test_imu_node = car_balancer.test_imu_node:main',
         ],
     },
 )
