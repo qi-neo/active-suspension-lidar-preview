@@ -1,0 +1,219 @@
+#include "suspension_control_v3/safety_state_machine.hpp"
+
+#include <cmath>
+
+namespace suspension_control_v3 {
+namespace {
+
+using suspension_preview_v2::SuspensionMode;
+
+// 各状态对应的输出契约
+void apply_contract(StateMachineOutput& out) {
+    out.allow_control = false;
+    out.hold_output = false;
+    out.output_zero = false;
+
+    switch (out.state) {
+        case ControlState::kBoot:
+        case ControlState::kCalibrating:
+            out.mode = SuspensionMode::Passive;
+            out.output_zero = true;
+            break;
+        case ControlState::kLeveling:
+            out.mode = SuspensionMode::Leveling;
+            out.output_zero = true;
+            break;
+        case ControlState::kBalancing:
+            out.mode = SuspensionMode::Balancing;
+            out.allow_control = true;
+            break;
+        case ControlState::kDegraded:
+            // 输入不可信时不继续用旧数据动作，但也不立刻回中，避免来回抖动
+            out.mode = SuspensionMode::Leveling;
+            out.hold_output = true;
+            break;
+        case ControlState::kEmergency:
+            out.mode = SuspensionMode::Emergency;
+            out.output_zero = true;
+            break;
+    }
+}
+
+}  // namespace
+
+const char* to_string(ControlState state) {
+    switch (state) {
+        case ControlState::kBoot:        return "BOOT";
+        case ControlState::kCalibrating: return "CALIBRATING";
+        case ControlState::kLeveling:    return "LEVELING";
+        case ControlState::kBalancing:   return "BALANCING";
+        case ControlState::kDegraded:    return "DEGRADED";
+        case ControlState::kEmergency:   return "EMERGENCY";
+    }
+    return "UNKNOWN";
+}
+
+SafetyStateMachine::SafetyStateMachine(const StateMachineParams& params)
+    : params_(params) {
+    output_.state = ControlState::kBoot;
+    apply_contract(output_);
+}
+
+void SafetyStateMachine::enter(ControlState next) {
+    if (output_.state == next) return;
+    output_.state = next;
+    time_in_state_ = 0.0;
+    // 离开异常状态时清掉对应的过程量
+    if (next != ControlState::kDegraded) {
+        healthy_elapsed_ = 0.0;
+    }
+    if (next != ControlState::kCalibrating) {
+        calibrate_count_ = 0;
+    }
+    apply_contract(output_);
+}
+
+bool SafetyStateMachine::request_reset() {
+    if (estop_latched_) return false;  // 急停未解除时不允许复位
+    attitude_latched_ = false;
+    unhealthy_elapsed_ = 0.0;
+    healthy_elapsed_ = 0.0;
+    link_lost_elapsed_ = 0.0;
+    output_.faults = kFaultNone;
+    enter(ControlState::kBoot);
+    return true;
+}
+
+void SafetyStateMachine::request_estop(const char* /*reason*/) {
+    estop_latched_ = true;
+    output_.faults |= kFaultEmergencyStop;
+}
+
+void SafetyStateMachine::clear_estop() {
+    estop_latched_ = false;
+    output_.faults &= static_cast<uint16_t>(~kFaultEmergencyStop);
+}
+
+StateMachineOutput SafetyStateMachine::tick(const SafetyInputs& in, double dt) {
+    const StateMachineOutput next = evaluate(in, dt);
+    if (next.state != output_.state) {
+        enter(next.state);
+    }
+    // 契约以外的量（faults）逐周期更新
+    output_.faults = next.faults;
+    time_in_state_ += dt;
+    return output_;
+}
+
+StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double dt) {
+    StateMachineOutput out = output_;
+
+    // 逐周期刷新的故障位可以清；锁存类的（姿态超限、急停）在锁存解除前必须保留，
+    // 否则只要当拍没有新的越限事件，故障位就会消失，上层无从判断曾经出过事
+    uint16_t clear_mask = static_cast<uint16_t>(
+        kFaultInvalidInput | kFaultStaleInput | kFaultLowQuality | kFaultActuatorLinkLost);
+    if (!attitude_latched_) clear_mask |= kFaultAttitudeExceeded;
+    if (!estop_latched_) clear_mask |= kFaultEmergencyStop;
+    out.faults &= static_cast<uint16_t>(~clear_mask);
+
+    // ---- 全局锁存类故障：优先级最高 ----
+    if (in.estop_requested) {
+        estop_latched_ = true;
+        out.faults |= kFaultEmergencyStop;
+    }
+    if (in.attitude_valid) {
+        if (std::fabs(in.roll_rad) > params_.max_abs_roll_rad ||
+            std::fabs(in.pitch_rad) > params_.max_abs_pitch_rad) {
+            attitude_latched_ = true;
+            out.faults |= kFaultAttitudeExceeded;
+        }
+    }
+    if (estop_latched_ || attitude_latched_) {
+        out.state = ControlState::kEmergency;
+        apply_contract(out);
+        return out;
+    }
+
+    // ---- 链路丢失计时 ----
+    if (in.actuator_connected) {
+        link_lost_elapsed_ = 0.0;
+        out.faults &= static_cast<uint16_t>(~kFaultActuatorLinkLost);
+    } else {
+        link_lost_elapsed_ += dt;
+        out.faults |= kFaultActuatorLinkLost;
+        if (link_lost_elapsed_ >= params_.link_lost_timeout_s) {
+            out.state = ControlState::kEmergency;
+            apply_contract(out);
+            return out;
+        }
+    }
+
+    // ---- 输入健康度统计 ----
+    // 判据只用"现有帧是否还在有效期 + 质量是否达标"：
+    // 剖面 10~20 Hz、控制环 200 Hz，同一帧本来就会被多个周期复用，
+    // "本周期没有新帧"是正常现象，不能据此降级。单帧被拒也不降级，
+    // 因为手上仍有一帧有效数据；只有它过期了才会触发。
+    const bool quality_ok = in.profile_quality >= in.min_quality;
+    const bool input_healthy = in.profile_fresh && quality_ok;
+    if (input_healthy) {
+        healthy_elapsed_ += dt;
+        unhealthy_elapsed_ = 0.0;
+    } else {
+        healthy_elapsed_ = 0.0;
+        unhealthy_elapsed_ += dt;
+    }
+
+    if (!in.profile_fresh) out.faults |= kFaultStaleInput;
+    if (!quality_ok) out.faults |= kFaultLowQuality;
+    if (in.profile_rejected) out.faults |= kFaultInvalidInput;
+
+    const bool degrade_triggered = unhealthy_elapsed_ >= params_.degrade_after_unhealthy_s;
+
+    // ---- 状态迁移 ----
+    switch (out.state) {
+        case ControlState::kBoot:
+            if (in.profile_valid && input_healthy) {
+                out.state = ControlState::kCalibrating;
+            }
+            break;
+
+        case ControlState::kCalibrating: {
+            const bool still = std::fabs(in.roll_rate) <= params_.calibrate_max_rate &&
+                               std::fabs(in.pitch_rate) <= params_.calibrate_max_rate;
+            if (input_healthy && still) ++calibrate_count_;
+            if (calibrate_count_ >= params_.calibrate_samples) {
+                out.state = ControlState::kLeveling;
+            }
+            if (degrade_triggered) out.state = ControlState::kDegraded;
+            break;
+        }
+
+        case ControlState::kLeveling:
+            if (degrade_triggered) {
+                out.state = ControlState::kDegraded;
+            } else if (input_healthy && time_in_state_ >= params_.leveling_duration_s) {
+                out.state = ControlState::kBalancing;
+            }
+            break;
+
+        case ControlState::kBalancing:
+            if (degrade_triggered) out.state = ControlState::kDegraded;
+            break;
+
+        case ControlState::kDegraded:
+            if (input_healthy && healthy_elapsed_ >= params_.recover_duration_s) {
+                // 先回中再重新进闭环，避免带着降级前的输出直接恢复控制
+                out.state = ControlState::kLeveling;
+            }
+            break;
+
+        case ControlState::kEmergency:
+            // 只能靠 request_reset() 退出
+            break;
+    }
+
+    apply_contract(out);
+    return out;
+}
+
+}  // namespace suspension_control_v3

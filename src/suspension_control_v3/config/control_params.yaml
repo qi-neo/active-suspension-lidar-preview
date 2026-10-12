@@ -1,0 +1,47 @@
+# 闭环控制节点参数。优先级：launch 传入 > 本文件 > 代码内默认值
+suspension_control_node:
+  ros__parameters:
+    # 输入输出话题
+    profile_topic: "/suspension/road_profile"
+    imu_topic: "/unilidar/imu"
+    status_topic: "/suspension/control_status"
+
+    # 控制环与状态上报频率
+    control_rate_hz: 200.0
+    status_rate_hz: 20.0
+
+    # 作动器。enable_driver 为 false 时只算不下发，便于纯软件联调
+    enable_driver: true
+    serial_port: "/dev/ttyS0"
+    baud_rate: 115200
+
+    # ---- 控制器 ----
+    lookahead_m: 1.0                # 前馈取样距离 (m)
+    kp_roll: 250.0                  # mm/rad
+    kd_roll: 30.0                   # mm/(rad/s)
+    kp_pitch: 200.0
+    kd_pitch: 25.0
+    feedforward_gain: 1.0
+    feedforward_sign: 1.0           # 依作动器安装方向在台架上确认正负
+    height_limit_mm: 40.0           # 单轮行程限幅
+    rate_limit_mm_per_s: 300.0      # 作动器速率限制
+
+    # ---- 输入校验（坏数据拒绝）----
+    max_age_ms: 200.0               # 剖面最大有效期
+    max_jump_m: 1.0                 # 相邻帧同一格的最大允许跳变
+    min_quality: 40                 # 最低质量分
+    height_abs_limit_m: 0.6         # 高程物理上限
+    expected_frame: "base_link"
+    nominal_spacing: 0.05
+    nominal_wheel_dist: 0.6
+    max_attitude_age_ms: 50.0       # 姿态最大有效期
+
+    # ---- 安全状态机 ----
+    calibrate_samples: 50           # 标定所需样本数
+    calibrate_max_rate: 0.05        # 静止判定阈值 (rad/s)
+    leveling_duration_s: 1.0        # 找平持续时间
+    degrade_after_unhealthy_s: 0.15 # 连续不可信多久后降级
+    recover_duration_s: 0.5         # 恢复正常多久后回闭环
+    max_abs_roll_deg: 20.0          # 姿态安全阈值
+    max_abs_pitch_deg: 20.0
+    link_lost_timeout_s: 0.5        # 作动器链路中断多久后急停
