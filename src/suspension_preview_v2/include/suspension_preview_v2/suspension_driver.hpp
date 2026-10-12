@@ -1,5 +1,5 @@
 // 悬架驱动接口：把"怎么驱动作动器"抽象出来，上层只调接口，不关心总线细节
-// 提供：串口实现（复用 protocol 帧格式）。未来可扩展 CAN / EtherCAT 实现。
+// 附带串口实现（复用 protocol 帧格式）。
 #pragma once
 
 #include <array>

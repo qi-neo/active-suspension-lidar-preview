@@ -1,15 +1,5 @@
-// ============================================================================
-//  road_preview_node.cpp  —  激光雷达路面预瞄节点（v2，接口化重构版）
-//
-//  本文件只负责【ROS 接线】：
-//     参数声明 -> TF 变换 -> 点云订阅 -> 交给 PreviewPipeline -> 诊断日志
-//
-//  真正的算法与输出都在核心库里（不依赖 ROS，可离线复用/单测）：
-//     IRoadProfileExtractor / GridRoadProfileExtractor        点云解析
-//     IProfileSink / RosTopicSink / SerialProfileSink         输出
-//     ISuspensionDriver / SerialSuspensionDriver              悬架驱动（供控制器调用）
-//     PreviewPipeline                                         组装
-// ============================================================================
+// 路面预瞄节点：参数声明 -> TF 变换 -> 点云订阅 -> 交给 PreviewPipeline -> 诊断日志。
+// 算法与输出都在 suspension_core 里（不依赖 ROS），本文件只做 ROS 侧的接线。
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -48,7 +38,7 @@ public:
         const std::size_t cells = static_cast<std::size_t>(
             std::lround(preview_dist_ / resolution_));
 
-        // ---- 组装管线：解析器 + 输出（ROS 话题 / 串口）----
+        // 组装管线：解析器 + 输出（话题 / 串口）
         pipeline_ = std::make_unique<PreviewPipeline>(
             suspension_preview_v2::make_grid_extractor(ep));
         pipeline_->add_sink(
@@ -69,11 +59,10 @@ public:
             RCLCPP_INFO(get_logger(), "enable_serial=false，仅发布 ROS 话题");
         }
 
-        // ---- TF ----
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        // ---- 订阅（SensorDataQoS，避免与 BEST_EFFORT 发布方不兼容）----
+        // 点云用 SensorDataQoS，才与雷达的 BEST_EFFORT 发布方匹配
         sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
             cloud_topic_, rclcpp::SensorDataQoS(),
             std::bind(&RoadPreviewNode::cloud_callback, this, std::placeholders::_1));

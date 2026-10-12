@@ -1,18 +1,7 @@
-// ============================================================================
-//  suspension_driver_node.cpp  —  悬架驱动节点
-//
-//  把 ISuspensionDriver 接口通过 ROS 话题暴露出来，方便联调/调用：
-//     /suspension/mode            std_msgs/Int32          0=被动 1=找平 2=平衡 3=紧急
-//     /suspension/target_height   std_msgs/Int32MultiArray 四轮目标高度 (mm)
-//                                 [左前, 右前, 左后, 右后]
-//     /suspension/emergency_stop  std_msgs/Bool           true=急停
-//
-//  用法示例：
-//     ros2 topic pub --once /suspension/mode std_msgs/msg/Int32 "{data: 2}"
-//     ros2 topic pub --once /suspension/target_height \
-//         std_msgs/msg/Int32MultiArray "{data: [10, -10, 5, -5]}"
-//     ros2 topic pub --once /suspension/emergency_stop std_msgs/msg/Bool "{data: true}"
-// ============================================================================
+// 悬架驱动节点：把 ISuspensionDriver 通过话题暴露出来，供联调调用（用法见包 README）。
+//   /suspension/mode            std_msgs/Int32            0 被动 1 找平 2 平衡 3 紧急
+//   /suspension/target_height   std_msgs/Int32MultiArray  四轮目标高度 mm（左前/右前/左后/右后）
+//   /suspension/emergency_stop  std_msgs/Bool             true 触发急停
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>

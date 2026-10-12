@@ -4,9 +4,8 @@
   <name>suspension_preview_v2</name>
   <version>2.0.0</version>
   <description>
-    ROS2 节点（v2）：订阅 UniLiDAR 点云，鲁棒提取左右轮迹路面高程剖面，
-    经 CRC16 校验的 int16 压缩串口协议下发给主动悬架控制器，并发布 ROS2 话题与 rviz 可视化。
-    相比 v1：修正 QoS/串口 raw 模式/TF fail-safe、中位数鲁棒估计、有效掩码、参数化、独立发送线程。
+    订阅 UniLiDAR 点云，提取左右轮迹路面高程剖面，经串口下发给主动悬架控制器，
+    并发布 ROS 话题与 rviz 可视化。点云解析、输出、悬架驱动均已封装为接口。
   </description>
   <maintainer email="qi-neo@users.noreply.github.com">qi-neo</maintainer>
   <license>MIT</license>

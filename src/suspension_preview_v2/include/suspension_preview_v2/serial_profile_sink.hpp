@@ -33,7 +33,7 @@ public:
     void send(const RoadProfileFrame& frame) override;
     const char* name() const override { return "serial"; }
 
-    // ---- 诊断计数 ----
+    // 诊断计数
     std::size_t frames_sent() const { return frames_sent_.load(); }
     std::size_t frames_dropped() const { return frames_dropped_.load(); }
     std::size_t write_errors() const { return write_errors_.load(); }

@@ -1,15 +1,5 @@
-// ============================================================================
-//  offline_demo.cpp  —  核心库离线示例（不依赖 ROS）
-//
-//  演示两件事：
-//    1) 点云解析接口 IRoadProfileExtractor 的调用方式：合成一段"带凸起的路面"
-//       点云 -> 提取剖面 -> 与真值对比，输出最大误差；
-//    2) 协议编解码的自洽性：encode_lane -> decode_frame 往返校验。
-//
-//  这也是核心库的冒烟测试：不用装 ROS、不用接硬件就能验证算法链路。
-//  编译：随包一起构建（可执行目标 offline_demo）
-//  运行：ros2 run suspension_preview_v2 offline_demo   或  直接执行该可执行文件
-// ============================================================================
+// 核心库离线示例：合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，
+// 再做一次协议编解码往返校验。不需要 ROS 与硬件，可当冒烟测试用。
 
 #include <cmath>
 #include <cstdint>
@@ -37,7 +27,7 @@ double road_height(double x) {
 int main() {
     using namespace suspension_preview_v2;
 
-    // ---------- 1) 合成点云（模拟雷达扫描车前 5 m、左右各 0.4 m 的条带）----------
+    // 1) 合成点云：模拟雷达扫描车前 5 m、左右各 0.4 m 的条带
     auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     std::mt19937 gen(42);
     std::normal_distribution<float> noise(0.0f, 0.004f);  // 4 mm 噪声
@@ -53,7 +43,7 @@ int main() {
     }
     std::printf("[demo] 合成点云: %zu 点\n", cloud->size());
 
-    // ---------- 2) 点云解析接口 ----------
+    // 2) 走解析接口
     ExtractorParams params;
     params.wheel_dist = 0.6;
     params.lane_half_width = 0.1;
@@ -71,7 +61,7 @@ int main() {
         return 1;
     }
 
-    // ---------- 3) 与真值对比 ----------
+    // 3) 与真值对比
     double max_err = 0.0;
     double sum_err = 0.0;
     int n_valid = 0;
@@ -96,7 +86,7 @@ int main() {
                     frame.left.height[k] * 1000.0, road_height(k * params.resolution) * 1000.0);
     }
 
-    // ---------- 4) 协议往返校验 ----------
+    // 4) 协议往返校验
     const auto bytes = protocol::encode_lane(protocol::kIdLaneLeft, 7, frame.left);
     protocol::DecodedFrame decoded;
     std::size_t consumed = 0;

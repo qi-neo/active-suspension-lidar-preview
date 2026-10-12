@@ -10,7 +10,7 @@
 
 namespace suspension_preview_v2 {
 
-// ---- 单格有效掩码语义 ----
+// 单格有效掩码语义
 constexpr uint8_t kInvalid = 0;       // 无效
 constexpr uint8_t kMeasured = 1;      // 实测有效
 constexpr uint8_t kInterpolated = 2;  // 插值得到（可用，精度略低）

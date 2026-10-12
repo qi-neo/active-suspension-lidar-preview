@@ -1,7 +1,5 @@
-// 点云解析接口（核心库，不依赖 ROS）
-//
-// 约定：输入点云必须【已在目标坐标系（如 base_link）下】。
-//       坐标变换（TF）属于 ROS 侧职责，放在节点里做，核心库保持纯净可离线测试。
+// 点云解析接口。约定：输入点云必须已在目标坐标系（如 base_link）下——
+// 坐标变换属于 ROS 侧职责，放在节点里做，核心库不依赖 ROS、可离线测试。
 #pragma once
 
 #include <cstddef>
@@ -27,13 +25,12 @@ struct ExtractorParams {
     bool interpolate_gaps{false};   // 是否线性插值补无效格
 };
 
-// 点云解析接口：实现可替换（网格法 / RANSAC 平面 / 神经网络 ...）
+// 点云解析接口，实现可替换（网格法、平面拟合等）
 class IRoadProfileExtractor {
 public:
     virtual ~IRoadProfileExtractor() = default;
 
-    // 从（已变换到目标坐标系的）点云提取左右轮迹高程剖面
-    // 用 PCL 惯用的 ConstPtr，可零拷贝共享输入点云
+    // 取 ConstPtr 是为了零拷贝共享输入点云
     virtual bool extract(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud,
                          RoadProfileFrame& out) = 0;
 
@@ -67,7 +64,7 @@ private:
     std::size_t invalid_cells_{0};
 };
 
-// 工厂：便于外部按需替换实现
+// 工厂函数
 std::unique_ptr<IRoadProfileExtractor> make_grid_extractor(const ExtractorParams& params);
 
 }  // namespace suspension_preview_v2

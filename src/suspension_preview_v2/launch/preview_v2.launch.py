@@ -1,15 +1,4 @@
-"""路面前瞄节点（v2）启动文件。
-
-用法示例:
-    # 默认（读 config/preview_params.yaml，串口下发开启）
-    ros2 launch suspension_preview_v2 preview_v2.launch.py
-
-    # 只发 ROS 话题，不碰串口（推荐的第一次验证方式）
-    ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
-
-    # 现场临时改参数
-    ros2 launch suspension_preview_v2 preview_v2.launch.py baud_rate:=460800 preview_dist:=8.0
-"""
+"""路面预瞄节点启动文件，用法见包 README。"""
 
 import os
 
