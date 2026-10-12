@@ -46,7 +46,7 @@ flowchart TB
     P --> C
     A --> C
     C --> K --> D
-    P -.->|"串口 0xAA55"| K
+    P -.->|串口 0xAA55| K
     classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
     class F,P inrepo
 ```
