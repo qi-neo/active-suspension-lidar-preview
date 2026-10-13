@@ -1,0 +1,87 @@
+name: ROS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上新的推送取消正在跑的旧任务，省额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: colcon build + 离线自检 (ROS ${{ matrix.ros_distribution }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distribution: [humble]
+
+    # 用 ROS 容器而不是在 runner 上装 ROS：容器是 Ubuntu 22.04，
+    # 不受 runner 镜像升级影响，且省掉一大段安装步骤
+    container:
+      image: ros:${{ matrix.ros_distribution }}-ros-base
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # colcon 会递归扫描 src/ 找包，所以放在子目录里也能被发现
+          path: src/active-suspension-lidar-preview
+
+      - name: 安装构建与依赖工具
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3-colcon-common-extensions \
+            python3-rosdep \
+            python3-pip
+          rosdep init || true
+          rosdep update
+
+      - name: rosdep 安装依赖
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          rosdep install --from-paths src --ignore-src -r -y --skip-keys libpcl-all-dev
+          # libpcl-all-dev 在部分平台没有对应 rosdep 条目，单独装
+          apt-get install -y --no-install-recommends libpcl-dev || true
+
+      - name: colcon build
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          colcon build \
+            --packages-select suspension_preview suspension_preview_v2 \
+                             suspension_control_v3 unilidar_driver car_balancer \
+            --cmake-args -Wall -Wextra -Wpedantic \
+            --event-handlers console_cohesion+
+          colcon test-result --verbose || true
+
+      # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
+      # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
+      - name: v3 控制与安全逻辑自检（89 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run suspension_control_v3 control_selftest
+
+      - name: 驱动报文解析自检（63 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run unilidar_driver decoder_selftest
+
+      - name: v2 点云解析链路离线示例
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run suspension_preview_v2 offline_demo || true
