@@ -44,10 +44,22 @@ target_link_libraries(suspension_control_node suspension_control_core)
 ament_target_dependencies(suspension_control_node
   rclcpp std_msgs sensor_msgs suspension_preview_v2
 )
-# 节点用到 v2 的 RoadProfile 消息，必须显式链它的 typesupport，
-# 否则目标机上能编过但链接失败
-rosidl_get_typesupport_target(v2_typesupport suspension_preview_v2 "rosidl_typesupport_cpp")
-target_link_libraries(suspension_control_node "${v2_typesupport}")
+# 节点用到 v2 的 RoadProfile 消息，要链它的 typesupport。
+#
+# 注意这里不能用 rosidl_get_typesupport_target(v2_ts suspension_preview_v2 ...)：
+# 那个函数只认本包 rosidl_generate_interfaces 生成的 target，跨包时
+# suspension_preview_v2 不是 CMake target，configure 阶段直接报
+#   "suspension_preview_v2 is not a CMake target"
+# 跨包要用 rosidl 导出的目标名 <包名>__rosidl_typesupport_cpp。
+# 外面套 if(TARGET) 是为了将来 ROS 改命名时不至于把配置阶段炸掉。
+set(V2_TYPESUPPORT "suspension_preview_v2__rosidl_typesupport_cpp")
+if(TARGET ${V2_TYPESUPPORT})
+  target_link_libraries(suspension_control_node ${V2_TYPESUPPORT})
+else()
+  message(STATUS
+    "未找到 ${V2_TYPESUPPORT}，RoadProfile 的 typesupport 交给 "
+    "ament_target_dependencies(suspension_preview_v2) 处理")
+endif()
 # 本包自己的 ControlStatus 消息同理
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(suspension_control_node "${cpp_typesupport_target}")
