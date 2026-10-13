@@ -1,10 +1,19 @@
 // 报文解析与解码的离线自检。不需要 ROS、不需要雷达、不需要网络。
 //
-// 编译（在本机验证过）：
-//   clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 \
-//     -I ../include \
-//     decoder_selftest.cpp ../src/protocol.cpp ../src/packet_parser.cpp \
-//     ../src/frame_decoder.cpp -o /tmp/decoder_selftest
+// 编译与运行（路径相对于仓库根目录）：
+//   clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1
+//     -I src/unilidar_driver/include
+//     src/unilidar_driver/examples/decoder_selftest.cpp
+//     src/unilidar_driver/src/protocol.cpp
+//     src/unilidar_driver/src/packet_parser.cpp
+//     src/unilidar_driver/src/frame_decoder.cpp
+//     src/unilidar_driver/src/udp_receiver.cpp
+//     -o /tmp/decoder_selftest
+//   /tmp/decoder_selftest
+//
+// 写注释时不要把命令行以反斜杠结尾：C++ 翻译阶段会先把「反斜杠 + 换行」
+// 拼接掉，// 注释会被续到下一行，GCC 的 -Wcomment 会报 multi-line comment，
+// 叠上 -Werror 直接编译失败（clang 不报，所以只在双编译器 CI 里暴露）。
 
 #include <cmath>
 #include <cstdio>
