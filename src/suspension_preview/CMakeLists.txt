@@ -24,4 +24,7 @@ ament_target_dependencies(preview_node
 install(TARGETS preview_node
   DESTINATION lib/${PROJECT_NAME})
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME})
+
 ament_package()
