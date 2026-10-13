@@ -3,8 +3,11 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/filters/pass_through.h>
-#include <pcl_ros/transforms.h>
+// PCL 1.12 里这个过滤器头是 passthrough.h，不是 pass_through.h。
+// 后者是很老的 PCL 版本的名字，写错会直接 fatal error: No such file。
+#include <pcl/filters/passthrough.h>
+// ROS2 的 pcl_ros 用 .hpp，不是 ROS1 时代的 .h
+#include <pcl_ros/transforms.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <fcntl.h>
