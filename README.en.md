@@ -35,7 +35,8 @@ flowchart TB
         L["UniLiDAR<br/>point cloud + IMU"]
         W["Wheel speed sensor"]
     end
-    subgraph S2["Processing (Orange Pi AI Pro)"]
+    subgraph S2["Driver & processing (Orange Pi AI Pro)"]
+        DR["unilidar_driver<br/>own UDP packet parsing"]
         F["Sensor fusion<br/>timestamp alignment"]
         P["Road height extraction<br/>PCL"]
         A["Attitude estimation<br/>complementary filter"]
@@ -45,7 +46,8 @@ flowchart TB
         K["Kinematic decoupling<br/>hysteresis PWM"]
         D["4 × digital servo"]
     end
-    L --> F
+    L --> DR
+    DR --> F
     W --> F
     F --> P
     F --> A
@@ -53,10 +55,11 @@ flowchart TB
     A -->|Attitude feedback| C
     C --> K --> D
     classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class F,P,C,K inrepo
+    class DR,F,P,C,K inrepo
 ```
 
-Blue nodes are implemented in this repository: perception and processing come from `suspension_preview_v2`,
+Blue nodes are implemented in this repository: packet parsing comes from `unilidar_driver`, perception and
+processing from `suspension_preview_v2`,
 closed-loop control and kinematic decoupling from `suspension_control_v3`. Driving the physical servos happens
 behind `ISuspensionDriver`; the actual command set depends on the actuator protocol in use.
 
@@ -82,16 +85,43 @@ emergency stop when input data goes bad.
 ```
 active-suspension-lidar-preview/
 ├── src/
-│   ├── suspension_preview/        First-generation preview node (C++)
-│   ├── suspension_preview_v2/     v2: core library + two nodes + offline demo
-│   ├── suspension_control_v3/     v3: input validation + safety state machine + controller + self-test
-│   └── car_balancer/              Early attitude balancing package (Python)
+│   ├── unilidar_driver/              Unitree L1 driver: own UDP protocol parsing, publishes cloud + IMU
+│   ├── suspension_preview/           First-generation preview node (C++)
+│   ├── suspension_preview_v2/        v2: core library + two nodes + offline demo
+│   ├── suspension_control_v3/        v3: input validation + safety state machine + controller + self-test
+│   └── car_balancer/                 Early attitude balancing package (Python)
 └── docs/
-    ├── paper/                     Project paper (text version, in Chinese)
-    └── review/                    v1 code review, v2 upgrade notes
+    ├── paper/                        Project paper (text version, in Chinese)
+    └── review/                       v1 code review, v2 upgrade notes
 ```
 
 ## Packages
+
+### unilidar_driver — Unitree L1 LiDAR driver
+
+Point cloud and IMU used to depend on the official `unitree_lidar_sdk` prebuilt
+static library, which hides the parsing logic and cannot be modified. This
+package reimplements the Unitree L1 UDP packet parsing and geometry conversion
+from scratch, publishing standard `/unilidar/cloud` (PointCloud2) and
+`/unilidar/imu` (Imu) topics as a drop-in replacement for the official node —
+no other package needs to change.
+
+Frames are delimited by tail marker + CRC32 only, never by total packet length:
+the byte counts in the official protocol header disagree with its own field
+definitions (3D point packet documented 1036 B, computed from fields 1044 B),
+and hardcoding a length would reject every packet from a newer firmware. The
+bundled `udp_probe` tool checks the real packet length and CRC validity on
+target hardware. The parsing core does not depend on ROS and can be built and
+self-tested on any machine.
+
+It also fixes a QoS incompatibility present in the official node: that node
+publishes as RELIABLE, while `suspension_control_v3` subscribes with
+`SensorDataQoS` (BEST_EFFORT); the two are incompatible, which shows up as
+"publishing but never receiving". This package publishes with `SensorDataQoS`
+to match both in-repo consumers.
+
+Details, on-target confirmation steps and verification scope:
+[`src/unilidar_driver/README.md`](src/unilidar_driver/README.md) (in Chinese).
 
 ### suspension_preview — first-generation preview node
 
@@ -200,33 +230,43 @@ entry, `balancer_node`, pointed at a module never shipped with the package and h
 ## Quick start
 
 ```bash
-# 1. Workspace: place the three packages under src/, alongside unitree_lidar_sdk
+# 1. Workspace: place the repository under src/
 mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/qi-neo/active-suspension-lidar-preview
-git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# To compare against the official node, also clone the official SDK
+# (the in-repo driver does not depend on it)
+# git clone https://github.com/unitreerobotics/unitree_lidar_sdk
 
 # 2. Build
 cd ~/ws
-colcon build --packages-select suspension_preview suspension_preview_v2 suspension_control_v3
+colcon build --packages-select unilidar_driver suspension_preview suspension_preview_v2 suspension_control_v3
 source install/setup.bash
 
-# 3. Run v2 (topic output only, no hardware attached)
+# 3. With real hardware: probe first to confirm packets arrive and check the real packet length
+ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex
+
+# 4. Run the driver as a drop-in replacement for the official node
+ros2 launch unilidar_driver unilidar_driver.launch.py
+
+# 5. Run v2 (topic output only, no hardware attached)
 ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
 ros2 topic echo /suspension/road_profile --once
 
-# 4. Run v3 closed-loop control (compute only, nothing sent to hardware)
+# 6. Run v3 closed-loop control (compute only, nothing sent to hardware)
 ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```
 
-Both C++ packages ship offline checks that confirm the pipeline without any hardware:
+All three C++ packages ship offline checks that confirm the pipeline without any hardware:
 
 ```bash
+ros2 run unilidar_driver decoder_selftest         # packet parsing, 63 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_control_v3 control_selftest    # control and safety logic, 89 checks
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
-`tf2_ros`, and the [Unitree Lidar SDK](https://github.com/unitreerobotics/unitree_lidar_sdk).
+`tf2_ros`. The `unilidar_driver` package additionally needs `tf2` and `tf2_ros`, and does **not**
+depend on the Unitree Lidar SDK.
 
 ## Key parameters
 

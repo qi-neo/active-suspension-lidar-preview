@@ -32,7 +32,8 @@ flowchart TB
         L["UniLiDAR<br/>点云 + IMU"]
         W["轮速传感器"]
     end
-    subgraph S2["解算层（香橙派 AI Pro）"]
+    subgraph S2["驱动与解算层（香橙派 AI Pro）"]
+        DR["unilidar_driver<br/>自研 UDP 报文解析"]
         F["多传感器融合<br/>时间戳对齐"]
         P["路面高程提取<br/>PCL"]
         A["姿态解算<br/>互补滤波"]
@@ -42,7 +43,8 @@ flowchart TB
         K["运动学解耦<br/>迟滞 PWM"]
         D["四路数字舵机"]
     end
-    L --> F
+    L --> DR
+    DR --> F
     W --> F
     F --> P
     F --> A
@@ -50,12 +52,12 @@ flowchart TB
     A -->|姿态反馈| C
     C --> K --> D
     classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class F,P,C,K inrepo
+    class DR,F,P,C,K inrepo
 ```
 
-蓝色节点是本仓库已实现的部分：感知与解算层由 `suspension_preview_v2` 提供，闭环控制与运动学
-解耦由 `suspension_control_v3` 提供。四路舵机的实物驱动对接在 `ISuspensionDriver` 之下，
-具体指令需按实际作动器的协议确认。
+蓝色节点是本仓库已实现的部分：感知层的报文解析由 `unilidar_driver` 提供，感知与解算层由
+`suspension_preview_v2` 提供，闭环控制与运动学解耦由 `suspension_control_v3` 提供。四路舵机的
+实物驱动对接在 `ISuspensionDriver` 之下，具体指令需按实际作动器的协议确认。
 
 ### 预瞄节点数据流
 
@@ -78,16 +80,36 @@ flowchart LR
 ```
 active-suspension-lidar-preview/
 ├── src/
-│   ├── suspension_preview/        初版预瞄节点（C++）
-│   ├── suspension_preview_v2/     v2 接口化版本：核心库 + 两个节点 + 离线示例
-│   ├── suspension_control_v3/     v3 闭环控制：输入校验 + 安全状态机 + 控制器 + 离线自检
-│   └── car_balancer/              早期姿态平衡包（Python）
+│   ├── unilidar_driver/             宇树 L1 雷达驱动：自研 UDP 协议解析，发布点云与 IMU
+│   ├── suspension_preview/          初版预瞄节点（C++）
+│   ├── suspension_preview_v2/       v2 接口化版本：核心库 + 两个节点 + 离线示例
+│   ├── suspension_control_v3/       v3 闭环控制：输入校验 + 安全状态机 + 控制器 + 离线自检
+│   └── car_balancer/                早期姿态平衡包（Python）
 └── docs/
-    ├── paper/                     项目论文（文字版）
-    └── review/                    v1 代码审查报告、v2 升级说明
+    ├── paper/                       项目论文（文字版）
+    └── review/                      v1 代码审查报告、v2 升级说明
 ```
 
 ## 模块说明
+
+### unilidar_driver — 宇树 L1 激光雷达驱动
+
+点云与 IMU 原本依赖官方 `unitree_lidar_sdk` 的预编译静态库，看不到也改不了
+解析逻辑。这个包自行实现了 Unitree L1 的 UDP 报文解析与几何换算，发布标准
+`/unilidar/cloud`（PointCloud2）与 `/unilidar/imu`（Imu）话题，可直接顶替
+官方节点，其他包零改动。
+
+报文定界只用「帧尾标识 + CRC32」，不拿整包长度当判据——官方协议头文件里的
+字节数注释与其自身字段并不一致（3D 点云整包注释 1036，按字段实算 1044），
+硬编码长度会把新固件的包整批判坏。配套的 `udp_probe` 探针用来在真机上核对
+真实包长与 CRC 是否成立。解析核心不依赖 ROS，可在任意机器上编译自检。
+
+相对官方节点还修掉一处 QoS 不兼容：官方按 RELIABLE 发布，而 v3 控制节点用
+`SensorDataQoS`（BEST_EFFORT）订阅，两者不兼容会表现为「明明在发却收不到」。
+本包统一按 `SensorDataQoS` 发布。
+
+细节、实机确认步骤与验证范围见
+[`src/unilidar_driver/README.md`](src/unilidar_driver/README.md)。
 
 ### suspension_preview — 初版预瞄节点
 
@@ -193,33 +215,41 @@ ros2 run car_balancer test_imu_node
 ## 快速开始
 
 ```bash
-# 1. 工作空间准备：把本仓库的三个包放到 src/ 下，与 unitree_lidar_sdk 同级
+# 1. 工作空间准备：把本仓库放到 src/ 下
 mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/qi-neo/active-suspension-lidar-preview
-git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# 如果还想用官方节点做对照，再 clone 官方 SDK（本仓库的驱动不依赖它）
+# git clone https://github.com/unitreerobotics/unitree_lidar_sdk
 
 # 2. 编译
 cd ~/ws
-colcon build --packages-select suspension_preview suspension_preview_v2 suspension_control_v3
+colcon build --packages-select unilidar_driver suspension_preview suspension_preview_v2 suspension_control_v3
 source install/setup.bash
 
-# 3. 运行 v2（先只发话题，不接硬件）
+# 3. 接真实雷达：先跑探针确认能收到、真实包长是多少（详见驱动包 README）
+ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex
+
+# 4. 跑驱动，顶替官方节点
+ros2 launch unilidar_driver unilidar_driver.launch.py
+
+# 5. 运行 v2 预瞄（先只发话题，不接硬件）
 ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
 ros2 topic echo /suspension/road_profile --once
 
-# 4. 运行 v3 闭环控制（不接硬件时只计算不下发）
+# 6. 运行 v3 闭环控制（不接硬件时只计算不下发）
 ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```
 
-两个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
+四个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
 
 ```bash
+ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
 ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，89 项检查
 ```
 
-依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`，
-以及 [Unitree Lidar SDK](https://github.com/unitreerobotics/unitree_lidar_sdk)。
+依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
+雷达驱动包 `unilidar_driver` 额外需要 `tf2`、`tf2_ros`，**不依赖** Unitree Lidar SDK。
 
 ## 关键参数
 
@@ -267,7 +297,16 @@ v1 在 115200 bps 下的上限与雷达 10–20 Hz 的输出正好对冲，这�
 
 **收不到点云，节点启动后没有输出**
 订阅端 QoS 与发布端不匹配。雷达通常以 `BEST_EFFORT` 发布，订阅端必须用 `SensorDataQoS`；
-v1 使用默认 QoS（`RELIABLE`），是收不到数据的常见原因。
+v1 使用默认 QoS（`RELIABLE`），是收不到数据的常见原因。反过来也成立：`unilidar_driver`
+统一按 `SensorDataQoS` 发布，就是为了与 v3 控制节点的订阅端对齐。
+
+**点云与 IMU 都收不到，但探针显示雷达在发包**
+先跑 `ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex` 核对本机 IP、端口
+与雷达的目标地址是否对应；再看探针汇总里「整包长度分布」是否与驱动预期一致。
+
+**IMU 姿态看起来是错的**
+大概率是四元数分量顺序。官方未定死 `quaternion[4]` 的排列，官方 ROS2 包内部两种顺序都用过。
+把雷达静止水平放置，正确的顺序下 `w` 接近 ±1、其余接近 0；判定方法见驱动包 README。
 
 **串口打开失败**
 设备权限问题。把当前用户加入 `dialout` 组后重新登录：`sudo usermod -aG dialout $USER`，

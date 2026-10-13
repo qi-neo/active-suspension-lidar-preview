@@ -1,0 +1,37 @@
+# Unitree L1 驱动参数。优先级：launch 传入 > 本文件 > 代码内默认值。
+# 默认话题名与仓库内 v2 预瞄节点、v3 控制节点的订阅保持一致，可直接替换官方节点。
+unilidar_driver_node:
+  ros__parameters:
+    # ---- 网络 ----
+    # 本机监听地址。留空则监听所有网卡，排查阶段建议先留空
+    local_ip: ""
+    local_port: 6201
+    # 只接受来自这个地址的数据，留空表示不过滤
+    source_ip: ""
+
+    # ---- 话题与坐标系 ----
+    cloud_frame: "unilidar_lidar"
+    cloud_topic: "/unilidar/cloud"
+    imu_frame: "unilidar_imu"
+    imu_topic: "/unilidar/imu"
+
+    # ---- 点云 ----
+    # 多少条扫描线合成一帧点云。雷达约 180Hz 出扫描线，
+    # 18 条约合 10Hz 的点云，与 v2 预瞄节点的输入节奏匹配
+    cloud_scan_num: 18
+    range_min: 0.0              # 有效最近距离 m
+    range_max: 100.0            # 有效最远距离 m
+
+    # ---- IMU ----
+    # 固件里四元数分量的排列官方未定死，wxyz 或 xyzw。
+    # 判定方法：雷达静止水平放置，打印出的 w 应接近 ±1 而其余接近 0
+    quaternion_order: "wxyz"
+
+    # true 用本机时间打时间戳，false 用雷达硬件时间戳
+    use_system_timestamp: true
+
+    # ---- 运行 ----
+    publish_tf: true            # 广播 imu_frame -> cloud_frame 与实时姿态
+    poll_period_ms: 2           # 轮询收包的周期
+    recv_timeout_ms: 1          # 单次 recv 超时
+    diag_period_s: 5.0          # 诊断日志周期
