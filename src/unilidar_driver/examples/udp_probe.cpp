@@ -5,9 +5,13 @@
 //   2. 帧头、帧尾、CRC 三个判据在这批数据上是否成立；
 //   3. 有没有收到 UDP 包（很多时候其实是 IP 或端口配错了）。
 //
-// 编译：
-//   clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I ../include \
-//     udp_probe.cpp ../src/protocol.cpp ../src/packet_parser.cpp ../src/udp_receiver.cpp \
+// 编译（路径相对于仓库根目录）：
+//   clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1
+//     -I src/unilidar_driver/include
+//     src/unilidar_driver/examples/udp_probe.cpp
+//     src/unilidar_driver/src/protocol.cpp
+//     src/unilidar_driver/src/packet_parser.cpp
+//     src/unilidar_driver/src/udp_receiver.cpp
 //     -o /tmp/udp_probe
 // 用法：
 //   /tmp/udp_probe --port 6201 --seconds 5
