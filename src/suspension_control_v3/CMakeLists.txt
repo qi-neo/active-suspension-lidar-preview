@@ -34,6 +34,24 @@ target_include_directories(suspension_control_core PUBLIC
 )
 ament_target_dependencies(suspension_control_core suspension_preview_v2)
 
+# v2 的头文件目录：显式补上。
+# input_validator.hpp 直接 include 了 suspension_preview_v2/types.hpp，
+# 但 ament_export_include_directories 传过来的路径在这种「跨包 + 静态库」
+# 组合下不一定能被本包的编译命令带上，表现为
+#   fatal error: suspension_preview_v2/types.hpp: No such file or directory
+# find_package 会把 <pkg>_DIR 设为 <前缀>/share/<pkg>/cmake，
+# 上溯两级就是包前缀，其下的 include 即头文件所在。
+if(suspension_preview_v2_DIR)
+  get_filename_component(_v2_prefix "${suspension_preview_v2_DIR}/../.." ABSOLUTE)
+  set(_v2_include "${_v2_prefix}/include")
+  if(EXISTS "${_v2_include}")
+    target_include_directories(suspension_control_core PUBLIC "${_v2_include}")
+    message(STATUS "v2 include dir: ${_v2_include}")
+  else()
+    message(WARNING "未找到 v2 头文件目录：${_v2_include}")
+  endif()
+endif()
+
 # 离线自检：不依赖 ROS 运行时，可直接执行
 add_executable(control_selftest examples/control_selftest.cpp)
 target_link_libraries(control_selftest suspension_control_core)
