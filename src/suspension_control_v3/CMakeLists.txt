@@ -60,6 +60,21 @@ target_link_libraries(control_selftest suspension_control_core)
 # ROS 节点
 add_executable(suspension_control_node src/suspension_control_node.cpp)
 target_link_libraries(suspension_control_node suspension_control_core)
+
+# 本包用到了 v2 的 make_serial_driver（suspension_core 里的实现）。
+# ament_export_libraries 声明的名字在跨包静态库场景下不一定进入链接行，
+# 表现为链接期 undefined reference；这里按包前缀显式定位并链上。
+find_library(V2_CORE_LIB
+  NAMES suspension_core
+  PATHS "${_v2_prefix}/lib"
+  NO_DEFAULT_PATH)
+if(V2_CORE_LIB)
+  target_link_libraries(suspension_control_node "${V2_CORE_LIB}")
+  message(STATUS "v3: 链接 v2 的 suspension_core = ${V2_CORE_LIB}")
+else()
+  message(WARNING "v3: 未找到 ${_v2_prefix}/lib 下的 suspension_core，"
+                  "若出现 undefined reference 请检查 v2 是否安装该库")
+endif()
 ament_target_dependencies(suspension_control_node
   rclcpp std_msgs sensor_msgs suspension_preview_v2
 )
