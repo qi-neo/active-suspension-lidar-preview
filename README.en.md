@@ -131,7 +131,10 @@ Details, on-target confirmation steps and verification scope:
 > [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md),
 > a methodology write-up on writing sensor drivers (in Chinese).
 
-### suspension_preview — first-generation preview node
+### suspension_preview — first-generation preview node (historical)
+
+> Superseded by `suspension_preview_v2` and kept to reproduce the behaviour described
+> in the paper. Use v2 for anything new.
 
 A single file, `src/preview_node.cpp`, carries the whole chain from point cloud to UART:
 
@@ -142,6 +145,9 @@ A single file, `src/preview_node.cpp`, carries the whole chain from point cloud 
 5. Stream it over UART (115200 bps) using a custom `0xAA55` protocol.
 
 Parameters are macros at the top of the file, so any change requires recompilation.
+Four known defects (subscriber QoS, UART not set to raw mode, no TF failure fallback,
+invalid cells silently zeroed) are all fixed in v2; see the in-package `README.md` and
+`docs/review/01-code-review-v1.md`.
 
 ### suspension_preview_v2 — interface-based rewrite
 
