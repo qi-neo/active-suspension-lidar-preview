@@ -21,6 +21,33 @@
 - `suspension_preview`（v1）补齐包内 README 与最小 launch，并明确标注为
   历史版本、新用途请用 v2。此前该包只有源码与 CMakeLists，无法判断用法。
 
+### 修复
+
+首次接入 CI 后暴露的一批真实缺陷。这些包此前从未在干净环境编译过，
+只在开发机上凑着能过：
+
+- `suspension_preview`：只 `find_package(pcl_ros)` 靠传递依赖拿 PCL，
+  拿不到头文件路径。补 `find_package(PCL REQUIRED COMPONENTS common filters)`
+  与 `${PCL_INCLUDE_DIRS}` / `${PCL_LIBRARIES}`；`package.xml` 补
+  `libpcl-all-dev` 声明。
+- `suspension_preview`：`pcl/filters/pass_through.h` 文件名写错
+  （PCL 只有 `passthrough.h`）；`pcl_ros/transforms.h` 应为 `.hpp`。
+- `suspension_preview_v2`：`road_profile_extractor.cpp` 同样的
+  `pass_through.h` 错误。
+- `suspension_preview_v2`：`ament_export_libraries` 导出了 `suspension_core`
+  却没 `install()`，导致 `suspension_control_v3` 在 configure 阶段报
+  "exports the library 'suspension_core' which couldn't be found"。
+- `suspension_control_v3`：用 `rosidl_get_typesupport_target` 引用跨包消息，
+  而该函数只认本包 `rosidl_generate_interfaces` 生成的 target；
+  改用 rosidl 导出的 `suspension_preview_v2__rosidl_typesupport_cpp`。
+- `suspension_control_v3` 节点：`ctrl_.lookahead_m` 并不存在
+  （`lookahead_m` 属于 `ControlLoopParams`，`ControlParams` 里对应的是
+  `max_lookahead_m`，两者不是一个东西）；`make_serial_driver` 返回
+  `unique_ptr` 而 `set_driver` 收 `shared_ptr`。
+
+现在 CI 上 `colcon build` 五个包全过，并跑通 v3 的 89 项自检、
+驱动的 63 项自检、v2 的离线链路示例。
+
 ### 修改
 
 - `unilidar_driver` 已拆出为独立仓库 [qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver)。
