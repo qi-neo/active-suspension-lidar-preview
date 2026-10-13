@@ -336,6 +336,8 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 
 [MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
 
+版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
+
 ## English Abstract
 
 **Active Suspension with LiDAR Preview** — a National College Student Innovation Training Program.
