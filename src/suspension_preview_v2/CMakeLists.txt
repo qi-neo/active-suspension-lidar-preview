@@ -73,6 +73,17 @@ target_link_libraries(offline_demo suspension_core ${PCL_LIBRARIES})
 install(TARGETS road_preview_node suspension_driver_node offline_demo
   DESTINATION lib/${PROJECT_NAME})
 
+# suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，
+# 而 v3 通过 find_package(suspension_preview_v2) 依赖它。只导出不安装的话，
+# 下游包 configure 阶段会报
+#   Package 'suspension_preview_v2' exports the library 'suspension_core'
+#   which couldn't be found
+# 静态库只需要 ARCHIVE，另外两项是为将来改成动态库留的。
+install(TARGETS suspension_core
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
 
