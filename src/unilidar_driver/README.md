@@ -2,14 +2,21 @@
 
 自行实现的 Unitree L1（宇树 4D LiDAR）ROS2 驱动：收 UDP 报文、解成标准
 `PointCloud2` 与 `Imu` 话题。**不链接官方静态库 `libunitree_lidar_sdk.a`**，
-报文解析与几何换算全部自己实现，协议字段布局依据官方开源的
-`unitree_lidar_protocol.h`（BSD-3-Clause）重述。
+报文解析逻辑全部自己实现；协议字段布局与点云几何公式依据官方开源的
+`unitree_lidar_protocol.h` 与 `unitree_lidar_utilities.h`（BSD-3-Clause）重述，
+两处的来源在代码注释与仓库根目录 README 的「协议来源」一节均有注明。
+
+> 想看**方法论**（驱动职责边界、四层架构、帧定界怎么选、各层的坑、
+> 不接硬件怎么验证），读
+> [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md)。
+> 本文只讲这个包本身怎么用。
 
 ## 为什么要自己写
 
-仓库里 v1 预瞄节点、v2 预瞄节点订阅 `/unilidar/cloud`，v3 控制节点订阅
-`/unilidar/imu`，这两个话题原本只能靠官方 `unitree_lidar_ros2` 节点提供，
-而官方节点分发的是预编译 `.a`，既看不到解析逻辑也没法改。自己写之后：
+主动悬架项目 [active-suspension-lidar-preview](https://github.com/qi-neo/active-suspension-lidar-preview)
+里，v1/v2 预瞄节点订阅 `/unilidar/cloud`，v3 控制节点订阅 `/unilidar/imu`，
+这两个话题原本只能靠官方 `unitree_lidar_ros2` 节点提供，而官方节点分发的是
+预编译 `.a`，既看不到解析逻辑也没法改。自己写之后：
 
 - 解析逻辑可读、可改、可离线自检；
 - 去掉对 `libunitree_lidar_sdk.a` 的依赖，交叉编译只依赖标准库；
@@ -47,16 +54,17 @@ ros2 launch unilidar_driver unilidar_driver.launch.py
 
 | 话题 | 消息类型 | 谁在用 |
 |---|---|---|
-| `/unilidar/cloud` | `sensor_msgs/PointCloud2` | v1 / v2 预瞄节点 |
-| `/unilidar/imu` | `sensor_msgs/Imu` | v3 控制节点 |
+| `/unilidar/cloud` | `sensor_msgs/PointCloud2` | 悬架仓库的 v1 / v2 预瞄节点 |
+| `/unilidar/imu` | `sensor_msgs/Imu` | 悬架仓库的 v3 控制节点 |
 
-脱离 ROS 的快速自检（任何有 clang 的机器）：
+脱离 ROS 的快速自检（任何有 clang 的机器，路径相对于仓库根目录）：
 
 ```bash
-clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I include \
-  examples/decoder_selftest.cpp src/protocol.cpp src/packet_parser.cpp \
-  src/frame_decoder.cpp src/udp_receiver.cpp -o /tmp/decoder_selftest \
-  && /tmp/decoder_selftest
+clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
+  src/unilidar_driver/examples/decoder_selftest.cpp \
+  src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
+  src/unilidar_driver/src/frame_decoder.cpp src/unilidar_driver/src/udp_receiver.cpp \
+  -o /tmp/decoder_selftest && /tmp/decoder_selftest
 ```
 
 ## 上手第一步：先确认包长
@@ -76,10 +84,11 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I include \
 接上雷达先跑探针核对实际情况：
 
 ```bash
-# 编译探针
-clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I include \
-  examples/udp_probe.cpp src/protocol.cpp src/packet_parser.cpp \
-  src/udp_receiver.cpp -o /tmp/udp_probe
+# 编译探针（路径相对于仓库根目录）
+clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
+  src/unilidar_driver/examples/udp_probe.cpp \
+  src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
+  src/unilidar_driver/src/udp_receiver.cpp -o /tmp/udp_probe
 
 # 监听 5 秒并打印汇总。先别指定 --ip，确认能收到再说
 /tmp/udp_probe --port 6201 --seconds 5 --hex

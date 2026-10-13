@@ -1,3 +1,25 @@
+// Copyright (c) 2024, Unitree Robotics
+//
+// 本文件的点云解码逻辑派生自 unitree_lidar_sdk2 的
+// unitree_lidar_sdk/include/unitree_lidar_utilities.h 中的函数
+// parseFromPacketToPointCloud，该项目以 BSD-3-Clause 发布。按该许可证第 1 条，
+// 此处保留原始版权声明。完整许可证与派生范围说明见仓库根目录的 NOTICE。
+//
+// 派生自官方的部分：
+//   - 测距值换算 range_scale * (ranges[j] + range_bias)；
+//   - 水平角与垂直角的迭代方式（angle_min + alpha_angle_bias 起、
+//     com_horizontal_angle_start + theta_angle_bias 起，按各自步长推进）；
+//   - 无效点判定（ranges[j] < 1）与两道距离门限；
+//   - 由双棱镜扫描机构几何关系推出 XYZ 坐标的那一组公式。
+//
+// 本文件自行增加的部分：
+//   - 三道越界保护：point_num 上限、读到 point_num 本身所需的最小包长、
+//     点数组必须整段落在报文内；
+//   - 包长不足时先整体清零再拷入实际长度的字节，避免读到上一次调用的栈残留；
+//   - 按原因分类的统计计数（无效距离、帧内门限、用户门限、长度不符等）；
+//   - 时间戳两种取值模式（本机时间 / 雷达硬件时间戳）；
+//   - IMU 四元数分量顺序参数化。
+
 #include "unilidar_driver/frame_decoder.hpp"
 
 #include <algorithm>

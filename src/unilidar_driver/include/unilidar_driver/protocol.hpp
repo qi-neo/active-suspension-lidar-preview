@@ -1,8 +1,19 @@
-// Unitree L1 / L2 雷达报文结构定义。
+// Copyright (c) 2024, Unitree Robotics
 //
-// 字段布局参考 unitree_lidar_sdk2 的 unitree_lidar_protocol.h（BSD-3-Clause），
-// 本文件按其公开字段自行重述，运行时不链接官方静态库 libunitree_lidar_sdk.a。
-// 所有结构体按 1 字节打包，避免不同编译器的成员对齐方式导致偏移漂移。
+// 本文件的报文结构定义派生自 unitree_lidar_sdk2 的
+// unitree_lidar_sdk/include/unitree_lidar_protocol.h，该项目以 BSD-3-Clause
+// 发布。按该许可证第 1 条，此处保留原始版权声明。完整许可证与派生范围说明
+// 见仓库根目录的 NOTICE。
+//
+// 相对原始头文件的改动：
+//   - 改用 C++ 的 struct 写法，并统一按 1 字节打包（#pragma pack(push, 1)），
+//     消除不同编译器成员对齐方式导致的偏移漂移；
+//   - ranges 与 intensities 的容量由字面量 300 改为命名常量 kMaxPoints3D；
+//   - 补充了帧定界与越界校验所需的常量：帧头与帧尾的标识字节、各报文类型、
+//     帧头帧尾长度，以及由字段实算出的整包长度 kPointPacketSize / kImuPacketSize；
+//   - 增加 crc32() 声明（标准 CRC-32/ISO-HDLC，非厂商私有算法）。
+//
+// 运行时不链接、不调用、不 include 官方的任何文件。
 
 #pragma once
 
