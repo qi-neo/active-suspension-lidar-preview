@@ -39,9 +39,10 @@ ament_target_dependencies(suspension_control_core suspension_preview_v2)
 # 但 ament_export_include_directories 传过来的路径在这种「跨包 + 静态库」
 # 组合下不一定能被本包的编译命令带上，表现为
 #   fatal error: suspension_preview_v2/types.hpp: No such file or directory
-# find_package 会把 <pkg>_DIR 设为 <前缀>/share/<pkg>/cmake，
-# 上溯两级就是包前缀，其下的 include 即头文件所在。
-get_filename_component(_v2_prefix "${suspension_preview_v2_DIR}/../.." ABSOLUTE)
+# find_package 会把 <pkg>_DIR 设为 <前缀>/share/<pkg>/cmake。
+# 要回到包前缀得上溯三级：cmake -> <pkg> -> share -> <前缀>。
+# （上溯两级只能到 /share，实测踩过这个坑。）
+get_filename_component(_v2_prefix "${suspension_preview_v2_DIR}/../../.." ABSOLUTE)
 message(STATUS "v3: suspension_preview_v2_DIR = ${suspension_preview_v2_DIR}")
 message(STATUS "v3: v2 前缀 = ${_v2_prefix}")
 # 两个都加：suspension_preview_v2/types.hpp 按 <前缀>/include 找，
