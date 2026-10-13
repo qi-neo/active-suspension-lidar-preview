@@ -94,7 +94,12 @@ bool decodePointCloud(const std::vector<std::uint8_t>& frame, const DecodeParams
     const float sin_theta = std::sin(theta);
     const float cos_theta = std::cos(theta);
 
-    // 双棱镜扫描机构的几何关系：把测距值投到雷达坐标系
+    // 双棱镜扫描机构的几何关系：把测距值投到雷达坐标系。
+    // 这一组公式取自官方开源实现 parseFromPacketToPointCloud
+    // （unitree_lidar_sdk2/unitree_lidar_sdk/include/unitree_lidar_utilities.h，
+    //  BSD-3-Clause）。双棱镜机构的解只有这一种写法，没有第二选择；
+    // 此处按可读性重排，并改用本文件的局部变量名。原始测距值与标定参数
+    // 仍按报文字段解释，未做任何改动。
     const float A =
         (-cos_beta_sin_xi + sin_beta_cos_xi * sin_alpha) * range + d.param.b_axis_dist;
     const float B = cos_alpha * cos_xi * range;
