@@ -15,6 +15,11 @@
   `/unilidar/imu` 两个话题，不链接官方静态库。此前这两个话题只能靠官方
   `unitree_lidar_ros2` 节点的预编译 `.a` 提供。
 - 英文版 README（`README.en.md`）。
+- 持续集成（`.github/workflows/ros-ci.yml`）：ROS Humble 容器 + `colcon build`，
+  并在 CI 上真正跑三个离线自检（v3 控制 89 项、驱动解析 63 项、v2 点云链路）。
+  这是 v2 / v3 / 驱动三个包首次获得编译验证。
+- `suspension_preview`（v1）补齐包内 README 与最小 launch，并明确标注为
+  历史版本、新用途请用 v2。此前该包只有源码与 CMakeLists，无法判断用法。
 
 ### 修改
 
