@@ -108,6 +108,12 @@ active-suspension-lidar-preview/
 `SensorDataQoS`（BEST_EFFORT）订阅，两者不兼容会表现为「明明在发却收不到」。
 本包统一按 `SensorDataQoS` 发布。
 
+> **本包已独立成仓**：[qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver)。
+> 雷达驱动是可复用资产，与主动悬架没有必然关系，故单独维护。本仓库内保留一份副本，
+> 便于单独 clone 本仓库时直接 `colcon build`；**改动请以独立仓库为准，再同步回来**。
+> 独立仓库另附 [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md)，
+> 讲驱动编写的通用思路（职责边界、四层架构、帧定界怎么选、不接硬件怎么验证）。
+
 细节、实机确认步骤与验证范围见
 [`src/unilidar_driver/README.md`](src/unilidar_driver/README.md)。
 
@@ -220,6 +226,8 @@ mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/qi-neo/active-suspension-lidar-preview
 # 如果还想用官方节点做对照，再 clone 官方 SDK（本仓库的驱动不依赖它）
 # git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# 雷达驱动另有独立仓库（含驱动编写思路文档），二者内容一致，按需选用：
+# git clone https://github.com/qi-neo/unilidar-driver
 
 # 2. 编译
 cd ~/ws
