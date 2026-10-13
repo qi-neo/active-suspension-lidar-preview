@@ -96,7 +96,9 @@ private:
         baud_rate_ = declare_parameter<int>("baud_rate", 115200);
 
         // 控制器
-        ctrl_.lookahead_m = declare_parameter<double>("lookahead_m", 1.0);
+        // 注意：lookahead_m 属于 ControlLoopParams，不属于 ControlParams。
+        // ControlParams 里对应的是 max_lookahead_m（前馈取样的上限），
+        // 两者不是一个东西，别混。lookahead_m 在 build_loop() 里声明。
         ctrl_.kp_roll = declare_parameter<double>("kp_roll", ctrl_.kp_roll);
         ctrl_.kd_roll = declare_parameter<double>("kd_roll", ctrl_.kd_roll);
         ctrl_.kp_pitch = declare_parameter<double>("kp_pitch", ctrl_.kp_pitch);
@@ -150,7 +152,7 @@ private:
     }
 
     void build_loop() {
-        loop_params_.lookahead_m = ctrl_.lookahead_m;
+        loop_params_.lookahead_m = declare_parameter<double>("lookahead_m", 1.0);
         loop_params_.enable_driver = enable_driver_;
         // 节点层面声明了要驱动作动器：串口打不开就必须报错，
         // 不能静默退化成"只算不下发"继续跑
@@ -170,7 +172,11 @@ private:
             loop_params_, val_, sm_, ctrl_);
 
         if (enable_driver_) {
-            auto driver = suspension_preview_v2::make_serial_driver(serial_port_, baud_rate_);
+            // make_serial_driver 返回 unique_ptr，set_driver 收 shared_ptr。
+            // 直接在这里转成 shared_ptr，而不是先拿 unique_ptr 再 std::move：
+            // 转移后指针会被置空，下面 else 分支的 driver->last_error() 就用不了了。
+            std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver =
+                suspension_preview_v2::make_serial_driver(serial_port_, baud_rate_);
             if (driver->connect()) {
                 loop_->set_driver(driver);
                 RCLCPP_INFO(get_logger(), "作动器已连接: %s @ %d bps", serial_port_.c_str(),
