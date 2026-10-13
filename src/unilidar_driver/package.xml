@@ -17,6 +17,8 @@
   <depend>sensor_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
+  <!-- 节点用了 geometry_msgs::msg::TransformStamped（TF 广播） -->
+  <depend>geometry_msgs</depend>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
