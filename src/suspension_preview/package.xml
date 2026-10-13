@@ -16,6 +16,9 @@
   <depend>tf2_ros</depend>
   <depend>tf2</depend>
   <depend>pcl_msgs</depend>
+  <!-- CMakeLists 里 find_package(PCL REQUIRED COMPONENTS common filters)，
+       这里要对应声明，否则 rosdep 不会装 PCL -->
+  <depend>libpcl-all-dev</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
