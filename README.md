@@ -117,7 +117,10 @@ active-suspension-lidar-preview/
 细节、实机确认步骤与验证范围见
 [`src/unilidar_driver/README.md`](src/unilidar_driver/README.md)。
 
-### suspension_preview — 初版预瞄节点
+### suspension_preview — 初版预瞄节点（历史版本）
+
+> 已被 `suspension_preview_v2` 取代，保留用于复现论文里描述的初版行为。
+> 新用途请用 v2。
 
 `src/preview_node.cpp` 完成从点云到串口下发的整条链路：
 
@@ -127,7 +130,9 @@ active-suspension-lidar-preview/
 4. 5 cm 网格提取路面高程剖面（100 点）；
 5. 按自定义 `0xAA55` 协议经串口（115200 bps）下发。
 
-参数写在文件顶部的宏里，改动需重新编译。
+参数写在文件顶部的宏里，改动需重新编译。已知四类问题（订阅端 QoS、串口未置
+raw 模式、TF 失败无兜底、无效格静默填 0）均已在 v2 修复，详见包内 `README.md`
+与 `docs/review/01-code-review-v1.md`。
 
 ### suspension_preview_v2 — 接口化版本
 
@@ -335,6 +340,8 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 ## 许可证
 
 [MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
+
+版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## English Abstract
 
