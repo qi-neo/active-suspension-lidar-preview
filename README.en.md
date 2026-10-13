@@ -123,6 +123,14 @@ to match both in-repo consumers.
 Details, on-target confirmation steps and verification scope:
 [`src/unilidar_driver/README.md`](src/unilidar_driver/README.md) (in Chinese).
 
+> **Also available as a standalone repository**:
+> [qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver), since a LiDAR
+> driver is a reusable asset unrelated to active suspension specifically. A copy is kept
+> here so this repository builds standalone; **treat the standalone repo as the source of
+> truth** and sync changes back. It also ships
+> [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md),
+> a methodology write-up on writing sensor drivers (in Chinese).
+
 ### suspension_preview — first-generation preview node
 
 A single file, `src/preview_node.cpp`, carries the whole chain from point cloud to UART:
