@@ -39,18 +39,19 @@ ament_target_dependencies(suspension_control_core suspension_preview_v2)
 # 但 ament_export_include_directories 传过来的路径在这种「跨包 + 静态库」
 # 组合下不一定能被本包的编译命令带上，表现为
 #   fatal error: suspension_preview_v2/types.hpp: No such file or directory
-# find_package 会把 <pkg>_DIR 设为 <前缀>/share/<pkg>/cmake，
-# 上溯两级就是包前缀，其下的 include 即头文件所在。
-if(suspension_preview_v2_DIR)
-  get_filename_component(_v2_prefix "${suspension_preview_v2_DIR}/../.." ABSOLUTE)
-  set(_v2_include "${_v2_prefix}/include")
-  if(EXISTS "${_v2_include}")
-    target_include_directories(suspension_control_core PUBLIC "${_v2_include}")
-    message(STATUS "v2 include dir: ${_v2_include}")
-  else()
-    message(WARNING "未找到 v2 头文件目录：${_v2_include}")
-  endif()
-endif()
+# find_package 会把 <pkg>_DIR 设为 <前缀>/share/<pkg>/cmake。
+# 要回到包前缀得上溯三级：cmake -> <pkg> -> share -> <前缀>。
+# （上溯两级只能到 /share，实测踩过这个坑。）
+get_filename_component(_v2_prefix "${suspension_preview_v2_DIR}/../../.." ABSOLUTE)
+message(STATUS "v3: suspension_preview_v2_DIR = ${suspension_preview_v2_DIR}")
+message(STATUS "v3: v2 前缀 = ${_v2_prefix}")
+# 两个都加：suspension_preview_v2/types.hpp 按 <前缀>/include 找，
+# 而 rosidl 生成的消息头在 <前缀>/include/<包名>/<包名>/msg 下，
+# 下游按 <包名>/msg/xxx.hpp 引用时需要后者。不存在的目录加上也无害。
+target_include_directories(suspension_control_core PUBLIC
+  "${_v2_prefix}/include"
+  "${_v2_prefix}/include/suspension_preview_v2"
+)
 
 # 离线自检：不依赖 ROS 运行时，可直接执行
 add_executable(control_selftest examples/control_selftest.cpp)
@@ -59,6 +60,21 @@ target_link_libraries(control_selftest suspension_control_core)
 # ROS 节点
 add_executable(suspension_control_node src/suspension_control_node.cpp)
 target_link_libraries(suspension_control_node suspension_control_core)
+
+# 本包用到了 v2 的 make_serial_driver（suspension_core 里的实现）。
+# ament_export_libraries 声明的名字在跨包静态库场景下不一定进入链接行，
+# 表现为链接期 undefined reference；这里按包前缀显式定位并链上。
+find_library(V2_CORE_LIB
+  NAMES suspension_core
+  PATHS "${_v2_prefix}/lib"
+  NO_DEFAULT_PATH)
+if(V2_CORE_LIB)
+  target_link_libraries(suspension_control_node "${V2_CORE_LIB}")
+  message(STATUS "v3: 链接 v2 的 suspension_core = ${V2_CORE_LIB}")
+else()
+  message(WARNING "v3: 未找到 ${_v2_prefix}/lib 下的 suspension_core，"
+                  "若出现 undefined reference 请检查 v2 是否安装该库")
+endif()
 ament_target_dependencies(suspension_control_node
   rclcpp std_msgs sensor_msgs suspension_preview_v2
 )

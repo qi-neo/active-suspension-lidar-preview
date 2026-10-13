@@ -7,7 +7,10 @@
 #include <numeric>
 #include <vector>
 
-#include <pcl/filters/pass_through.h>
+// PCL 1.12 里这个过滤器头是 passthrough.h，不是 pass_through.h。
+// 后者是很老版本的名字，写错会直接 fatal error: No such file。
+// 这处先前一直没暴露，是因为从没在干净环境里构建过。
+#include <pcl/filters/passthrough.h>
 
 namespace suspension_preview_v2 {
 
