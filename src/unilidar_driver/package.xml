@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>unilidar_driver</name>
-  <version>1.0.0</version>
+  <version>1.0.1</version>
   <description>
     Unitree L1 激光雷达驱动：自行实现 UDP 报文解析，发布标准 PointCloud2 与
     Imu 话题，不链接官方静态库。协议字段与几何公式依据官方 BSD-3-Clause 开源
