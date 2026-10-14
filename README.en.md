@@ -6,6 +6,13 @@ ROS2 · C++ · PCL · Embedded · Multi-sensor fusion
 
 [简体中文](README.md) | English
 
+[![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+
+> CI runs `colcon build` on all five packages inside a ROS Humble container and
+> executes three offline self-tests (v3 control: 89 checks, driver parsing: 63
+> checks, v2 point-cloud pipeline). Starting from **v3.1.0** the packages build
+> cleanly — **earlier tags do not build**. See [CHANGELOG](CHANGELOG.md).
+
 ## Overview
 
 An active suspension system that reads the road ahead with a LiDAR. Built on ROS2 with an Orange Pi AI Pro
