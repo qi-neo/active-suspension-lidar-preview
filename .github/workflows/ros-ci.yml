@@ -33,6 +33,15 @@ jobs:
           # colcon 会递归扫描 src/ 找包，所以放在子目录里也能被发现
           path: src/active-suspension-lidar-preview
 
+      # rosdep 的唯一依据是 package.xml。CMakeLists 里 find_package 了但
+      # package.xml 没声明的，本机往往看不出来（别的包或全局环境已经装上），
+      # 到了干净环境里 rosdep 不装它才炸——本仓库已经因为这类脱节踩过
+      # geometry_msgs 与 libpcl-all-dev 两次。这里加一道纯文本检查，
+      # 比等 colcon 报错早得多，也不额外花时间。
+      - name: CMakeLists 与 package.xml 对齐
+        working-directory: src/active-suspension-lidar-preview
+        run: python3 tools/check_deps.py
+
       - name: 安装构建与依赖工具
         run: |
           set -e
