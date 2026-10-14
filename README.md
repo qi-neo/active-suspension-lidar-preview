@@ -6,6 +6,13 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 
 [English](README.en.md) | 简体中文
 
+[![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检
+> （v3 控制 89 项、驱动解析 63 项、v2 点云链路）。
+> v3.1.0 起五个包才真正能在干净环境构建通过——
+> **更早的 tag 拉下来是编不过的**，见 [CHANGELOG](CHANGELOG.md)。
+
 ## 项目简介
 
 一套基于激光雷达路面预瞄的主动悬架系统。以 ROS2 为框架、香橙派 AI Pro 为车载计算平台，通过激光雷达提前感知
