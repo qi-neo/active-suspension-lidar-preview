@@ -20,7 +20,7 @@ v2 解决了"路面数据算得准、发得稳"，但链路是开环的：算出
 |------|------|------|
 | `IInputValidator` | 输入校验：坏数据一律拒绝 | `RoadProfileValidator` |
 | `ISafetyStateMachine` | 安全状态机：能不能控、用谁的数据、出事怎么退 | `SafetyStateMachine` |
-| `IController` | 控制律 | `PreviewFeedbackController` |
+| `IController` | 控制律 | `PreviewFeedbackController`（PD）、`IncrementalLqiController`（LQI），按 `controller_kind` 选 |
 | `IControlLoop` | 把上面三者与作动器驱动串成一条链 | `SuspensionControlLoop` |
 
 控制核心（`suspension_control_core`）**不依赖 ROS、不依赖 PCL**，可以脱离整车单独编译与自检。
@@ -96,14 +96,44 @@ Boot ──► Calibrating ──► Leveling ──► Balancing
 
 - **预瞄前馈**：在 `lookahead_m` 处取左右轮迹高程，转成目标行程，让车身提前动作；
   目标格无效时向两侧找最近有效格，找不到就不做前馈（不会拿 0 当路面）。
-- **姿态反馈**：无导数 PD——目标姿态恒为零，误差微分用陀螺仪角速度代替，避免对含噪的
-  姿态角做数值微分。符号约定见 `types.hpp`：`roll > 0` 为右侧下沉、`pitch > 0` 为前部下沉。
+- **姿态反馈**：两种可选，见 5.1。
 - **运动学解耦**：俯仰量加到前轴减到后轴，横滚量加到右侧减到左侧。
 - **限幅与速率限制**：先按 `height_limit_mm` 限幅，再按 `rate_limit_mm_per_s × dt` 限制单周期变化量。
 
 > 增益单位是 mm/rad 与 mm/(rad/s)，量级在 10² 才有意义（轮距 0.6 m 时 0.1 rad 横滚
 > 对应左右约 60 mm 高度差）。这几个默认值是台架初值，**上车前必须实测整定**，
 > `feedforward_sign` 的正负也要按实际安装方向确认。
+
+### 5.1 两种姿态反馈：PD 与增量式 LQI
+
+由参数 `controller_kind` 选择，`0` 为 PD（默认），`1` 为增量式 LQI。
+两者共用前馈、解耦、限幅，只在姿态反馈那一步不同：
+
+| | 绝对式 PD（默认） | 增量式 LQI |
+|---|---|---|
+| 控制律 | `u = kp·θ + kd·ω` | `u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ` |
+| 状态 | 无记忆，每拍重算 | 需记住上一拍姿态与修正量 |
+| 常值扰动残留 | 有（PD 原理上压不掉） | 无（积分作用抵掉） |
+| 上车前准备 | 已有台架初值 | **必须先跑 `tools/lqr_gain_design.py` 填增益** |
+
+积分作用不是显式积分器，而是 `ki·θ` 在增量累加中自然形成的。它的可观测表现是：
+**误差归零后修正量不归零，而是保持一个非零常数**——那个常数就是在补偿常值扰动。
+自检第 15 组用同一组输入把两者对跑：PD 在误差 10 mrad 时输出 2.5 mm、归零后回 0；
+LQI 累加到 5 mm、归零后保持 4 mm。
+
+增量式的代价是有了记忆，因此 `sync_reference()` 对 LQI 比 PD 更关键：
+不同步的话，恢复闭环第一拍会拿陈旧的 `Δθ` 起步，直接顶到限幅。状态机在回中、
+降级保持、急停恢复这几条路径上都会调用它。
+
+**未整定就切 LQI 的后果**：三个增益默认 0，控制器退化成"只前馈、不闭环"。
+节点会打 WARN 提示，不会静默出错。
+
+```bash
+# 先算增益
+python3 tools/lqr_gain_design.py --wn 1.5 --zeta 0.25
+# 再把打印出来的 kx1 / kx2 / ki 填进 config/control_params.yaml，
+# 并把 controller_kind 改成 1
+```
 
 ## 六、编译与验证
 
