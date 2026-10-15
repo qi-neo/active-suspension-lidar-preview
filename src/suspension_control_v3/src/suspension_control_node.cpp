@@ -261,6 +261,10 @@ private:
         // 正常上线必须有时限，否则输入断流时作动器会一直停在旧行程上
         sm_.degraded_hold_timeout_s = declare_parameter<double>(
             "degraded_hold_timeout_s", sm_.degraded_hold_timeout_s);
+        // 作动器堵转：指令与实际位置持续偏离多久后降级。需要驱动支持位置反馈
+        // 才可能置位；<=0 表示不做堵转判定
+        sm_.stall_degrade_after_s = declare_parameter<double>("stall_degrade_after_s",
+                                                             sm_.stall_degrade_after_s);
     }
 
     void build_loop() {
@@ -285,6 +289,11 @@ private:
             declare_parameter<double>("fusion_max_age_s", loop_params_.fusion_max_age_s);
         loop_params_.fusion_max_dispersion_m = declare_parameter<double>(
             "fusion_max_dispersion_m", loop_params_.fusion_max_dispersion_m);
+        // 作动器堵转判定：指令与实际位置的偏差超过该值即视为"跟不上"。
+        // 要大于正常跟随误差（含通信与伺服延迟），否则一次快速动作就误判。
+        // 驱动不支持位置反馈时该参数不起作用
+        loop_params_.stall_error_mm =
+            declare_parameter<double>("stall_error_mm", loop_params_.stall_error_mm);
         // 封顶值不能低于名义控制周期：否则每一拍都被钳制，累计时间推进慢于真实时间，
         // 降级、链路超时这些基于时长的判据会成比例地延迟触发。
         // 低控制频率下这一步尤其关键
@@ -304,6 +313,17 @@ private:
                 loop_->set_driver(driver);
                 RCLCPP_INFO(get_logger(), "作动器已连接: %s @ %d bps", serial_port_.c_str(),
                             baud_rate_);
+                // 没有位置反馈就意味着"命令发了就当做了"：堵转、失步、机械卡死
+                // 全都无从检出。这件事必须显式说出来，否则会一直被误认为已闭环
+                if (driver->has_position_feedback()) {
+                    RCLCPP_INFO(get_logger(),
+                                "作动器位置反馈：可用（堵转阈值 %.1f mm，持续 %.2f s 降级）",
+                                loop_params_.stall_error_mm, sm_.stall_degrade_after_s);
+                } else {
+                    RCLCPP_WARN(get_logger(),
+                                "作动器位置反馈：不可用——堵转/失步/卡死无法检出，"
+                                "当前是\"命令发了就当做了\"");
+                }
             } else {
                 RCLCPP_ERROR(get_logger(), "作动器连接失败，节点将进入安全态: %s",
                              driver->last_error().c_str());
@@ -396,6 +416,11 @@ private:
             RCLCPP_INFO(get_logger(), "状态 -> %s（故障位 0x%02X）",
                         suspension_control_v3::to_string(st.state), st.faults);
         }
+        if (st.faults & suspension_control_v3::kFaultActuatorStall) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "作动器堵转：最大偏差 %.1f mm（阈值 %.1f mm）",
+                                 st.max_position_error_mm, loop_params_.stall_error_mm);
+        }
     }
 
     // 返回 true 表示状态发生了变化
@@ -436,6 +461,11 @@ private:
         out.mean_dispersion_mm = static_cast<float>(st.mean_dispersion_mm);
         out.obstacle_count = static_cast<uint32_t>(st.obstacle_count);
         out.nearest_obstacle_m = static_cast<float>(st.nearest_obstacle_m);
+        out.has_position_feedback = st.has_position_feedback;
+        out.actual_mm.assign(st.actual_mm.begin(), st.actual_mm.end());
+        out.position_error_mm.assign(st.position_error_mm.begin(),
+                                     st.position_error_mm.end());
+        out.max_position_error_mm = static_cast<float>(st.max_position_error_mm);
         out.ticks = static_cast<uint32_t>(st.ticks);
         out.profiles_accepted = static_cast<uint32_t>(st.profiles_accepted);
         out.profiles_rejected = static_cast<uint32_t>(st.profiles_rejected);

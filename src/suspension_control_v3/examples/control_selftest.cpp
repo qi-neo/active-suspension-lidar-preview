@@ -27,6 +27,8 @@
 //      大角度连续）、角速度不被死区削掉、坏采样不污染
 //  21. 语义预瞄：障碍物抑制该侧前馈（左右分侧、太矮/超范围不抑制、
 //      开关关闭时向后兼容）、回路障碍数量与最近距离上报
+//  22. 作动器位置反馈与堵转：无反馈不判 / 正常跟随不误判 / 单轮卡死置故障位
+//      并降级 / 长期不复原转 Emergency / 短时堵转自行消除不降级（防抖）
 
 #include <algorithm>
 #include <cmath>
@@ -111,9 +113,29 @@ public:
     }
     const std::string& last_error() const override { return err_; }
 
+    // 位置反馈能力。默认关闭——模拟"驱动不支持反馈"的情形
+    bool has_position_feedback() const override { return feedback_; }
+    bool get_position(
+        std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) const override {
+        if (!feedback_) return false;
+        // 简化模型：实际位置持续按各轮的跟随比例跟踪"最后一次下发的指令"。
+        // 之所以不用"收到指令时才更新"，是因为下发有去重——指令不变就不重发，
+        // 那样卡死轮的位置永远不更新，反而检不出偏差。真实作动器是持续上报
+        // 自身位置的，与这一拍有没有重发无关
+        // ratio=1 完全跟随；ratio=0 模拟该轮彻底卡死（堵转/失步/机械卡死）
+        for (std::size_t i = 0; i < mm.size(); ++i) {
+            mm[i] = static_cast<int>(std::lround(last_cmd_[i] * follow_ratio_[i]));
+        }
+        return true;
+    }
+
     bool connected_{false};
     suspension_preview_v2::SuspensionMode mode_{suspension_preview_v2::SuspensionMode::Passive};
     std::array<int, suspension_preview_v2::kSuspensionWheelCount> last_cmd_{};
+    // 各轮跟随比例，1.0 = 完全跟随。置 0 即模拟该轮卡死
+    std::array<double, suspension_preview_v2::kSuspensionWheelCount> follow_ratio_{
+        1.0, 1.0, 1.0, 1.0};
+    bool feedback_{false};   // 是否支持位置反馈
     int mode_calls_{0};
     int cmd_calls_{0};
     int estop_calls_{0};
@@ -146,15 +168,16 @@ struct LoopFixture {
 
     // 剖面 10 Hz，姿态与控制同频（实际 IMU 速率远高于控制环，每拍都有新值）。
     // duration 是"推进时长"，不是绝对时刻
+    // offset 给路面一个恒定高程：默认 0 时前馈指令恒为 0，堵转无从检出
     void advance(double duration, double amp = 0.0, double roll = 0.0,
-                 double pitch = 0.0) {
+                 double pitch = 0.0, double offset = 0.0) {
         constexpr double kDt = 0.005;           // 控制环 200 Hz
         constexpr double kProfilePeriod = 0.1;  // 剖面 10 Hz
         const double end = t + duration;
         double next_profile = t;
         while (t < end) {
             if (t >= next_profile) {
-                loop.submit_profile(make_frame(t, amp), t);
+                loop.submit_profile(make_frame(t, amp, offset), t);
                 next_profile += kProfilePeriod;
             }
             Attitude a;
@@ -1509,6 +1532,98 @@ void test_semantic_preview() {
     }
 }
 
+// ---------------------------------------------------------------- 22. 作动器位置反馈与堵转
+//
+// 此前是"命令发了就当做了"：舵机堵转、失步、机械卡死，系统完全无感，
+// sync_reference 同步的还是指令值而不是实际位置。有了位置反馈才能把这件事
+// 变成可检出、可降级的故障。
+void test_actuator_position_feedback() {
+    section("22. 作动器位置反馈与堵转判定");
+
+    constexpr double kOffset = 0.02;   // 恒定 20 mm 路面 -> 前馈指令 20 mm
+
+    // ---- 22.1 驱动不支持位置反馈（既有行为）：无从判堵转 ----
+    {
+        LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
+        fx.advance(3.0, /*amp=*/0.0, /*roll=*/0.0, /*pitch=*/0.0, kOffset);
+        check(!fx.loop.status().has_position_feedback, "驱动无反馈时应上报无反馈");
+        check(fx.loop.status().state == ControlState::kBalancing,
+              "无反馈时不判堵转，应正常闭环");
+        check((fx.loop.status().faults & kFaultActuatorStall) == 0,
+              "无反馈时不应置堵转故障位");
+        std::printf("  无位置反馈：状态=%s，faults=0x%X（不判堵转）\n",
+                    to_string(fx.loop.status().state), fx.loop.status().faults);
+    }
+
+    // ---- 22.2 有反馈且完全跟随：误差≈0，不误判 ----
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.advance(3.0, 0.0, 0.0, 0.0, kOffset);
+        check(fx.loop.status().has_position_feedback, "应上报有位置反馈");
+        check(fx.loop.status().max_position_error_mm < 0.5, "完全跟随时误差应≈0");
+        check(fx.loop.status().state == ControlState::kBalancing, "正常跟随应保持在闭环");
+        check((fx.loop.status().faults & kFaultActuatorStall) == 0, "不应误判堵转");
+        std::printf("  正常跟随：最大误差 %.2f mm，状态=%s\n",
+                    fx.loop.status().max_position_error_mm,
+                    to_string(fx.loop.status().state));
+    }
+
+    // ---- 22.3 单轮卡死 -> 置堵转故障位，持续则降级 ----
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.driver->follow_ratio_[0] = 0.0;   // 左前彻底卡死
+        fx.advance(1.5, 0.0, 0.0, 0.0, kOffset);   // 走完标定+找平，刚进闭环
+        check((fx.loop.status().faults & kFaultActuatorStall) != 0,
+              "卡死轮偏差超阈值时应置堵转故障位");
+        check(fx.loop.status().max_position_error_mm > 8.0, "卡死轮误差应超过阈值 8 mm");
+        std::printf("  左前卡死：误差 %.1f mm，faults=0x%X，状态=%s\n",
+                    fx.loop.status().max_position_error_mm, fx.loop.status().faults,
+                    to_string(fx.loop.status().state));
+
+        fx.advance(0.6, 0.0, 0.0, 0.0, kOffset);   // 堵转累计超过 0.5 s
+        check(fx.loop.status().state == ControlState::kDegraded,
+              "堵转持续应降级，而不是继续闭环硬驱");
+        std::printf("  堵转持续 0.5 s 后 -> 状态=%s\n",
+                    to_string(fx.loop.status().state));
+    }
+
+    // ---- 22.4 堵转不复原 -> 降级保持超时转 Emergency ----
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.driver->follow_ratio_[0] = 0.0;
+        fx.advance(1.5, 0.0, 0.0, 0.0, kOffset);
+        fx.advance(6.0, 0.0, 0.0, 0.0, kOffset);   // 降级后堵转仍在 -> 超时转 Emergency
+        check(fx.loop.status().state == ControlState::kEmergency,
+              "堵转长期不复原应转 Emergency 回中");
+        std::printf("  堵转不复原 -> 状态=%s\n", to_string(fx.loop.status().state));
+    }
+
+    // ---- 22.5 短时堵转自行消除 -> 不降级（防抖，不误伤瞬时过载）----
+    // 注意：一旦真的降级，hold_output 会停止下发指令，卡死轮的实际位置再也
+    // 追不上指令，误差必然持续——所以堵转一旦触发就走向 Emergency（22.4）。
+    // 这里验的是"还没到时限就自行恢复"的情形，即 stall_elapsed_ 会被清零
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.advance(1.5, 0.0, 0.0, 0.0, kOffset);   // 进闭环
+        fx.driver->follow_ratio_[0] = 0.0;         // 卡死
+        fx.advance(0.3, 0.0, 0.0, 0.0, kOffset);   // 短于 stall_degrade_after_s
+        check((fx.loop.status().faults & kFaultActuatorStall) != 0,
+              "短时堵转也应置故障位（诊断可见）");
+        check(fx.loop.status().state == ControlState::kBalancing,
+              "短于 0.5 s 的堵转不应降级");
+        fx.driver->follow_ratio_[0] = 1.0;         // 自行恢复
+        fx.advance(0.5, 0.0, 0.0, 0.0, kOffset);
+        check(fx.loop.status().state == ControlState::kBalancing, "消除后应保持在闭环");
+        check((fx.loop.status().faults & kFaultActuatorStall) == 0, "消除后故障位应清除");
+        std::printf("  短时堵转(0.3 s)自行消除 -> 状态=%s，故障位已清除\n",
+                    to_string(fx.loop.status().state));
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1576,6 +1691,7 @@ int main() {
     test_temporal_fusion();
     test_attitude_filter_chain();
     test_semantic_preview();
+    test_actuator_position_feedback();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

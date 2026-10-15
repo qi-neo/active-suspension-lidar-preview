@@ -79,6 +79,7 @@ bool SafetyStateMachine::request_reset() {
     unhealthy_elapsed_ = 0.0;
     healthy_elapsed_ = 0.0;
     link_lost_elapsed_ = 0.0;
+    stall_elapsed_ = 0.0;
     output_.faults = kFaultNone;
     enter(ControlState::kBoot);
     return true;
@@ -110,8 +111,12 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
 
     // 逐周期刷新的故障位可以清；锁存类的（姿态超限、急停）在锁存解除前必须保留，
     // 否则只要当拍没有新的越限事件，故障位就会消失，上层无从判断曾经出过事
+    // 堵转位也逐周期刷新：它是按"当前偏差是否超阈值"实时算出来的，
+    // 不进这个掩码就会一置位永久锁存——瞬时过载消除后告警还在，诊断失真。
+    // 真需要"曾经堵转过"的可看状态迁移（Degraded/Emergency），不必靠故障位
     uint16_t clear_mask = static_cast<uint16_t>(
-        kFaultInvalidInput | kFaultStaleInput | kFaultLowQuality | kFaultActuatorLinkLost);
+        kFaultInvalidInput | kFaultStaleInput | kFaultLowQuality | kFaultActuatorLinkLost |
+        kFaultActuatorStall);
     if (!attitude_latched_) clear_mask |= kFaultAttitudeExceeded;
     if (!estop_latched_) clear_mask |= kFaultEmergencyStop;
     out.faults &= static_cast<uint16_t>(~clear_mask);
@@ -167,6 +172,19 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     if (!quality_ok) out.faults |= kFaultLowQuality;
     if (in.profile_rejected) out.faults |= kFaultInvalidInput;
 
+    // ---- 作动器堵转 ----
+    // 判据来自控制回路：有位置反馈时才可能为真，无反馈时恒为 false。
+    // 堵转与"输入不健康"是两回事——输入完全正常时舵机也可能卡死，
+    // 所以单独计时、单独作为降级触发条件之一
+    if (in.actuator_stalled) {
+        stall_elapsed_ += dt;
+        out.faults |= kFaultActuatorStall;
+    } else {
+        stall_elapsed_ = 0.0;
+    }
+    const bool stall_degrade = params_.stall_degrade_after_s > 0.0 &&
+                               stall_elapsed_ >= params_.stall_degrade_after_s;
+
     const bool degrade_triggered = unhealthy_elapsed_ >= params_.degrade_after_unhealthy_s;
 
     // ---- 状态迁移 ----
@@ -189,7 +207,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
         }
 
         case ControlState::kLeveling:
-            if (degrade_triggered) {
+            if (degrade_triggered || stall_degrade) {
                 out.state = ControlState::kDegraded;
             } else if (input_healthy && time_in_state_ >= params_.leveling_duration_s) {
                 out.state = ControlState::kBalancing;
@@ -197,11 +215,16 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
             break;
 
         case ControlState::kBalancing:
-            if (degrade_triggered) out.state = ControlState::kDegraded;
+            if (degrade_triggered || stall_degrade) out.state = ControlState::kDegraded;
             break;
 
         case ControlState::kDegraded:
-            if (input_healthy && healthy_elapsed_ >= params_.recover_duration_s) {
+            // 堵转未消除时不允许恢复：否则会在"降级 -> 找平 -> 平衡 -> 再降级"
+            // 之间来回振荡（recover_duration_s 0.5 s 远小于降级保持时限 5 s），
+            // 既到不了 Emergency，作动器还会被反复驱动。堵转是硬件故障，
+            // 必须等它真的消失才谈恢复
+            if (input_healthy && !in.actuator_stalled &&
+                healthy_elapsed_ >= params_.recover_duration_s) {
                 // 先回中再重新进闭环，避免带着降级前的输出直接恢复控制
                 out.state = ControlState::kLeveling;
             } else if (params_.degraded_hold_timeout_s > 0.0 &&

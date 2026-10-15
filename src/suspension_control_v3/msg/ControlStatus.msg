@@ -34,6 +34,14 @@ float32 mean_dispersion_mm   # 平均跨帧离散度 (mm)
 uint32 obstacle_count        # 预瞄范围内的非地面障碍数量
 float32 nearest_obstacle_m  # 最近障碍距离 (m)，< 0 表示范围内无障碍
 
+# 作动器位置反馈（需驱动支持 has_position_feedback）
+# 没有反馈时 has_position_feedback=false，下面三个字段无意义（保持 0）——
+# 那种情况下"命令发了就当做了"，堵转/失步/卡死无从检出
+bool    has_position_feedback
+int32[] actual_mm            # 四轮实际位置 (mm)
+float32[] position_error_mm  # 四轮 |指令 - 实际| (mm)
+float32 max_position_error_mm
+
 uint32 ticks
 uint32 profiles_accepted
 uint32 profiles_rejected

@@ -107,6 +107,52 @@ void SuspensionControlLoop::submit_obstacles(std::vector<ObstacleAhead> obstacle
         obstacles_.end());
 }
 
+void SuspensionControlLoop::update_actuator_feedback() {
+    // 无反馈时全部归位：has_position_feedback 为假，上层整段跳过
+    status_.has_position_feedback = false;
+    status_.max_position_error_mm = 0.0;
+    status_.actual_mm.fill(0);
+    status_.position_error_mm.fill(0.0);
+    stalled_now_ = false;
+
+    if (!params_.enable_driver || !driver_) return;
+    if (!driver_->has_position_feedback()) return;
+
+    std::array<int, suspension_preview_v2::kSuspensionWheelCount> actual{};
+    // 读失败按"本拍无反馈"处理，不据此判故障：一次通信丢包不该引起降级，
+    // 那与真的堵转是两回事
+    if (!driver_->get_position(actual)) return;
+
+    status_.has_position_feedback = true;
+    double max_err = 0.0;
+    bool stalled = false;
+    for (int i = 0; i < kWheelCount; ++i) {
+        const std::size_t k = static_cast<std::size_t>(i);
+        status_.actual_mm[k] = actual[k];
+        // 与"上一次下发的指令"比，而不是本拍新算出的指令：
+        // 作动器在追 last_command_，本拍新指令本来就还没执行到，
+        // 拿它比会在每次正常快速动作时都产生大偏差——那是跟随过程不是堵转
+        const double err =
+            std::fabs(static_cast<double>(last_command_[k] - actual[k]));
+        status_.position_error_mm[k] = err;
+        max_err = std::max(max_err, err);
+        if (err > params_.stall_error_mm) stalled = true;
+    }
+    status_.max_position_error_mm = max_err;
+    stalled_now_ = stalled;
+}
+
+std::array<double, kWheelCount> SuspensionControlLoop::reference_for_sync(
+    const std::array<double, kWheelCount>& fallback) const {
+    if (!status_.has_position_feedback) return fallback;
+    std::array<double, kWheelCount> v{};
+    for (int i = 0; i < kWheelCount; ++i) {
+        const std::size_t k = static_cast<std::size_t>(i);
+        v[k] = static_cast<double>(status_.actual_mm[k]);
+    }
+    return v;
+}
+
 void SuspensionControlLoop::apply_command(
     const std::array<double, kWheelCount>& height_mm, bool force) {
     std::array<int, kWheelCount> next{};
@@ -181,6 +227,9 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     status_.low_confidence_cells = fuser_.last_low_confidence_cells();
     status_.mean_dispersion_mm = fuser_.last_mean_dispersion_mm();
 
+    // 作动器位置反馈：有反馈才能判堵转，也才能让 sync_reference 用实际位置
+    update_actuator_feedback();
+
     SafetyInputs in;
     in.profile_valid = new_profile_valid_;
     in.profile_rejected = new_profile_rejected_;
@@ -199,6 +248,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     const bool driver_ready =
         params_.enable_driver && driver_ && driver_->is_connected();
     in.actuator_connected = driver_ready || !params_.require_driver;
+    // 堵转：指令与实际位置持续偏离。无位置反馈时恒为 false，状态机整段跳过
+    in.actuator_stalled = stalled_now_;
 
     const StateMachineOutput sm = state_machine_->tick(in, step_dt);
 
@@ -270,7 +321,7 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
             held[static_cast<std::size_t>(i)] =
                 static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
         }
-        controller_->sync_reference(held);
+        controller_->sync_reference(reference_for_sync(held));
         return status_;
     }
 
@@ -278,7 +329,9 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         ControlOutput zero;
         status_.output = zero;
         const std::array<double, kWheelCount> zeros{0.0, 0.0, 0.0, 0.0};
-        controller_->sync_reference(zeros);
+        // 有反馈时以实际位置为速率限制基准：回中指令发出后作动器还在往回走，
+        // 基准应该是它此刻真正在的地方，而不是"已经到零位"这个假设
+        controller_->sync_reference(reference_for_sync(zeros));
         // 首次进入该状态时强制下发：last_command_ 初值就是全零，
         // 不强制的话回中/急停指令会被去重判为"没变化"而吞掉
         apply_command(zeros, state_changed);

@@ -22,7 +22,7 @@
 |------|------|-----------|
 | `IRoadProfileExtractor` | 点云解析：点云 → 左右轮迹高程剖面 + 非地面障碍物 | `GridRoadProfileExtractor`（网格、趋势相对开窗、中位数、有效掩码、障碍物检测） |
 | `IProfileSink` | 输出：把剖面送出去 | `RosTopicSink`、`SerialProfileSink` |
-| `ISuspensionDriver` | 悬架驱动：模式、目标高度、急停 | `SerialSuspensionDriver` |
+| `ISuspensionDriver` | 悬架驱动：模式、目标高度、急停、位置反馈（可选） | `SerialSuspensionDriver` |
 | `PreviewPipeline` | 组装：解析并分发，不含 ROS、线程、硬件细节 | — |
 
 `PreviewPipeline` 只依赖接口，替换算法（比如换成平面拟合做地面分割）或更换总线都不需要改节点代码。
@@ -221,4 +221,8 @@ driver->emergency_stop();
    按 x 排序），但控制侧（v3）的语义预瞄分支（避让 / 减速）尚未接——目前是"接口就绪"；
 4. 分箱逻辑、趋势拟合、障碍物检测、串口协议都已有纯函数测试
    （`trend_selftest` / `obstacle_selftest` / `protocol_selftest`，共 69 项，均不依赖 PCL）；
-5. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）。
+5. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）；
+6. **位置反馈尚未在串口驱动上实现**：`ISuspensionDriver` 已新增可选的
+   `has_position_feedback()` / `get_position()`（默认不支持，故既有实现零改动即可编译），
+   但 `SerialSuspensionDriver` 仍返回 false——需要作动器 MCU 侧先提供位置上回报文。
+   在那之前，控制侧是"命令发了就当做了"，堵转/失步/卡死无法检出（v3 会明确告警）。

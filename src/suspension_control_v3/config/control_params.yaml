@@ -88,3 +88,8 @@ suspension_control_node:
     max_abs_roll_deg: 20.0          # 姿态安全阈值
     max_abs_pitch_deg: 20.0
     link_lost_timeout_s: 0.5        # 作动器链路中断多久后急停
+
+    # ---- 作动器堵转（需驱动支持位置反馈才有意义）----
+    stall_error_mm: 8.0             # 指令与实际位置偏差超过该值视为"跟不上"
+    stall_degrade_after_s: 0.5      # 堵转持续多久后降级；降级后不复原则由
+                                    # degraded_hold_timeout_s 接手转 Emergency

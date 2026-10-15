@@ -43,6 +43,11 @@ struct ControlLoopParams {
     // 远大于控制周期，若不封顶，链路丢失计时、降级计时会被一次性推过阈值而误动作，
     // 速率限制也会按这个大 dt 放行一个本不该有的跳变。取名义周期的若干倍
     double max_step_dt{0.05};
+
+    // ---- 作动器堵转判定（需要驱动支持位置反馈才生效）----
+    // 指令与实际位置的偏差超过该值即视为"跟不上"。阈值要大于正常情况下的
+    // 跟随误差（含通信与伺服延迟），否则一次正常的快速动作就会被误判成堵转
+    double stall_error_mm{8.0};
     // 车速数据的最大有效期。超过则视为无车速，前馈退回固定 lookahead_m——
     // 用陈旧车速算出的取样距离比不用车速更危险（距离错了但看起来很合理）
     double speed_timeout_s{0.5};
@@ -97,6 +102,14 @@ struct ControlLoopStatus {
     // nearest_obstacle_m < 0 表示范围内无障碍
     std::size_t obstacle_count{0};
     double nearest_obstacle_m{-1.0};
+
+    // ---- 作动器位置反馈 ----
+    // has_position_feedback 为假时，下面三个字段无意义（保持初值）。
+    // 有了反馈，"命令发了就当做了"才变成真闭环：能检出堵转/失步/机械卡死
+    bool has_position_feedback{false};
+    std::array<int, kWheelCount> actual_mm{0, 0, 0, 0};
+    std::array<double, kWheelCount> position_error_mm{0.0, 0.0, 0.0, 0.0};
+    double max_position_error_mm{0.0};
 
     // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
     std::size_t calibration_samples{0};
@@ -175,6 +188,16 @@ public:
     TemporalProfileFuser& fuser() override { return fuser_; }
 
 private:
+    // 读取作动器实际位置并判定堵转。驱动不支持位置反馈时全部保持初值，
+    // 上层据此整段跳过——没有反馈就不能凭空判故障
+    void update_actuator_feedback();
+
+    // 速率限制基准：有位置反馈时用实际位置，否则用指令值（既有行为）。
+    // 用指令值同步的问题在于：堵转/失步时基准与实际情况脱节，恢复闭环的
+    // 第一拍会从错误的位置起步，产生超过速率限制的跳变
+    std::array<double, kWheelCount> reference_for_sync(
+        const std::array<double, kWheelCount>& fallback) const;
+
     void apply_command(const std::array<double, kWheelCount>& height_mm,
                        bool force = false);
 
@@ -196,6 +219,9 @@ private:
     // 但对诊断是有区别的
     std::vector<ObstacleAhead> obstacles_;
     bool has_obstacles_{false};
+
+    // 本拍是否判定为堵转（有位置反馈且偏差超阈值）
+    bool stalled_now_{false};
 
     Attitude attitude_;
     ControlLoopStatus status_;

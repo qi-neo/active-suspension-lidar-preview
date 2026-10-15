@@ -36,6 +36,11 @@ struct StateMachineParams {
     double max_abs_roll_rad{0.35};        // 姿态安全阈值（约 20°）
     double max_abs_pitch_rad{0.35};
     double link_lost_timeout_s{0.5};      // 作动器链路中断多久后急停
+    // 作动器堵转：指令与实际位置持续偏离多久后降级。
+    // 需要驱动支持位置反馈（has_position_feedback）才可能置位。
+    // 降级后仍不复原的，由既有的 degraded_hold_timeout_s 接手转 Emergency。
+    // <=0 表示不做堵转判定
+    double stall_degrade_after_s{0.5};
 };
 
 struct SafetyInputs {
@@ -53,6 +58,10 @@ struct SafetyInputs {
 
     bool actuator_connected{true};
     bool estop_requested{false};
+
+    // 作动器堵转：指令与实际位置的偏差超过阈值。由控制回路在有位置反馈时
+    // 判定后填入；无位置反馈时恒为 false，状态机整段跳过
+    bool actuator_stalled{false};
 };
 
 struct StateMachineOutput {
@@ -118,6 +127,7 @@ private:
     double unhealthy_elapsed_{0.0};
     double healthy_elapsed_{0.0};
     double link_lost_elapsed_{0.0};
+    double stall_elapsed_{0.0};
     bool estop_latched_{false};
     bool attitude_latched_{false};
 };

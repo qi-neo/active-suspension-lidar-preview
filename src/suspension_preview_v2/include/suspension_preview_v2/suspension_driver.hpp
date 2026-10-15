@@ -41,6 +41,21 @@ public:
     virtual bool emergency_stop() = 0;
 
     virtual const std::string& last_error() const = 0;
+
+    // ---- 位置反馈（可选能力）----
+    // 默认"不支持"，且两个方法都不是纯虚：既有的驱动实现不用改动就能编译，
+    // 支持反馈的覆写这两个方法即可。上层据 has_position_feedback() 决定是否
+    // 启用"指令 vs 实际"的堵转校验——没有反馈就只能"命令发了就当做了"
+    virtual bool has_position_feedback() const { return false; }
+
+    // 读取四轮实际位置 (mm)。仅在 has_position_feedback() 为真时有意义。
+    // 返回 false 表示本次读取失败：按"本拍无反馈"处理，不据此判故障
+    // （读失败与真的堵转必须区分，否则一次通信丢包就会误降级）
+    virtual bool get_position(
+        std::array<int, kSuspensionWheelCount>& height_mm) const {
+        (void)height_mm;
+        return false;
+    }
 };
 
 // 串口实现（复用 protocol：0x10 设置模式 / 0x11 设置目标高度 / 0x12 急停）

@@ -47,6 +47,7 @@ enum FaultCode : uint16_t {
     kFaultAttitudeExceeded = 1u << 3,  // 姿态超出安全阈值
     kFaultActuatorLinkLost = 1u << 4,  // 作动器链路断开
     kFaultEmergencyStop = 1u << 5,     // 急停
+    kFaultActuatorStall = 1u << 6,     // 作动器堵转/失步：指令与实际位置持续偏离
 };
 
 // 控制器输入
