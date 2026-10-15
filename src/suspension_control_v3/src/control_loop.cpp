@@ -92,6 +92,21 @@ void SuspensionControlLoop::submit_speed(double speed_mps, double now_sec) {
     speed_stamp_sec_ = now_sec;
 }
 
+void SuspensionControlLoop::submit_obstacles(std::vector<ObstacleAhead> obstacles) {
+    // 只要订阅了就置位，哪怕这一包是空的：空包表示"视野内无障碍"，
+    // 与"根本没订阅"是两回事，后者才需要控制器完全跳过语义分支
+    obstacles_ = std::move(obstacles);
+    has_obstacles_ = true;
+    // 丢掉距离/高度非有限的条目，避免坏数据混进 track_blocked 的判定
+    obstacles_.erase(
+        std::remove_if(obstacles_.begin(), obstacles_.end(),
+                       [](const ObstacleAhead& o) {
+                           return !std::isfinite(o.dist_m) || !std::isfinite(o.height_m) ||
+                                  !std::isfinite(o.lateral_m);
+                       }),
+        obstacles_.end());
+}
+
 void SuspensionControlLoop::apply_command(
     const std::array<double, kWheelCount>& height_mm, bool force) {
     std::array<int, kWheelCount> next{};
@@ -289,6 +304,27 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     // 融合帧携带最新帧的时间戳，控制器的帧龄补偿照旧只补这一份，
     // 与融合器内部的位置对齐不重不漏
     ci.profile = has_fused ? &fused_ : nullptr;
+
+    // 语义预瞄：把最新一包障碍物交给控制器（指针只在本次 compute 期间有效，
+    // 控制器不会留存）。未订阅时 has_obstacles 为假，控制器整段跳过
+    ci.obstacles = &obstacles_;
+    ci.has_obstacles = has_obstacles_;
+
+    // 诊断上报：预瞄范围内的障碍数量与最近距离。nearest < 0 表示无
+    status_.obstacle_count = 0;
+    status_.nearest_obstacle_m = -1.0;
+    if (has_obstacles_) {
+        const double reach = std::max(params_.lookahead_m, status_.lookahead_m);
+        double nearest = std::numeric_limits<double>::infinity();
+        for (const auto& o : obstacles_) {
+            if (!std::isfinite(o.dist_m) || o.dist_m < 0.0 || o.dist_m > reach) continue;
+            ++status_.obstacle_count;
+            nearest = std::min(nearest, o.dist_m);
+        }
+        if (nearest < std::numeric_limits<double>::infinity()) {
+            status_.nearest_obstacle_m = nearest;
+        }
+    }
 
     status_.output = controller_->compute(ci, step_dt);
     // 取样位置由控制器算出（单一出处：与真正用来采样的公式同一个），

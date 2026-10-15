@@ -11,6 +11,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/bool.hpp>
 
+#include <suspension_preview_v2/msg/road_obstacles.hpp>
 #include <suspension_preview_v2/msg/road_profile.hpp>
 #include <suspension_preview_v2/suspension_driver.hpp>
 #include <suspension_control_v3/msg/control_status.hpp>
@@ -20,6 +21,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "suspension_control_v3/control_loop.hpp"
 
@@ -54,6 +56,13 @@ public:
             speed_sub_ = create_subscription<nav_msgs::msg::Odometry>(
                 speed_topic_, rclcpp::SensorDataQoS(),
                 std::bind(&SuspensionControlNode::on_odom, this, std::placeholders::_1));
+        }
+        // 语义预瞄：订阅 v2 发布的非地面障碍物。未开启时不订阅——
+        // 没订阅就没有数据，控制器会整段跳过语义分支
+        if (ctrl_.use_semantic_preview) {
+            obstacles_sub_ = create_subscription<suspension_preview_v2::msg::RoadObstacles>(
+                obstacles_topic_, rclcpp::SensorDataQoS(),
+                std::bind(&SuspensionControlNode::on_obstacles, this, std::placeholders::_1));
         }
 
         status_pub_ = create_publisher<suspension_control_v3::msg::ControlStatus>(
@@ -103,6 +112,15 @@ public:
         } else {
             RCLCPP_INFO(get_logger(), "多帧融合已关闭（fusion_frames=1，直通最新帧）");
         }
+        if (ctrl_.use_semantic_preview) {
+            RCLCPP_INFO(get_logger(),
+                        "语义预瞄已启用：订阅 %s，高于地面 %.2f m 且落在轮迹 ±%.2f m 内时"
+                        "抑制该侧前馈",
+                        obstacles_topic_.c_str(), ctrl_.obstacle_min_height_m,
+                        ctrl_.obstacle_lateral_band_m);
+        } else {
+            RCLCPP_INFO(get_logger(), "语义预瞄已关闭（use_semantic_preview=false）");
+        }
     }
 
 private:
@@ -147,6 +165,34 @@ private:
         // 轴距：后轴预瞄距离 = 前馈距离 - 轴距（后轮晚遇到同一路面特征）。
         // 这个值必须按实车测量，填错会让俯仰前馈系统性超前或滞后
         ctrl_.wheelbase_m = declare_parameter<double>("wheelbase_m", ctrl_.wheelbase_m);
+
+        // 姿态滤波。默认关闭多级链、沿用原来的一阶低通（attitude_filter_alpha
+        // 默认 1.0 直通）；上台架后建议把 use_attitude_filter_chain 打开，
+        // 并按实测噪声水平重标死区——0.25° 是论文值，噪声大的 IMU 要调大
+        ctrl_.attitude_filter_alpha = declare_parameter<double>(
+            "attitude_filter_alpha", ctrl_.attitude_filter_alpha);
+        ctrl_.use_attitude_filter_chain = declare_parameter<bool>(
+            "use_attitude_filter_chain", ctrl_.use_attitude_filter_chain);
+        ctrl_.attitude_gyro_alpha = declare_parameter<double>(
+            "attitude_gyro_alpha", ctrl_.attitude_gyro_alpha);
+        ctrl_.attitude_accel_alpha = declare_parameter<double>(
+            "attitude_accel_alpha", ctrl_.attitude_accel_alpha);
+        ctrl_.attitude_smooth_window = declare_parameter<int>(
+            "attitude_smooth_window", ctrl_.attitude_smooth_window);
+        ctrl_.attitude_deadzone_deg = declare_parameter<double>(
+            "attitude_deadzone_deg", ctrl_.attitude_deadzone_deg);
+
+        // 语义预瞄：订阅 v2 的 /suspension/road_obstacles，在该轮迹前方有
+        // 非地面障碍物时放弃这一侧的预瞄（避免把路沿之类当成路面去"爬"）。
+        // 默认关闭——需要 v2 侧也在发布该话题才有意义
+        ctrl_.use_semantic_preview = declare_parameter<bool>(
+            "use_semantic_preview", ctrl_.use_semantic_preview);
+        ctrl_.obstacle_lateral_band_m = declare_parameter<double>(
+            "obstacle_lateral_band_m", ctrl_.obstacle_lateral_band_m);
+        ctrl_.obstacle_min_height_m = declare_parameter<double>(
+            "obstacle_min_height_m", ctrl_.obstacle_min_height_m);
+        obstacles_topic_ = declare_parameter<std::string>("obstacles_topic",
+                                                         "/suspension/road_obstacles");
 
         // 车速源。use_speed_adaptive_lookahead 为 false 时不订阅，
         // 前馈全程走固定 lookahead_m（与接入车速之前的行为一致）。
@@ -310,6 +356,21 @@ private:
         angle_.pitch_deg = a.pitch_rad * kRadToDeg;
     }
 
+    // 语义预瞄：把 v2 检出的非地面障碍物转成控制核心的结构。整包替换——
+    // 障碍物是"当前视野"的快照，不需要跨帧累计
+    void on_obstacles(const suspension_preview_v2::msg::RoadObstacles::SharedPtr msg) {
+        std::vector<suspension_control_v3::ObstacleAhead> obs;
+        obs.reserve(msg->obstacles.size());
+        for (const auto& o : msg->obstacles) {
+            suspension_control_v3::ObstacleAhead a;
+            a.dist_m = static_cast<double>(o.x_m);
+            a.lateral_m = static_cast<double>(o.lateral_m);
+            a.height_m = static_cast<double>(o.height_m);
+            obs.push_back(a);
+        }
+        loop_->submit_obstacles(std::move(obs));
+    }
+
     // 车速只取前向分量。倒档（负值）由 submit_speed 内部忽略：
     // 预瞄取样对前进方向有意义，倒档时按前进距离取样会取到车身侧后方
     void on_odom(const nav_msgs::msg::Odometry::SharedPtr msg) {
@@ -373,6 +434,8 @@ private:
         out.fused_frames = static_cast<uint32_t>(st.fused_frames);
         out.low_confidence_cells = static_cast<uint32_t>(st.low_confidence_cells);
         out.mean_dispersion_mm = static_cast<float>(st.mean_dispersion_mm);
+        out.obstacle_count = static_cast<uint32_t>(st.obstacle_count);
+        out.nearest_obstacle_m = static_cast<float>(st.nearest_obstacle_m);
         out.ticks = static_cast<uint32_t>(st.ticks);
         out.profiles_accepted = static_cast<uint32_t>(st.profiles_accepted);
         out.profiles_rejected = static_cast<uint32_t>(st.profiles_rejected);
@@ -394,6 +457,7 @@ private:
 
     // 车速源
     std::string speed_topic_;
+    std::string obstacles_topic_;
     bool use_speed_adaptive_lookahead_{true};
     double assume_speed_mps_{0.0};
 
@@ -411,6 +475,7 @@ private:
     rclcpp::Subscription<suspension_preview_v2::msg::RoadProfile>::SharedPtr profile_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr speed_sub_;
+    rclcpp::Subscription<suspension_preview_v2::msg::RoadObstacles>::SharedPtr obstacles_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
     rclcpp::Publisher<suspension_control_v3::msg::ControlStatus>::SharedPtr status_pub_;

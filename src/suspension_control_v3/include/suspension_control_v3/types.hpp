@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 // SuspensionMode 定义在 v2 的 suspension_driver.hpp；这里一并引入，
 // 供状态机对外给出"该切到哪个作动器模式"
@@ -49,6 +50,15 @@ enum FaultCode : uint16_t {
 };
 
 // 控制器输入
+// 前方非地面障碍物（语义预瞄用，由 /suspension/road_obstacles 转来）。
+// 与 v2 的 Obstacle 是一一对应的，只是在 v3 里只保留决策需要的三个量，
+// 不引入 v2 消息类型的依赖——控制核心保持与 ROS 解耦
+struct ObstacleAhead {
+    double dist_m{0.0};      // 沿车前进方向的距离 (m)
+    double lateral_m{0.0};   // 横向偏移 (m)，左负右正
+    double height_m{0.0};    // 顶端相对地面的高度 (m)
+};
+
 struct ControlInput {
     bool has_attitude{false};
     double roll_rad{0.0};
@@ -77,6 +87,12 @@ struct ControlInput {
     // 车体原点，车在帧龄内已经前进 车速×帧龄——取样位置必须把这个距离加
     // 回去，否则高速长帧龄时取到的是"过去的路面"。无车速信息时无法补偿
     double profile_age_s{0.0};
+
+    // 语义预瞄：前方非地面障碍物。指针为空或 has_obstacles 为假表示
+    // "未订阅 / 未检出"，控制器行为与接入该功能之前完全一致。
+    // 用途见 controller.cpp 里 compute_feedforward 的第 e) 步
+    const std::vector<ObstacleAhead>* obstacles{nullptr};
+    bool has_obstacles{false};
 };
 
 // 控制器输出

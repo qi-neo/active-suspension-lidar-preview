@@ -93,6 +93,11 @@ struct ControlLoopStatus {
     std::size_t low_confidence_cells{0};
     double mean_dispersion_mm{0.0};
 
+    // 语义预瞄诊断：预瞄范围内的非地面障碍数量与最近距离 (m)。
+    // nearest_obstacle_m < 0 表示范围内无障碍
+    std::size_t obstacle_count{0};
+    double nearest_obstacle_m{-1.0};
+
     // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
     std::size_t calibration_samples{0};
     double calibrated_roll_rad{0.0};
@@ -154,6 +159,11 @@ public:
     void submit_speed(double speed_mps, double now_sec) override;
     const ControlLoopStatus& step(double now_sec, double dt) override;
 
+    // 提交一包前方非地面障碍物（语义预瞄，来自 /suspension/road_obstacles）。
+    // 整包替换而不是逐条累计：障碍物是"当前视野"的快照，不像剖面那样需要
+    // 跨帧保留。传空列表表示"视野内无障碍"（不是"未订阅"）
+    void submit_obstacles(std::vector<ObstacleAhead> obstacles);
+
     void request_estop(const char* reason) override;
     void clear_estop() override;
     bool request_reset() override;
@@ -180,6 +190,12 @@ private:
     // 200 Hz 下每拍重新分配两个 100 格的 vector 没有意义
     TemporalProfileFuser fuser_;
     suspension_preview_v2::RoadProfileFrame fused_;
+
+    // 语义预瞄：最新一包前方障碍物。has_obstacles_ 区分"未订阅"与
+    // "订阅了但视野内无障碍"——两者的控制器行为都一样（跳过语义分支），
+    // 但对诊断是有区别的
+    std::vector<ObstacleAhead> obstacles_;
+    bool has_obstacles_{false};
 
     Attitude attitude_;
     ControlLoopStatus status_;

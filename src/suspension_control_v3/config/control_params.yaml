@@ -44,6 +44,23 @@ suspension_control_node:
     min_lookahead_m: 0.5            # 取样距离下限 (m)
     wheelbase_m: 0.25               # 轴距 (m)，后轴取样 = 前馈距离 - 轴距，需实测
 
+    # ---- 姿态滤波 ----
+    # 默认关闭多级链，走原有的一阶低通（1.0 = 直通）。上台架建议打开多级链，
+    # 并按实测噪声水平重标死区——0.25° 是论文值，噪声大的 IMU 要调大
+    attitude_filter_alpha: 1.0
+    use_attitude_filter_chain: false
+    attitude_gyro_alpha: 0.08       # 陀螺角速度 IIR
+    attitude_accel_alpha: 0.05      # 姿态观测 IIR，兼作互补滤波校正权重
+    attitude_smooth_window: 40      # 滑窗平均拍数（200 Hz 下 = 0.2 s）
+    attitude_deadzone_deg: 0.25     # 软死区半宽（度），只作用于角度
+
+    # ---- 语义预瞄：订阅 v2 的非地面障碍物，在该轮迹上放弃前馈 ----
+    # 需要 v2 侧也在发布 /suspension/road_obstacles。默认关闭
+    use_semantic_preview: false
+    obstacles_topic: "/suspension/road_obstacles"
+    obstacle_min_height_m: 0.05     # 高于地面多少才抑制 (m)，太低会把减速带也抑制掉
+    obstacle_lateral_band_m: 0.15   # 判定"在本轮迹上"的横向半宽 (m)
+
     # ---- 增量式 LQI 增益（controller_kind=1 时生效，PD 模式下忽略）----
     # 控制律：u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
     # 积分作用来自 ki·θ 每拍累加，能压掉 PD 压不掉的常值横坡残留。

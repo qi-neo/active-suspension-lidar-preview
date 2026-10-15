@@ -25,6 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 add_library(suspension_control_core STATIC
   src/input_validator.cpp
   src/controller.cpp
+  src/attitude_filter.cpp
   src/safety_state_machine.cpp
   src/control_loop.cpp
   src/temporal_fuser.cpp

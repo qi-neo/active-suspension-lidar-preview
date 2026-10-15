@@ -23,13 +23,20 @@
 //  18. 帧龄运动补偿：取样位置 +车速×帧龄、无车速不补偿、回路帧龄上报
 //  19. 多帧位置对齐融合：位置对齐正确性、中位数抑噪、离散度判据、
 //      无车速直通、回路诊断上报
+//  20. 姿态多级抗噪滤波链：不累积漂移、高频噪声压制、软死区（小角度归零 /
+//      大角度连续）、角速度不被死区削掉、坏采样不污染
+//  21. 语义预瞄：障碍物抑制该侧前馈（左右分侧、太矮/超范围不抑制、
+//      开关关闭时向后兼容）、回路障碍数量与最近距离上报
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
+#include "suspension_control_v3/attitude_filter.hpp"
 #include "suspension_control_v3/control_loop.hpp"
 
 using namespace suspension_control_v3;
@@ -1260,6 +1267,248 @@ void test_temporal_fusion() {
           "融合帧有效时前馈应有非零输出");
 }
 
+// ---------------------------------------------------------------- 20. 姿态多级抗噪滤波链
+//
+// 论文里的多级滤波此前只存在于 Python/论文中，控制核心只有一级一阶低通
+// （attitude_filter_alpha，默认 1.0 直通）。这里验证落地后的 C++ 版确实具备
+// 论文声称的三条性质：不累积漂移、压得住高频噪声、平路残余不驱动作动器。
+void test_attitude_filter_chain() {
+    section("20. 姿态多级抗噪滤波链");
+
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kDegToRad = kPi / 180.0;
+    constexpr double kRadToDeg = 180.0 / kPi;
+    const AttitudeFilterParams fp;   // 默认 α_g=0.08 / α_a=0.05 / 窗 40 / 死区 0.25°
+    const double dt = 0.005;         // 200 Hz
+    const double dz = 0.25 * kDegToRad;
+
+    // ---- 20.1 陀螺常值漂移下不应累积漂移 ----
+    // 互补滤波的意义正在于此：陀螺快但会漂，加速度慢但不漂。只用陀螺积分
+    // 2000 拍会漂 1.0 rad，滤波后应收敛到一个有界的小稳态误差
+    {
+        AttitudeFilter f(fp);
+        const double bias = 0.10;    // rad/s 常值漂移
+        double r = 0.0, p = 0.0, rr = 0.0, pr = 0.0;
+        double at_1000 = 0.0, at_2000 = 0.0;
+        for (int k = 0; k < 2000; ++k) {
+            f.update(dt, 0.0, 0.0, bias, bias, r, p, rr, pr);   // 真实角度恒为 0
+            if (k == 999) at_1000 = r;
+            if (k == 1999) at_2000 = r;
+        }
+        const double pure_drift = bias * dt * 2000.0;
+        check(std::fabs(at_2000) < 0.02,
+              "陀螺常值漂移下输出应被加速度拉回，不累积漂移");
+        check(std::fabs(at_2000 - at_1000) < 1e-3,
+              "漂移应收敛到稳态而非持续增长");
+        std::printf("  陀螺常值漂移 %.2f rad/s × 2000 拍：纯积分会漂 %.3f rad，"
+                    "滤波后 %.5f rad（收敛）\n",
+                    bias, pure_drift, at_2000);
+    }
+
+    // ---- 20.2 高频观测噪声应被显著压制 ----
+    // 先用「死区 = 0」单独量滤波链本身的衰减：否则死区会把残余一并归零，
+    // 测出来的就只是死区而不是滤波，而且 RMS 为 0 会让衰减倍数变成 inf。
+    // 再验默认死区下残余确实被完全归零
+    {
+        const double amplitude = 0.02;   // 观测噪声幅值 (rad) ≈ 1.15°
+
+        AttitudeFilterParams no_dz = fp;
+        no_dz.deadzone_deg = 0.0;
+        AttitudeFilter f(no_dz);
+        std::uint64_t seed = 12345;      // 确定性伪随机，保证自检可复现
+        double sum_in2 = 0.0, sum_out2 = 0.0;
+        double r = 0.0, p = 0.0, rr = 0.0, pr = 0.0;
+        for (int k = 0; k < 2000; ++k) {
+            seed = (seed * 1103515245ull + 12345ull) % 2147483648ull;
+            const double noise =
+                (static_cast<double>(seed) / 2147483648.0 - 0.5) * 2.0 * amplitude;
+            f.update(dt, noise, noise, 0.0, 0.0, r, p, rr, pr);
+            if (k >= 200) {   // 跳过收敛段
+                sum_in2 += noise * noise;
+                sum_out2 += r * r;
+            }
+        }
+        const double rms_in = std::sqrt(sum_in2 / 1800.0);
+        const double rms_out = std::sqrt(sum_out2 / 1800.0);
+        check(rms_out < 0.5 * rms_in, "高频噪声应被显著压制（输出 RMS 明显小于输入）");
+        check(rms_out > 0.0, "关闭死区时不应把信号整体归零（否则测的是死区不是滤波）");
+
+        AttitudeFilter f_dz(fp);
+        seed = 12345;
+        double r2 = 0.0, p2 = 0.0, rr2 = 0.0, pr2 = 0.0;
+        double max_out = 0.0;
+        for (int k = 0; k < 2000; ++k) {
+            seed = (seed * 1103515245ull + 12345ull) % 2147483648ull;
+            const double noise =
+                (static_cast<double>(seed) / 2147483648.0 - 0.5) * 2.0 * amplitude;
+            f_dz.update(dt, noise, noise, 0.0, 0.0, r2, p2, rr2, pr2);
+            if (k >= 200) max_out = std::max(max_out, std::fabs(r2));
+        }
+        check(max_out == 0.0, "默认死区下噪声残余应被完全归零");
+        std::printf("  观测噪声 RMS %.5f rad -> 滤波后 %.5f rad（衰减 %.1f 倍）；"
+                    "叠加 0.25° 死区后残余恒为 0\n",
+                    rms_in, rms_out, rms_in / rms_out);
+    }
+
+    // ---- 20.3 软死区：小角度归零、大角度只减去阈值（连续） ----
+    {
+        AttitudeFilter f_small(fp);
+        const double small = 0.1 * kDegToRad;   // 0.1°，低于 0.25° 死区
+        double r1 = 0.0, p1 = 0.0, rr1 = 0.0, pr1 = 0.0;
+        for (int k = 0; k < 500; ++k) {
+            f_small.update(dt, small, small, 0.0, 0.0, r1, p1, rr1, pr1);
+        }
+        check(r1 == 0.0, "低于死区的角度应输出 0（平路残余噪声不驱动作动器）");
+
+        AttitudeFilter f_big(fp);
+        const double big = 1.0 * kDegToRad;
+        double r2 = 0.0, p2 = 0.0, rr2 = 0.0, pr2 = 0.0;
+        for (int k = 0; k < 500; ++k) {
+            f_big.update(dt, big, big, 0.0, 0.0, r2, p2, rr2, pr2);
+        }
+        check(std::fabs(r2 - (big - dz)) < 1e-4,
+              "高于死区应输出 角度-死区（软死区，阈值处连续）");
+        std::printf("  软死区 0.25°：0.1° -> 0.000°；1.0° -> %.3f°（应为 0.750°）\n",
+                    r2 * kRadToDeg);
+    }
+
+    // ---- 20.4 死区只作用于角度，不削角速度（D 项在平路也要有阻尼） ----
+    {
+        AttitudeFilter f(fp);
+        double r = 0.0, p = 0.0, rr = 0.0, pr = 0.0;
+        for (int k = 0; k < 500; ++k) {
+            f.update(dt, 0.0, 0.0, 0.5, 0.5, r, p, rr, pr);
+        }
+        check(std::fabs(rr - 0.5) < 1e-3,
+              "角速度不应被死区削掉（阻尼项必须保留）");
+        std::printf("  角速度 0.5 rad/s -> %.4f（死区只作用于角度）\n", rr);
+    }
+
+    // ---- 20.5 坏采样不污染整条链 ----
+    {
+        AttitudeFilter f(fp);
+        double r = 0.0, p = 0.0, rr = 0.0, pr = 0.0;
+        for (int k = 0; k < 100; ++k) {
+            f.update(dt, 0.02, 0.02, 0.1, 0.1, r, p, rr, pr);
+        }
+        const double before = r;
+        // 注入一个坏采样：链不应推进，输出保持上一拍
+        f.update(dt, std::numeric_limits<double>::quiet_NaN(), 0.02, 0.1, 0.1,
+                 r, p, rr, pr);
+        check(std::isfinite(r), "坏采样后输出应仍为有限值");
+        check(std::fabs(r - before) < 1e-9, "坏采样不应改变该通道输出");
+        std::printf("  坏采样注入 -> 输出保持 %.5f（有限、未被污染）\n", r);
+    }
+}
+
+// ---------------------------------------------------------------- 21. 语义预瞄
+//
+// 障碍物若部分落进地面窗口（8 cm 路沿落在 ±15 cm 的窗里），会把该格地面
+// 高度抬高，前馈就会命令作动器去"爬"它——那不是该吸收的减速带。语义预瞄
+// 的作用是在该轮迹上放弃预瞄，只走反馈。
+void test_semantic_preview() {
+    section("21. 语义预瞄：障碍物抑制该侧前馈");
+
+    // 恒定 +20 mm 的路面；无车速，取样距离 = lookahead_m = 1.0 m
+    const RoadProfileFrame f = make_frame(100.0, /*amp=*/0.0, /*offset=*/0.02);
+    const double half = 0.3;   // wheel_dist 0.6 的一半
+
+    ControlParams p;
+    p.use_semantic_preview = true;
+    PreviewFeedbackController ctrl(p);
+
+    auto run = [&](const std::vector<ObstacleAhead>* obs, bool has) {
+        ctrl.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        in.obstacles = obs;
+        in.has_obstacles = has;
+        return ctrl.compute(in, 0.005);
+    };
+
+    // ---- 21.1 未订阅障碍物（接入前的行为）：两侧都是 +20 mm ----
+    {
+        const ControlOutput out = run(nullptr, false);
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5, "基线：左前应 +20 mm");
+        check(std::fabs(out.feedforward_mm[kFrontRight] - 20.0) < 0.5, "基线：右前应 +20 mm");
+        std::printf("  基线（无障碍物订阅）：左前 %.1f mm，右前 %.1f mm\n",
+                    out.feedforward_mm[kFrontLeft], out.feedforward_mm[kFrontRight]);
+    }
+
+    std::vector<ObstacleAhead> left_obs{{0.5, -half, 0.30}};
+
+    // ---- 21.2 左迹有障碍 -> 左侧抑制、右侧照常 ----
+    {
+        const ControlOutput out = run(&left_obs, true);
+        check(out.feedforward_mm[kFrontLeft] == 0.0, "左迹有障碍：左前前馈应被抑制为 0");
+        check(out.feedforward_mm[kRearLeft] == 0.0, "左迹有障碍：左后前馈应被抑制为 0");
+        check(std::fabs(out.feedforward_mm[kFrontRight] - 20.0) < 0.5,
+              "左迹有障碍：右侧不受影响，仍 +20 mm");
+        std::printf("  左迹障碍 @0.5 m -> 左 %.1f/%.1f mm，右 %.1f mm\n",
+                    out.feedforward_mm[kFrontLeft], out.feedforward_mm[kRearLeft],
+                    out.feedforward_mm[kFrontRight]);
+    }
+
+    // ---- 21.3 右迹有障碍 -> 右侧抑制 ----
+    {
+        std::vector<ObstacleAhead> right_obs{{0.5, +half, 0.30}};
+        const ControlOutput out = run(&right_obs, true);
+        check(out.feedforward_mm[kFrontRight] == 0.0, "右迹有障碍：右前应被抑制为 0");
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "右迹有障碍：左侧不受影响");
+    }
+
+    // ---- 21.4 太矮（低于 obstacle_min_height_m = 0.05）-> 是减速带，不抑制 ----
+    {
+        std::vector<ObstacleAhead> low{{0.5, -half, 0.02}};
+        const ControlOutput out = run(&low, true);
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "2 cm 的凸起是减速带不是障碍，不应抑制");
+        std::printf("  矮障碍 0.02 m（< 0.05）-> 不抑制，左前 %.1f mm\n",
+                    out.feedforward_mm[kFrontLeft]);
+    }
+
+    // ---- 21.5 超出预瞄范围（取样距离 1.0 m）-> 不抑制 ----
+    {
+        std::vector<ObstacleAhead> far{{3.0, -half, 0.30}};
+        const ControlOutput out = run(&far, true);
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "预瞄范围外的障碍不影响本拍前馈");
+    }
+
+    // ---- 21.6 开关关闭时即使有数据也不抑制（向后兼容）----
+    {
+        ControlParams off = p;
+        off.use_semantic_preview = false;
+        PreviewFeedbackController c2(off);
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        in.obstacles = &left_obs;
+        in.has_obstacles = true;
+        const ControlOutput out = c2.compute(in, 0.005);
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "use_semantic_preview=false 时不抑制（与接入前一致）");
+    }
+
+    // ---- 21.7 回路诊断：数量与最近距离上报 ----
+    {
+        LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
+        fx.advance(3.0);
+        std::vector<ObstacleAhead> obs{{0.5, -half, 0.30}, {0.8, +half, 0.20},
+                                       {3.0, -half, 0.40}};
+        fx.loop.submit_obstacles(obs);
+        fx.advance(0.1);
+        check(fx.loop.status().obstacle_count == 2,
+              "预瞄范围内应上报 2 个障碍（3.0 m 那个在范围外）");
+        check(std::fabs(fx.loop.status().nearest_obstacle_m - 0.5) < 1e-6,
+              "最近障碍距离应为 0.5 m");
+        std::printf("  回路诊断：范围内 %zu 个，最近 %.2f m\n",
+                    fx.loop.status().obstacle_count, fx.loop.status().nearest_obstacle_m);
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1325,6 +1574,8 @@ int main() {
     test_per_axle_feedforward();
     test_frame_age_compensation();
     test_temporal_fusion();
+    test_attitude_filter_chain();
+    test_semantic_preview();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

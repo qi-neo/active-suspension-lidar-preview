@@ -22,6 +22,20 @@ namespace {
 // 剖面与控制器采样的方式不同，融合就白做了
 
 
+// 某条轮迹前方是否被障碍物挡住：障碍物落在该轮迹的横向带内、且距离在
+// 预瞄取样范围内、且高出地面足够多。三者都满足才抑制这一侧的预瞄
+bool track_blocked(const std::vector<ObstacleAhead>& obs, const ControlParams& params,
+                   double wheel_dist, bool left, double reach_m) {
+    const double center = left ? -wheel_dist * 0.5 : +wheel_dist * 0.5;
+    for (const auto& o : obs) {
+        if (!(o.height_m >= params.obstacle_min_height_m)) continue;   // 太矮：是路面凸起
+        if (!(o.dist_m >= 0.0) || o.dist_m > reach_m) continue;        // 不在预瞄范围内
+        if (std::fabs(o.lateral_m - center) > params.obstacle_lateral_band_m) continue;
+        return true;
+    }
+    return false;
+}
+
 // 第 1 步：预瞄前馈。输出四路目标行程（左前/右前/左后/右后）。
 //   a) 取样距离随车速自适应（响应时域恒定，距离 = 车速 × 时域）
 //   b) 帧龄运动补偿：剖面锚定采集时刻的车体原点，取样位置 +车速×帧龄
@@ -83,12 +97,36 @@ void compute_feedforward(const ControlInput& in, const ControlParams& params,
         ff_mm[kRearLeft] = gain_mm * h_lr;
         ff_mm[kRearRight] = gain_mm * h_rr;
     }
+
+    // e) 语义预瞄：该轮迹前方有非地面障碍物时放弃这一侧的预瞄。
+    //    障碍物的点可能部分落进地面窗口（8 cm 路沿落在 ±15 cm 的窗里），
+    //    于是把该格地面高度抬高，前馈就会命令作动器去"爬"它——那不是
+    //    该吸收的减速带。放弃预瞄后该侧只走反馈，宁可不动也不乱动。
+    //    未订阅障碍物（指针为空）时本段整体跳过，行为与接入前完全一致
+    if (params.use_semantic_preview && in.has_obstacles && in.obstacles != nullptr) {
+        if (track_blocked(*in.obstacles, params, frame.wheel_dist, /*left=*/true,
+                          sample_pos)) {
+            ff_mm[kFrontLeft] = 0.0;
+            ff_mm[kRearLeft] = 0.0;
+        }
+        if (track_blocked(*in.obstacles, params, frame.wheel_dist, /*left=*/false,
+                          sample_pos)) {
+            ff_mm[kFrontRight] = 0.0;
+            ff_mm[kRearRight] = 0.0;
+        }
+    }
 }
 
-// 姿态一阶低通。滤波状态由调用方持有，两个控制器各有一份，互不影响。
+// 姿态滤波。滤波状态由调用方持有，两个控制器各有一份，互不影响。
+// 两条路径：
+//   use_attitude_filter_chain = true  走多级链（陀螺 IIR -> 观测 IIR ->
+//                                     互补滤波 -> 滑窗 -> 软死区）
+//   否则                              走原有的一阶低通，alpha=1 即直通
 // 输出参数为滤波后的 roll / pitch / roll_rate / pitch_rate
-void filter_attitude(const ControlInput& in, double alpha, double& f_roll,
-                     double& f_pitch, double& f_roll_rate, double& f_pitch_rate,
+void filter_attitude(const ControlInput& in, const ControlParams& params, double dt,
+                     AttitudeFilter& chain,
+                     double& f_roll, double& f_pitch, double& f_roll_rate,
+                     double& f_pitch_rate,
                      double& roll, double& pitch, double& roll_rate,
                      double& pitch_rate) {
     // 先减掉标定得到的零位基准，再按目标姿态为零计算
@@ -97,8 +135,20 @@ void filter_attitude(const ControlInput& in, double alpha, double& f_roll,
     roll_rate = in.roll_rate;
     pitch_rate = in.pitch_rate;
 
+    if (params.use_attitude_filter_chain) {
+        // 多级链自带"首拍初始化"与滑窗，这里不再叠加一阶低通——
+        // 两级串在一起会让相位滞后翻倍，反而拖慢闭环响应
+        const double r0 = roll;
+        const double p0 = pitch;
+        const double rr0 = roll_rate;
+        const double pr0 = pitch_rate;
+        chain.update(dt, r0, p0, rr0, pr0, roll, pitch, roll_rate, pitch_rate);
+        return;
+    }
+
     // D 项直接吃角速度，低成本 IMU 的噪声会被 kd 放大成抖动。
     // alpha = 1 时直通，与不加滤波完全一致；调小则牺牲一点相位换平滑
+    const double alpha = std::clamp(params.attitude_filter_alpha, 0.0, 1.0);
     if (alpha >= 1.0) return;
 
     // 状态从 0 起步、每帧递推的一阶低通：阶跃首帧只出 alpha 倍，
@@ -162,7 +212,7 @@ double effective_lookahead(const ControlInput& in, const ControlParams& params) 
 // ---------------------------------------------------------------- PD 版
 
 PreviewFeedbackController::PreviewFeedbackController(const ControlParams& params)
-    : params_(params) {}
+    : params_(params), attitude_chain_(make_attitude_filter_params(params)) {}
 
 void PreviewFeedbackController::reset() {
     last_output_.fill(0.0);
@@ -171,6 +221,7 @@ void PreviewFeedbackController::reset() {
     filtered_pitch_ = 0.0;
     filtered_roll_rate_ = 0.0;
     filtered_pitch_rate_ = 0.0;
+    attitude_chain_.reset();
 }
 
 void PreviewFeedbackController::sync_reference(
@@ -200,9 +251,9 @@ ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double 
         double pitch = 0.0;
         double roll_rate = 0.0;
         double pitch_rate = 0.0;
-        const double alpha = std::clamp(params_.attitude_filter_alpha, 0.0, 1.0);
-        filter_attitude(in, alpha, filtered_roll_, filtered_pitch_, filtered_roll_rate_,
-                        filtered_pitch_rate_, roll, pitch, roll_rate, pitch_rate);
+        filter_attitude(in, params_, dt, attitude_chain_, filtered_roll_, filtered_pitch_,
+                        filtered_roll_rate_, filtered_pitch_rate_, roll, pitch, roll_rate,
+                        pitch_rate);
 
         u_roll = params_.kp_roll * roll + params_.kd_roll * roll_rate;
         u_pitch = params_.kp_pitch * pitch + params_.kd_pitch * pitch_rate;
@@ -218,7 +269,7 @@ ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double 
 // ---------------------------------------------------------------- 增量式 LQI 版
 
 IncrementalLqiController::IncrementalLqiController(const ControlParams& params)
-    : params_(params) {}
+    : params_(params), attitude_chain_(make_attitude_filter_params(params)) {}
 
 void IncrementalLqiController::reset() {
     last_output_.fill(0.0);
@@ -227,6 +278,7 @@ void IncrementalLqiController::reset() {
     filtered_pitch_ = 0.0;
     filtered_roll_rate_ = 0.0;
     filtered_pitch_rate_ = 0.0;
+    attitude_chain_.reset();
 }
 
 void IncrementalLqiController::sync_reference(
@@ -274,9 +326,9 @@ ControlOutput IncrementalLqiController::compute(const ControlInput& in, double d
         double pitch = 0.0;
         double roll_rate = 0.0;
         double pitch_rate = 0.0;
-        const double alpha = std::clamp(params_.attitude_filter_alpha, 0.0, 1.0);
-        filter_attitude(in, alpha, filtered_roll_, filtered_pitch_, filtered_roll_rate_,
-                        filtered_pitch_rate_, roll, pitch, roll_rate, pitch_rate);
+        filter_attitude(in, params_, dt, attitude_chain_, filtered_roll_, filtered_pitch_,
+                        filtered_roll_rate_, filtered_pitch_rate_, roll, pitch, roll_rate,
+                        pitch_rate);
 
         // 首拍（或 sync 之后的第一拍）没有有效的 prev_*，令 Δ = 0。
         // 这与 lqr_gain_design.py 里 x_prev = x 的初值一致，

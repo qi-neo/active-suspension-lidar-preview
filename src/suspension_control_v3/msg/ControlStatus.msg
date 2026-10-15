@@ -30,6 +30,10 @@ uint32 fused_frames          # 本拍参与融合的帧数（1 = 未融合）
 uint32 low_confidence_cells  # 跨帧离散度过大被判无效的格数（左右合计）
 float32 mean_dispersion_mm   # 平均跨帧离散度 (mm)
 
+# 语义预瞄（来自 /suspension/road_obstacles）
+uint32 obstacle_count        # 预瞄范围内的非地面障碍数量
+float32 nearest_obstacle_m  # 最近障碍距离 (m)，< 0 表示范围内无障碍
+
 uint32 ticks
 uint32 profiles_accepted
 uint32 profiles_rejected

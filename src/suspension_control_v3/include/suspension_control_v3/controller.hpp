@@ -6,6 +6,7 @@
 
 #include <array>
 
+#include "suspension_control_v3/attitude_filter.hpp"
 #include "suspension_control_v3/types.hpp"
 
 namespace suspension_control_v3 {
@@ -62,6 +63,29 @@ struct ControlParams {
     // 低成本 IMU 的噪声会被放大成抖动，必要时调小
     double attitude_filter_alpha{1.0};
 
+    // ---- 多级姿态抗噪滤波链（论文方法落地）----
+    // 关闭（默认）时走上面那级一阶低通，即既有行为；开启后走
+    // 陀螺 IIR -> 观测 IIR -> 互补滤波 -> 滑窗平均 -> 软死区。
+    // 默认关闭是为了不动既有整定与自检基线；上台架建议开启后复测，
+    // 死区大小尤其要按实际噪声水平重标（0.25° 是论文值）
+    bool use_attitude_filter_chain{false};
+    double attitude_gyro_alpha{0.08};      // 陀螺角速度 IIR
+    double attitude_accel_alpha{0.05};     // 姿态观测 IIR，兼作互补滤波校正权重
+    int attitude_smooth_window{40};        // 滑窗平均拍数（200 Hz 下 = 0.2 s）
+    double attitude_deadzone_deg{0.25};    // 软死区半宽（度），只作用于角度
+
+    // ---- 语义预瞄：前方有非地面障碍物时抑制该侧前馈 ----
+    // 动机：障碍物的点可能部分落进地面窗口（8 cm 路沿落在 ±15 cm 的窗里），
+    // 把该格地面高度抬高，前馈就会命令作动器去"爬"它——那不是该吸收的
+    // 减速带，而是该避让/减速的东西。抑制前馈后该侧只走反馈。
+    // 默认关闭：需要 v2 发布 /suspension/road_obstacles 且本侧订阅才生效
+    bool use_semantic_preview{false};
+    // 判定"障碍物在本轮迹上"的横向半宽 (m)。比 lane_half_width 宽一点，
+    // 因为障碍物往往比轮迹宽
+    double obstacle_lateral_band_m{0.15};
+    // 高于地面多少才抑制 (m)。太低会把路面凸起（减速带）也一起抑制掉
+    double obstacle_min_height_m{0.05};
+
     // ---- 增量式 LQI 增益（供 IncrementalLqiController 使用）----
     // 由 tools/lqr_gain_design.py 的 DARE 求解算出，三个一组。
     //
@@ -86,6 +110,17 @@ struct ControlParams {
 // 否则用 ControlInput::lookahead_m 固定值。控制回路用它做状态上报，
 // 与控制器内部取样用的是同一个函数，保证"上报的值"就是"实际用的值"
 double effective_lookahead(const ControlInput& in, const ControlParams& params);
+
+// 从控制参数里取出滤波链配置。单独成函数是为了让"参数 -> 滤波链配置"
+// 只有一处映射，两个控制器不会各自抄一遍而漂移
+inline AttitudeFilterParams make_attitude_filter_params(const ControlParams& p) {
+    AttitudeFilterParams f;
+    f.gyro_alpha = p.attitude_gyro_alpha;
+    f.accel_alpha = p.attitude_accel_alpha;
+    f.smooth_window = p.attitude_smooth_window;
+    f.deadzone_deg = p.attitude_deadzone_deg;
+    return f;
+}
 
 class IController {
 public:
@@ -132,6 +167,8 @@ private:
     double filtered_pitch_{0.0};
     double filtered_roll_rate_{0.0};
     double filtered_pitch_rate_{0.0};
+    // 多级滤波链（use_attitude_filter_chain 开启时生效），状态同样只属本控制器
+    AttitudeFilter attitude_chain_;
 };
 
 // ---------------------------------------------------------------- 增量式 LQI
@@ -193,6 +230,8 @@ private:
     double filtered_pitch_{0.0};
     double filtered_roll_rate_{0.0};
     double filtered_pitch_rate_{0.0};
+    // 与 PD 版同一套多级滤波链
+    AttitudeFilter attitude_chain_;
 
     // 清掉增量式记忆。reset() 与 sync_reference() 共用：
     // 两者的共同前提是"控制器此前的历史与实际执行情况脱节了"
