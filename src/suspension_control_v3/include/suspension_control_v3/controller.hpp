@@ -10,6 +10,18 @@
 
 namespace suspension_control_v3 {
 
+// 控制律选择。两者走同一条 IController 接口、共用前馈与解耦限幅，
+// 只在姿态反馈那一步不同：
+//   kPreviewFeedbackPd  绝对式：u = kp·θ + kd·ω，每拍重算，无记忆
+//   kIncrementalLqi     增量式：u = u_prev + kx1·Δθ + kx2·Δω + ki·θ
+// 默认 PD：它是原有行为，且不依赖整定过的 LQI 增益。
+// 切成 LQI 之前必须先用 tools/lqr_gain_design.py 算出 kx1/kx2/ki 并填进
+// ControlParams，否则三个增益全是 0，控制器退化成"只前馈"。
+enum class ControllerKind : uint8_t {
+    kPreviewFeedbackPd = 0,
+    kIncrementalLqi = 1,
+};
+
 struct ControlParams {
     // 姿态反馈增益（无导数 PD）。符号约定见 types.hpp。
     // 单位：kp 为 mm/rad，kd 为 mm/(rad/s)。
@@ -34,6 +46,25 @@ struct ControlParams {
     // 姿态一阶低通系数，1.0 为直通（默认）。D 项直接吃陀螺仪角速度，
     // 低成本 IMU 的噪声会被放大成抖动，必要时调小
     double attitude_filter_alpha{1.0};
+
+    // ---- 增量式 LQI 增益（供 IncrementalLqiController 使用）----
+    // 由 tools/lqr_gain_design.py 的 DARE 求解算出，三个一组。
+    //
+    // 控制律是增量式（与 PD 的绝对式本质不同）：
+    //     u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
+    // 其中 Δθ = θ[k] - θ[k-1]。积分作用不是显式积分器，而是 ki·θ
+    // 在增量累加中自然形成的——这正是它能压掉常值横坡残留的原因。
+    //
+    // 默认 0 表示未整定；全部置 0 时该控制器退化为"只前馈"。
+    // roll 与 pitch 默认共用一组：工具的模型对两个通道是对称的
+    // （同一个轮距、同一个二阶模态）。若台架上发现两者需要分别整定，
+    // 在这里拆成 _roll / _pitch 两套即可，控制律不变。
+    double lqi_kx1{0.0};   // 对 Δθ 的增益
+    double lqi_kx2{0.0};   // 对 Δω 的增益
+    double lqi_ki{0.0};    // 对 θ 的增益（积分项来源）
+
+    // 用哪个控制律。默认 PD，行为与加入 LQI 之前完全一致
+    ControllerKind controller_kind{ControllerKind::kPreviewFeedbackPd};
 };
 
 class IController {
@@ -74,10 +105,6 @@ public:
     const std::array<double, kWheelCount>& last_output() const { return last_output_; }
 
 private:
-    // 在剖面中按 lookahead 距离取样该轮迹的高程，返回 false 表示该处无有效数据
-    static bool sample_lane(const suspension_preview_v2::LaneProfile& lane,
-                            double lookahead_m, double spacing, double& height_m);
-
     ControlParams params_;
     std::array<double, kWheelCount> last_output_{0.0, 0.0, 0.0, 0.0};
     // 滤波后的姿态，仅用于内部递推
@@ -85,6 +112,71 @@ private:
     double filtered_pitch_{0.0};
     double filtered_roll_rate_{0.0};
     double filtered_pitch_rate_{0.0};
+};
+
+// ---------------------------------------------------------------- 增量式 LQI
+//
+// 与 PreviewFeedbackController 走同一条 IController 接口、共用前馈与解耦限幅，
+// 唯一区别是姿态反馈那一步的递推形式：
+//
+//   PD   绝对式： u = kp·θ + kd·ω          每拍重算，无记忆
+//   LQI  增量式： u = u_prev + kx1·Δθ + kx2·Δω + ki·θ
+//
+// 增量式的好处是积分作用免费得来：ki·θ 每拍累加一次，等效于对姿态误差积分，
+// 能压掉 PD 原理上压不掉的常值横坡残留（详见 lqr_gain_design.py 第 3 节）。
+// 代价是控制器从此有记忆——必须处理"记忆与实际情况脱节"的问题，
+// 这正是 sync_reference() 存在的原因，与 PD 版同一个理由、但更严重：
+// PD 版不同步只会让恢复第一拍从旧值起步，LQI 版还会把陈旧的 Δθ 算进去。
+class IncrementalLqiController : public IController {
+public:
+    explicit IncrementalLqiController(const ControlParams& params);
+
+    void reset() override;
+    ControlOutput compute(const ControlInput& in, double dt) override;
+
+    // 把实际下发值回灌给控制器。这里除了同步 last_output_（与 PD 版同一理由），
+    // 还必须清掉增量式的记忆（prev_* 与修正量累计值），否则：
+    //   - 恢复闭环第一拍会拿陈旧 prev_* 算 Δθ，可能直接顶到限幅
+    //   - 修正量累计值停留在降级前的旧值，第一拍就有一个跳变
+    // 清掉的代价是积分作用从零重新积累，横坡补偿要几秒才恢复——
+    // 相比跳变，这个代价是可接受的，且只在降级/急停恢复时发生一次。
+    void sync_reference(const std::array<double, kWheelCount>& height_mm) override;
+
+    const ControlParams& params() const override { return params_; }
+
+    const std::array<double, kWheelCount>& last_output() const { return last_output_; }
+
+    // 当前两个通道的修正量累计值（调试用：正常情况下它应随姿态误差收敛到
+    // 一个非零常数，那个常数就是积分在补偿常值扰动）
+    double roll_correction() const { return last_roll_correction_; }
+    double pitch_correction() const { return last_pitch_correction_; }
+
+private:
+    ControlParams params_;
+    std::array<double, kWheelCount> last_output_{0.0, 0.0, 0.0, 0.0};
+
+    // 增量式的记忆：上一拍的姿态与角速度，用于算 Δθ / Δω。
+    // has_prev_attitude_ 为 false 时（reset 或 sync 之后的第一拍）
+    // 令 Δ = 0，与 lqr_gain_design.py 里 x_prev = x 的初值一致
+    bool has_prev_attitude_{false};
+    double prev_roll_{0.0};
+    double prev_pitch_{0.0};
+    double prev_roll_rate_{0.0};
+    double prev_pitch_rate_{0.0};
+
+    // 修正量累计值，即增量式里的 u_prev
+    double last_roll_correction_{0.0};
+    double last_pitch_correction_{0.0};
+
+    // 与 PD 版同一套一阶低通状态
+    double filtered_roll_{0.0};
+    double filtered_pitch_{0.0};
+    double filtered_roll_rate_{0.0};
+    double filtered_pitch_rate_{0.0};
+
+    // 清掉增量式记忆。reset() 与 sync_reference() 共用：
+    // 两者的共同前提是"控制器此前的历史与实际执行情况脱节了"
+    void clear_incremental_memory();
 };
 
 }  // namespace suspension_control_v3
