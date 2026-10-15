@@ -29,6 +29,9 @@
 //      开关关闭时向后兼容）、回路障碍数量与最近距离上报
 //  22. 作动器位置反馈与堵转：无反馈不判 / 正常跟随不误判 / 单轮卡死置故障位
 //      并降级 / 长期不复原转 Emergency / 短时堵转自行消除不降级（防抖）
+//  23. 预瞄前馈 FIR：关闭时行为不变 / 直流增益守恒 / 凸起被权重分摊而非全跟 /
+//      零权重拍归一化 / 远端缺格回退到最近有效格 / preview_start_m 决定窗口位置 /
+//      权重为空退回单点
 
 #include <algorithm>
 #include <cmath>
@@ -1624,6 +1627,207 @@ void test_actuator_position_feedback() {
     }
 }
 
+// ---------------------------------------------------------------- 23. 预瞄前馈 FIR
+//
+// 单点比例前馈只能表达"在某个距离取一个高度 × 标量增益"；lqr_gain_design.py
+// 第七节的最优解是一条权重向量。这里验证 FIR 落地的三个关键性质：
+// 直流增益守恒、凸起被权重分摊而非全跟、远端缺格时重新归一化。
+void test_preview_fir_feedforward() {
+    section("23. 预瞄前馈 FIR");
+
+    constexpr double kSpacing = 0.05;
+    // 造一条可逐格控制的路面：全格 base，再把指定格抬高 bump
+    auto make_road_frame = [](std::size_t bump_cell, double bump) {
+        RoadProfileFrame f;
+        f.stamp_sec = 100.0;
+        f.frame_id = "base_link";
+        f.spacing = static_cast<float>(kSpacing);
+        f.wheel_dist = 0.6f;
+        f.preview_dist = 5.0f;
+        constexpr std::size_t kCells = 100;
+        f.left.reset(kCells);
+        f.right.reset(kCells);
+        for (std::size_t i = 0; i < kCells; ++i) {
+            f.left.height[i] = 0.02f;
+            f.right.height[i] = 0.02f;
+            f.left.valid[i] = kMeasured;
+            f.right.valid[i] = kMeasured;
+        }
+        f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
+        f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
+        return f;
+    };
+    // 只保留前 n 格有效，其余判无效（模拟远端没数据）
+    auto keep_only = [](RoadProfileFrame& f, std::size_t n) {
+        for (std::size_t i = n; i < f.left.size(); ++i) {
+            f.left.valid[i] = kInvalid;
+            f.right.valid[i] = kInvalid;
+        }
+    };
+
+    ControlParams p;
+    PreviewFeedbackController ctrl(p);
+    auto ff_of = [&](const RoadProfileFrame& f) {
+        ctrl.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        return ctrl.compute(in, 0.005).feedforward_mm;
+    };
+
+    // ---- 23.1 关闭时与接入前完全一致（回归护栏）----
+    {
+        const auto ff = ff_of(make_road_frame(999, 0.0));   // 999 越界即无凸起
+        check(std::fabs(ff[kFrontLeft] - 20.0) < 0.5,
+              "FIR 关闭时均匀 20 mm 路面应给出 +20 mm（与接入前一致）");
+        std::printf("  FIR 关闭：均匀路面 -> 左前 %.1f mm（基线）\n", ff[kFrontLeft]);
+    }
+
+    // ---- 23.2 直流增益守恒：均匀路面下 FIR 必须等于单点 ----
+    // 权重和为 1，均匀路面加权平均还是原值——否则恒定路面会有稳态偏移
+    {
+        ControlParams q = p;
+        q.use_preview_fir = true;
+        PreviewFeedbackController c2(q);
+        c2.reset();
+        ControlInput in;
+        const RoadProfileFrame f = make_road_frame(999, 0.0);
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        const auto ff = c2.compute(in, 0.005).feedforward_mm;
+        check(std::fabs(ff[kFrontLeft] - 20.0) < 0.5,
+              "FIR 开启但路面均匀时仍应为 +20 mm（直流增益守恒）");
+        std::printf("  FIR 开启：均匀路面 -> 左前 %.1f mm（守恒）\n", ff[kFrontLeft]);
+    }
+
+    // ---- 23.3 凸起被权重分摊，而不是全跟 ----
+    // 第 5 格抬 100 mm。单点取样（落在该格）会给 120 mm；FIR 只给
+    // 0.02 + f[5]×0.10 = 0.030 -> 30 mm。这正是预瞄 FIR 的意义：
+    // 窄凸起不该被全额跟随（那需要无限加速度），按权重分摊
+    {
+        ControlParams q = p;
+        q.use_preview_fir = true;
+        PreviewFeedbackController c2(q);
+        c2.reset();
+        ControlInput in;
+        const RoadProfileFrame f = make_road_frame(5, 0.10);
+        in.profile = &f;
+        in.lookahead_m = 0.25;   // 单点路径会正好落在第 5 格
+        const auto ff_fir = c2.compute(in, 0.005).feedforward_mm;
+
+        PreviewFeedbackController c3(p);   // 单点路径
+        c3.reset();
+        ControlInput in2;
+        in2.profile = &f;
+        in2.lookahead_m = 0.25;
+        const auto ff_pt = c3.compute(in2, 0.005).feedforward_mm;
+
+        const double f5 = q.preview_gains[5];
+        const double expect = 1000.0 * (0.02 + f5 * 0.10);
+        check(std::fabs(ff_fir[kFrontLeft] - expect) < 0.05,
+              "FIR 对单格凸起的响应应等于 该拍权重×凸起高度");
+        check(ff_pt[kFrontLeft] > ff_fir[kFrontLeft],
+              "单点取样会全额跟随凸起，FIR 应显著小于它");
+        std::printf("  第 5 格凸起 100 mm：单点 %.1f mm，FIR %.1f mm（权重 f[5]=%.4f）\n",
+                    ff_pt[kFrontLeft], ff_fir[kFrontLeft], f5);
+    }
+
+    // ---- 23.4 权重归一化：零权重拍被跳过，有效增益不变小 ----
+    // 把后 5 拍权重置 0。若不做归一化，有效增益会凭空降到 0.65，
+    // 均匀路面的前馈也会跟着变小——而那正是"配了权重却莫名变弱"的典型现象
+    {
+        ControlParams q = p;
+        q.use_preview_fir = true;
+        for (std::size_t j = 6; j < q.preview_gains.size(); ++j) {
+            q.preview_gains[j] = 0.0;
+        }
+        RoadProfileFrame f = make_road_frame(2, 0.10);
+        PreviewFeedbackController c2(q);
+        c2.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        const auto ff = c2.compute(in, 0.005).feedforward_mm;
+
+        double wsum = 0.0;
+        for (std::size_t j = 0; j < 6; ++j) wsum += q.preview_gains[j];
+        const double expect = 1000.0 * (0.02 + (q.preview_gains[2] / wsum) * 0.10);
+        check(std::fabs(ff[kFrontLeft] - expect) < 0.05,
+              "零权重拍应被跳过，并按实际用上的权重归一化");
+        std::printf("  后 5 拍权重置 0、凸起在第 2 格 -> %.1f mm（期望 %.1f）\n",
+                    ff[kFrontLeft], expect);
+    }
+
+    // ---- 23.5 剖面被截断时，远端拍回退到最近有效格而不是整体衰减 ----
+    // 只留前 6 格：第 6 拍及以后会走 sample_lane 的"最近有效格兜底"，
+    // 于是复读第 5 格的值。这样权重和仍是全量，前馈不会因为"远处没数据"
+    // 而凭空变弱——变弱比复读更危险（等效于前馈突然增益减半）
+    {
+        ControlParams q = p;
+        q.use_preview_fir = true;
+        RoadProfileFrame f = make_road_frame(2, 0.10);
+        keep_only(f, 6);
+        PreviewFeedbackController c2(q);
+        c2.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        const auto ff = c2.compute(in, 0.005).feedforward_mm;
+        // 凸起只在前 6 格内贡献一次，其余拍都是 0.02
+        const double expect = 1000.0 * (0.02 + q.preview_gains[2] * 0.10);
+        check(std::fabs(ff[kFrontLeft] - expect) < 0.05,
+              "远端缺格应回退到最近有效格（复读），而非把前馈整体衰减");
+        std::printf("  只留前 6 格 -> %.1f mm（期望 %.1f，远端拍复读第 5 格）\n",
+                    ff[kFrontLeft], expect);
+    }
+
+    // ---- 23.6 preview_start_m 决定 FIR 窗口位置 ----
+    {
+        ControlParams q = p;
+        q.use_preview_fir = true;
+        q.preview_start_m = 0.25;   // 窗口从第 5 格开始
+        RoadProfileFrame f = make_road_frame(5, 0.10);   // 凸起正好在窗口第一拍
+        PreviewFeedbackController c2(q);
+        c2.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        const auto ff = c2.compute(in, 0.005).feedforward_mm;
+        const double expect = 1000.0 * (0.02 + q.preview_gains[0] * 0.10);
+        check(std::fabs(ff[kFrontLeft] - expect) < 0.05,
+              "preview_start_m 应把 FIR 窗口平移到指定距离");
+
+        // 窗口之前的凸起完全看不到
+        RoadProfileFrame f2 = make_road_frame(3, 0.10);
+        c2.reset();
+        ControlInput in2;
+        in2.profile = &f2;
+        in2.lookahead_m = 1.0;
+        const auto ff2 = c2.compute(in2, 0.005).feedforward_mm;
+        check(std::fabs(ff2[kFrontLeft] - 20.0) < 0.5,
+              "FIR 窗口之前的凸起不应被看到");
+        std::printf("  preview_start_m=0.25：窗口内凸起 %.1f mm，窗口外 %.1f mm\n",
+                    ff[kFrontLeft], ff2[kFrontLeft]);
+    }
+
+    // ---- 23.7 防御：开了 FIR 但权重为空 -> 退回单点取样 ----
+    {
+        ControlParams q = p;
+        q.use_preview_fir = true;
+        q.preview_gains.clear();
+        const RoadProfileFrame f = make_road_frame(999, 0.0);
+        PreviewFeedbackController c2(q);
+        c2.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        const auto ff = c2.compute(in, 0.005).feedforward_mm;
+        check(std::fabs(ff[kFrontLeft] - 20.0) < 0.5,
+              "权重为空时应退回单点取样，不能给出 0 或 NaN");
+        std::printf("  权重为空 -> 退回单点，左前 %.1f mm\n", ff[kFrontLeft]);
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1692,6 +1896,7 @@ int main() {
     test_attitude_filter_chain();
     test_semantic_preview();
     test_actuator_position_feedback();
+    test_preview_fir_feedforward();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

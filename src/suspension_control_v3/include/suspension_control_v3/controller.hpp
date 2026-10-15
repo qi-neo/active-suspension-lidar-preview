@@ -5,8 +5,10 @@
 #pragma once
 
 #include <array>
+#include <vector>
 
 #include "suspension_control_v3/attitude_filter.hpp"
+#include "suspension_control_v3/profile_sampling.hpp"
 #include "suspension_control_v3/types.hpp"
 
 namespace suspension_control_v3 {
@@ -85,6 +87,29 @@ struct ControlParams {
     double obstacle_lateral_band_m{0.15};
     // 高于地面多少才抑制 (m)。太低会把路面凸起（减速带）也一起抑制掉
     double obstacle_min_height_m{0.05};
+
+    // ---- 预瞄前馈 FIR（可选，替代单点比例取样）----
+    // 单点比例前馈只能表达"在某个距离取一个高度、乘一个标量增益"。
+    // 而 lqr_gain_design.py 第七节的最优解是一条权重向量——把未来一小段路面
+    // 按权重分摊到指令里，标量增益表达不了这个形状（实测最优预瞄比 g=1.0
+    // 好 92%）。开着一项后，前馈改成：
+    //     h = Σ_j f[j]·z_r(start + j·spacing) / Σ_used f[j]
+    // 其中 start = 帧龄补偿后的当前位置 + preview_start_m
+    //
+    // 默认关闭：与接入前行为完全一致；且默认增益是按 tau=0.05 s 的模型算的，
+    // 上台架需按实测作动器滞后重算（跑 tools/lqr_gain_design.py 第七节）
+    bool use_preview_fir{false};
+    // FIR 起点相对"帧龄补偿后当前位置"的偏移 (m)。0 = 从车轮此刻所在路面开始。
+    // 注意它替代了 lookahead_time_s 的作用：提前量该补偿作动器滞后，
+    // 而不是"走满行程的耗时"
+    double preview_start_m{0.0};
+    // 各拍权重。直流增益（Σf）应为 1.0，否则恒定路面下会产生稳态偏移。
+    // 默认值来自 lqr_gain_design.py 第七节（tau=0.05 s、200 Hz、12 拍窗），
+    // 去掉最后一拍的泄漏尾伪影后归一化——那条尖峰是窗外衰减假设的产物，
+    // 不是物理量
+    std::vector<double> preview_gains{
+        0.1202, 0.1169, 0.1122, 0.1066, 0.1000, 0.0929,
+        0.0853, 0.0778, 0.0703, 0.0627, 0.0552};
 
     // ---- 增量式 LQI 增益（供 IncrementalLqiController 使用）----
     // 由 tools/lqr_gain_design.py 的 DARE 求解算出，三个一组。

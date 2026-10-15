@@ -36,6 +36,33 @@ bool track_blocked(const std::vector<ObstacleAhead>& obs, const ControlParams& p
     return false;
 }
 
+// 预瞄 FIR：把轮迹从 start_x 起、按 spacing 等间隔的 N 个取样点按权重加权，
+// 替代单点取样。权重归一化到"实际用上的那些拍"上，而不是全部拍——
+// 否则远端缺格会让有效增益凭空变小，前馈突然变弱，而现象只是
+// "远处没数据"，极难定位。
+// 返回 false 表示一个有效取样点都没有
+bool fir_lane(const suspension_preview_v2::LaneProfile& lane, double start_x,
+              double spacing, const std::vector<double>& gains, double& out) {
+    if (lane.empty() || spacing <= 0.0 || gains.empty()) return false;
+    double acc = 0.0;
+    double wsum = 0.0;
+    bool dummy = false;
+    for (std::size_t j = 0; j < gains.size(); ++j) {
+        const double w = gains[j];
+        if (!(w > 0.0) || !std::isfinite(w)) continue;
+        double h = 0.0;
+        if (!sample_lane(lane, start_x + static_cast<double>(j) * spacing, spacing,
+                         h, dummy)) {
+            continue;   // 这一拍没数据，跳过（权重和随之缩小）
+        }
+        acc += w * h;
+        wsum += w;
+    }
+    if (!(wsum > 0.0)) return false;
+    out = acc / wsum;
+    return true;
+}
+
 // 第 1 步：预瞄前馈。输出四路目标行程（左前/右前/左后/右后）。
 //   a) 取样距离随车速自适应（响应时域恒定，距离 = 车速 × 时域）
 //   b) 帧龄运动补偿：剖面锚定采集时刻的车体原点，取样位置 +车速×帧龄
@@ -74,12 +101,38 @@ void compute_feedforward(const ControlInput& in, const ControlParams& params,
     //    低速时该差值为负，钳到 0——后轮此时已经压在目标特征上
     const double rear_lookahead = std::max(0.0, sample_pos - params.wheelbase_m);
 
+    // d) 取样：两种形态二选一
+    //    use_preview_fir = false  单点比例取样（既有行为，默认）
+    //    use_preview_fir = true   FIR：从"帧龄补偿后的当前位置 + preview_start_m"
+    //                             起，把未来 N 拍路面按权重加权。
+    //                             注意 FIR 的起点不再是 lookahead——提前量该
+    //                             补偿作动器滞后，而不是"走满行程的耗时"
+    //                             二者对语义预瞄的"作用范围"不同，分别算出 reach
     double h_lf = 0.0, h_rf = 0.0, h_lr = 0.0, h_rr = 0.0;
     bool dummy = false;   // 插值标记目前只用于诊断，这里不需要
-    const bool lf_ok = sample_lane(frame.left, sample_pos, spacing, h_lf, dummy);
-    const bool rf_ok = sample_lane(frame.right, sample_pos, spacing, h_rf, dummy);
-    const bool lr_ok = sample_lane(frame.left, rear_lookahead, spacing, h_lr, dummy);
-    const bool rr_ok = sample_lane(frame.right, rear_lookahead, spacing, h_rr, dummy);
+    bool lf_ok = false, rf_ok = false, lr_ok = false, rr_ok = false;
+    double reach = sample_pos;   // 前馈实际看到的最远距离 (m)，供语义预瞄用
+    if (params.use_preview_fir && !params.preview_gains.empty()) {
+        const double front_start = shift + params.preview_start_m;
+        const double rear_start = std::max(0.0, front_start - params.wheelbase_m);
+        lf_ok = fir_lane(frame.left, front_start, spacing, params.preview_gains, h_lf);
+        rf_ok = fir_lane(frame.right, front_start, spacing, params.preview_gains, h_rf);
+        lr_ok = fir_lane(frame.left, rear_start, spacing, params.preview_gains, h_lr);
+        rr_ok = fir_lane(frame.right, rear_start, spacing, params.preview_gains, h_rr);
+        // FIR 覆盖到最后一个非零权重的那一拍
+        std::size_t last = 0;
+        for (std::size_t j = 0; j < params.preview_gains.size(); ++j) {
+            if (params.preview_gains[j] > 0.0) last = j;
+        }
+        reach = front_start + static_cast<double>(last) * spacing;
+        // 上报的位置取 FIR 起点：它才是"这一拍的前馈锚在哪"
+        sample_position_m = front_start;
+    } else {
+        lf_ok = sample_lane(frame.left, sample_pos, spacing, h_lf, dummy);
+        rf_ok = sample_lane(frame.right, sample_pos, spacing, h_rf, dummy);
+        lr_ok = sample_lane(frame.left, rear_lookahead, spacing, h_lr, dummy);
+        rr_ok = sample_lane(frame.right, rear_lookahead, spacing, h_rr, dummy);
+    }
 
     // d) 单侧失效时借对侧高程。左右轮迹只差一个轮距，横坡引起的高差远小于
     //    "填 0"造成的台阶——后者等效于给一个伪横滚指令，会把车往一侧推
@@ -105,12 +158,12 @@ void compute_feedforward(const ControlInput& in, const ControlParams& params,
     //    未订阅障碍物（指针为空）时本段整体跳过，行为与接入前完全一致
     if (params.use_semantic_preview && in.has_obstacles && in.obstacles != nullptr) {
         if (track_blocked(*in.obstacles, params, frame.wheel_dist, /*left=*/true,
-                          sample_pos)) {
+                          reach)) {
             ff_mm[kFrontLeft] = 0.0;
             ff_mm[kRearLeft] = 0.0;
         }
         if (track_blocked(*in.obstacles, params, frame.wheel_dist, /*left=*/false,
-                          sample_pos)) {
+                          reach)) {
             ff_mm[kFrontRight] = 0.0;
             ff_mm[kRearRight] = 0.0;
         }

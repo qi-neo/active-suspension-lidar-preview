@@ -194,6 +194,34 @@ private:
         obstacles_topic_ = declare_parameter<std::string>("obstacles_topic",
                                                          "/suspension/road_obstacles");
 
+        // 预瞄前馈 FIR：把未来若干拍的路面按权重加权，替代单点比例取样。
+        // 权重来自 tools/lqr_gain_design.py 第七节，需按实测作动器滞后重算
+        ctrl_.use_preview_fir = declare_parameter<bool>("use_preview_fir",
+                                                       ctrl_.use_preview_fir);
+        ctrl_.preview_start_m = declare_parameter<double>("preview_start_m",
+                                                         ctrl_.preview_start_m);
+        ctrl_.preview_gains = declare_parameter<std::vector<double>>(
+            "preview_gains", ctrl_.preview_gains);
+        if (ctrl_.use_preview_fir) {
+            if (ctrl_.preview_gains.empty()) {
+                RCLCPP_WARN(get_logger(),
+                            "use_preview_fir=true 但 preview_gains 为空，"
+                            "将退回单点比例取样");
+            } else {
+                double sum = 0.0;
+                for (double g : ctrl_.preview_gains) sum += g;
+                RCLCPP_INFO(get_logger(),
+                            "预瞄前馈 FIR：%zu 拍、起点 +%.3f m、直流增益 %.3f"
+                            "（应为 1.0）",
+                            ctrl_.preview_gains.size(), ctrl_.preview_start_m, sum);
+                if (std::fabs(sum - 1.0) > 0.05) {
+                    RCLCPP_WARN(get_logger(),
+                                "preview_gains 直流增益 %.3f 偏离 1.0，"
+                                "恒定路面下会产生稳态偏移", sum);
+                }
+            }
+        }
+
         // 车速源。use_speed_adaptive_lookahead 为 false 时不订阅，
         // 前馈全程走固定 lookahead_m（与接入车速之前的行为一致）。
         // assume_speed_mps > 0 用于没有里程计的台架：按恒定车速前馈

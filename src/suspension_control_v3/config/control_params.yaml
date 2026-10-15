@@ -61,6 +61,17 @@ suspension_control_node:
     obstacle_min_height_m: 0.05     # 高于地面多少才抑制 (m)，太低会把减速带也抑制掉
     obstacle_lateral_band_m: 0.15   # 判定"在本轮迹上"的横向半宽 (m)
 
+    # ---- 预瞄前馈 FIR（替代单点比例取样）----
+    # 权重来自 tools/lqr_gain_design.py 第七节（tau=0.05 s、200 Hz、12 拍窗），
+    # 去掉泄漏尾伪影后归一化到直流增益 1.0。上台架需按实测作动器滞后重算：
+    #   python3 tools/lqr_gain_design.py --actuator-tau <实测tau>
+    # 注意 preview_start_m 替代了 lookahead_time_s 的作用——提前量该补偿
+    # 作动器滞后，而不是"走满行程的耗时"
+    use_preview_fir: false
+    preview_start_m: 0.0            # FIR 起点相对帧龄补偿后当前位置的偏移 (m)
+    preview_gains: [0.1202, 0.1169, 0.1122, 0.1066, 0.1000, 0.0929,
+                    0.0853, 0.0778, 0.0703, 0.0627, 0.0552]   # 和为 1.0
+
     # ---- 增量式 LQI 增益（controller_kind=1 时生效，PD 模式下忽略）----
     # 控制律：u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
     # 积分作用来自 ki·θ 每拍累加，能压掉 PD 压不掉的常值横坡残留。
