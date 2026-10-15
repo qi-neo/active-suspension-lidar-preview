@@ -87,9 +87,15 @@ add_executable(obstacle_selftest
 target_include_directories(obstacle_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# 串口协议的纯函数自检（CRC 标准向量 / 帧布局 / 坏帧拒收 / 毫米换算钳位）
+add_executable(protocol_selftest
+  examples/protocol_selftest.cpp src/protocol.cpp)
+target_include_directories(protocol_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # 安装
 install(TARGETS road_preview_node suspension_driver_node offline_demo
-  trend_selftest obstacle_selftest
+  trend_selftest obstacle_selftest protocol_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 # suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，

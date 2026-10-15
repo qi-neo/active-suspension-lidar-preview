@@ -104,7 +104,13 @@ source install/setup.bash
 ros2 run suspension_preview_v2 offline_demo      # 端到端：解析 + 协议往返
 ros2 run suspension_preview_v2 trend_selftest    # 趋势与逐格估计的纯函数自检，29 项
 ros2 run suspension_preview_v2 obstacle_selftest # 障碍物检测纯函数自检，12 项
+ros2 run suspension_preview_v2 protocol_selftest # 串口协议纯函数自检，28 项
 ```
+
+`protocol_selftest` 覆盖 CRC16-CCITT-FALSE 标准向量（`"123456789"` → `0x29B1`）、检错
+能力、帧布局与小端字节序、编解码往返、坏帧拒收（CRC 错 / 截断 / 无帧头）、`encode_lane`
+的毫米换算与无效点 `0x7FFF` 标记，以及超量程钳位——后者尤其关键：串口负载是 int16 毫米，
+若超量程回绕会把 +33 m 变成约 -32 m，下发到执行器是方向性灾难。
 
 `offline_demo` 合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，最后做一次协议编解码往返校验：
 
@@ -213,6 +219,6 @@ driver->emergency_stop();
    未使用平面拟合（RANSAC / 格内 PCA 法向量）；
 3. 障碍物已由解析链路单独检测并发布到 `/suspension/road_obstacles`（左右轮迹合并、
    按 x 排序），但控制侧（v3）的语义预瞄分支（避让 / 减速）尚未接——目前是"接口就绪"；
-4. 分箱逻辑、趋势拟合、障碍物检测都已有纯函数测试（`trend_selftest` / `obstacle_selftest`），
-   `protocol::crc16_ccitt` 与 `encode_lane` 仍建议补同类型的测试；
-4. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）。
+4. 分箱逻辑、趋势拟合、障碍物检测、串口协议都已有纯函数测试
+   （`trend_selftest` / `obstacle_selftest` / `protocol_selftest`，共 69 项，均不依赖 PCL）；
+5. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）。
