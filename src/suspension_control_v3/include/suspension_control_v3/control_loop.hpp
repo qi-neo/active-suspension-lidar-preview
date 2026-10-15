@@ -129,7 +129,9 @@ private:
     ControlLoopParams params_;
     std::unique_ptr<RoadProfileValidator> validator_;
     std::unique_ptr<SafetyStateMachine> state_machine_;
-    std::unique_ptr<PreviewFeedbackController> controller_;
+    // 具体类型由 ControlParams::controller_kind 决定，这里只持接口。
+    // 用接口而不是具体类型，是为了让 PD 与 LQI 可以互换而不动这一层
+    std::unique_ptr<IController> controller_;
     std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver_;
 
     Attitude attitude_;

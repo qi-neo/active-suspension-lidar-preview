@@ -17,6 +17,11 @@ suspension_control_node:
 
     # ---- 控制器 ----
     lookahead_m: 1.0                # 前馈取样距离 (m)
+    # 控制律：0 = 绝对式 PD（默认），1 = 增量式 LQI。
+    # 切成 1 之前必须先把下面三个 LQI 增益填进来（用 tools/lqr_gain_design.py
+    # 算），否则三个都是 0，控制器退化成"只前馈、不闭环"。
+    # 节点在这种情况下会打 WARN，不会静默
+    controller_kind: 0
     kp_roll: 250.0                  # mm/rad
     kd_roll: 30.0                   # mm/(rad/s)
     kp_pitch: 200.0
@@ -25,6 +30,14 @@ suspension_control_node:
     feedforward_sign: 1.0           # 依作动器安装方向在台架上确认正负
     height_limit_mm: 40.0           # 单轮行程限幅
     rate_limit_mm_per_s: 300.0      # 作动器速率限制
+
+    # ---- 增量式 LQI 增益（controller_kind=1 时生效，PD 模式下忽略）----
+    # 控制律：u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
+    # 积分作用来自 ki·θ 每拍累加，能压掉 PD 压不掉的常值横坡残留。
+    # 默认 0 表示未整定；上车站架前必须先跑 lqr_gain_design.py
+    lqi_kx1: 0.0
+    lqi_kx2: 0.0
+    lqi_ki: 0.0
 
     # ---- 输入校验（坏数据拒绝）----
     max_age_ms: 200.0               # 剖面最大有效期

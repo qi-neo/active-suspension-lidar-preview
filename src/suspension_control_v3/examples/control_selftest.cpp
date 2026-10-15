@@ -1,6 +1,6 @@
 // 闭环控制与安全状态机的离线自检。不依赖 ROS、不依赖 PCL、不需要硬件。
 //
-// 覆盖六组场景：
+// 场景分组（按 main() 里的调用顺序）：
 //   1. 正常启动流程 Boot -> Calibrating -> Leveling -> Balancing
 //   2. 坏数据拒绝：NaN、超范围、质量不足、间距/轮距非法、坐标系不符、
 //      左右长度不一致、时间戳过旧/倒退、帧间跳变过大
@@ -8,6 +8,16 @@
 //   4. 姿态超出安全阈值触发急停
 //   5. 急停锁存与复位流程
 //   6. 控制器数值：前馈取样、横滚/俯仰解耦符号、限幅、速率限制
+//   7. 闭环下发与去重
+//   8. 声明驱动但未挂驱动器
+//   9. 零位标定
+//  10. 姿态一阶低通
+//  11. sync_reference：控制器记忆与实际下发值同步
+//  12. 降级保持超时
+//  13. dt 封顶
+//  14. 急停与回中的下发路径
+//  15. 增量式 LQI：递推正确性、积分保持、修正量限幅、sync 后无跳变、
+//      以及控制回路按 controller_kind 选控制律
 
 #include <algorithm>
 #include <cmath>
@@ -104,9 +114,10 @@ struct LoopFixture {
     double t{0.0};
     SuspensionControlLoop loop;
 
-    explicit LoopFixture(bool attach_driver = false, bool require_driver = false)
+    explicit LoopFixture(bool attach_driver = false, bool require_driver = false,
+                         const ControlParams* control_params = nullptr)
         : loop(make_params(require_driver), ValidatorParams{}, StateMachineParams{},
-               ControlParams{}) {
+               control_params ? *control_params : ControlParams{}) {
         if (attach_driver) {
             driver = std::make_shared<MockDriver>();
             driver->connect();
@@ -620,6 +631,204 @@ void test_dt_clamp() {
 
 // ---------------------------------------------------------------- 场景 14
 // 两条真实下线路径：急停必须走硬件接口，回中指令不能被去重吞掉
+void test_incremental_lqi() {
+    section("15. 增量式 LQI 控制器");
+
+    // 本组验证 LQI 与 PD 的本质区别：递推而非重算。控制律是
+    //     u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
+    // 增益取一组便于手算的值
+    ControlParams p;
+    p.height_limit_mm = 40.0;
+    p.rate_limit_mm_per_s = 100000.0;   // 关掉速率限制，单独看递推
+    p.attitude_filter_alpha = 1.0;      // 关掉滤波，避免混入低通动态
+    p.lqi_kx1 = 100.0;
+    p.lqi_kx2 = 10.0;
+    p.lqi_ki = 50.0;
+    IncrementalLqiController lqi(p);
+
+    // ---- 15.1 首拍无跳变：Δ = 0，修正量就是 ki·θ 一项 ----
+    ControlInput in;
+    in.has_attitude = true;
+    in.roll_rad = 0.01;      // 10 mrad
+    ControlOutput out = lqi.compute(in, 0.005);
+    // 期望 u = 0 + 0 + 0 + 50 * 0.01 = 0.5 mm
+    check(std::fabs(out.roll_correction_mm - 0.5) < 1e-9,
+          "首拍修正量应为 ki·θ = 0.5 mm（Δ 项为 0）");
+    std::printf("  首拍 θ=10 mrad -> 修正量 %.4f mm（期望 0.5）\n",
+                out.roll_correction_mm);
+
+    // ---- 15.2 递推正确性：手算三拍 ----
+    // 注意 ki·θ 是每拍都要加的一项，不是只加一次——这是增量式的要点，
+    // 积分作用正是靠它每拍累加得来的。下面逐步展开：
+    //
+    // 第 2 拍：θ 不变、ω = 0.2。Δθ = 0，Δω = 0.2
+    //   u = 0.5 + 100*0 + 10*0.2 + 50*0.01 = 0.5 + 2.0 + 0.5 = 3.0
+    in.roll_rate = 0.2;
+    out = lqi.compute(in, 0.005);
+    check(std::fabs(out.roll_correction_mm - 3.0) < 1e-9,
+          "第二拍修正量应为 3.0 mm");
+    std::printf("  第二拍 ω=0.2 rad/s -> 修正量 %.4f mm（期望 3.0）\n",
+                out.roll_correction_mm);
+
+    // 第 3 拍：θ 降到 0.005，ω 降到 0.1。Δθ = -0.005，Δω = -0.1
+    //   u = 3.0 + 100*(-0.005) + 10*(-0.1) + 50*0.005
+    //     = 3.0 - 0.5 - 1.0 + 0.25 = 1.75
+    in.roll_rad = 0.005;
+    in.roll_rate = 0.1;
+    out = lqi.compute(in, 0.005);
+    check(std::fabs(out.roll_correction_mm - 1.75) < 1e-9,
+          "第三拍修正量应为 1.75 mm");
+    std::printf("  第三拍 θ=5 mrad, ω=0.1 -> 修正量 %.4f mm（期望 1.75）\n",
+                out.roll_correction_mm);
+
+    // ---- 15.3 积分保持：误差归零后修正量收敛到一个非零常数并保持 ----
+    // 这是 LQI 相对 PD 的核心价值。同样的输入序列喂给 PD：
+    //   u = kp·θ + kd·ω，θ 归零时输出也归零
+    // 而 LQI 必须保持一个非零输出来抵住常值扰动，否则压不住。
+    // 换一个干净的控制器单独演示，避免和上面的递推数据混在一起
+    IncrementalLqiController hold(p);
+    ControlInput h;
+    h.has_attitude = true;
+    h.roll_rad = 0.01;               // 恒定 10 mrad 误差
+    for (int i = 0; i < 10; ++i) {   // 首拍 0.5，之后每拍 +0.5 -> 5.0
+        hold.compute(h, 0.005);
+    }
+    const double accumulated = hold.roll_correction();
+    check(std::fabs(accumulated - 5.0) < 1e-9,
+          "恒定误差 10 拍后修正量应累加到 5.0 mm");
+    std::printf("  恒定误差 10 拍 -> 修正量 %.4f mm（期望 5.0，线性累积）\n",
+                accumulated);
+
+    // 误差归零。第一拍仍带一个 Δθ 瞬态（prev 还是 0.01）：
+    //   u = 5.0 + 100*(-0.01) + 0 + 0 = 4.0
+    h.roll_rad = 0.0;
+    h.roll_rate = 0.0;
+    hold.compute(h, 0.005);
+    const double after_transient = hold.roll_correction();
+    check(std::fabs(after_transient - 4.0) < 1e-9,
+          "误差归零第一拍应落到 4.0 mm（Δθ 瞬态）");
+
+    // 之后再无 Δ、也无 ki·θ，修正量必须恒定保持
+    for (int i = 0; i < 20; ++i) {
+        hold.compute(h, 0.005);
+    }
+    check(std::fabs(hold.roll_correction() - 4.0) < 1e-9,
+          "误差归零后修正量应保持在 4.0 mm（积分保持，不被清掉）");
+    std::printf("  误差归零后 21 拍 -> 修正量 %.4f mm（保持非零）\n",
+                hold.roll_correction());
+
+    // 对照组：同一序列喂给 PD，误差归零时输出必须归零
+    PreviewFeedbackController pd(p);
+    ControlInput pd_in;
+    pd_in.has_attitude = true;
+    pd_in.roll_rad = 0.01;
+    for (int i = 0; i < 10; ++i) {
+        pd.compute(pd_in, 0.005);
+    }
+    const double pd_steady = pd.compute(pd_in, 0.005).roll_correction_mm;
+    pd_in.roll_rad = 0.0;
+    const double pd_zero = pd.compute(pd_in, 0.005).roll_correction_mm;
+    check(std::fabs(pd_zero) < 1e-9,
+          "对照组：PD 在误差归零时输出应归零");
+    std::printf("  对照组 PD：误差 10 mrad 时 %.1f mm，归零后 %.1f mm\n",
+                pd_steady, pd_zero);
+
+    // ---- 15.4 修正量限幅：累计值不得越过行程上限 ----
+    ControlParams big = p;
+    big.lqi_ki = 100000.0;      // 极大的积分增益，必然冲上限
+    IncrementalLqiController wind(big);
+    ControlInput w;
+    w.has_attitude = true;
+    w.roll_rad = 0.05;
+    for (int i = 0; i < 50; ++i) {
+        out = wind.compute(w, 0.005);
+    }
+    check(out.roll_correction_mm <= big.height_limit_mm + 1e-9 &&
+              out.roll_correction_mm >= -big.height_limit_mm - 1e-9,
+          "积分饱和时修正量应被限幅在 ±行程内");
+    std::printf("  大积分增益 50 拍 -> 修正量 %.1f mm（限幅 ±%.0f）\n",
+                out.roll_correction_mm, big.height_limit_mm);
+
+    // ---- 15.5 sync_reference 之后无跳变 ----
+    // 先跑几拍攒出修正量，再 sync 到实际下发值，下一拍的输出必须
+    // 从 sync 值出发、受速率限制约束，而不是从陈旧的累计值跳出去
+    lqi.reset();
+    ControlInput s;
+    s.has_attitude = true;
+    s.roll_rad = 0.02;
+    for (int i = 0; i < 5; ++i) {
+        lqi.compute(s, 0.005);
+    }
+    const double before = lqi.roll_correction();
+    check(std::fabs(before) > 1e-6, "sync 前应已积累出非零修正量");
+
+    std::array<double, kWheelCount> actual{5.0, -5.0, 5.0, -5.0};
+    lqi.sync_reference(actual);
+    check(std::fabs(lqi.roll_correction()) < 1e-9, "sync 后修正量应清零");
+
+    // sync 后第一拍：修正量重新从 0 开始累加，输出从 actual 出发受速率限制
+    ControlParams slow = p;
+    slow.rate_limit_mm_per_s = 100.0;    // 100 mm/s，dt=0.005 -> 每拍 0.5 mm
+    IncrementalLqiController slow_ctrl(slow);
+    slow_ctrl.sync_reference(actual);
+    ControlOutput r = slow_ctrl.compute(s, 0.005);
+    double max_dev = 0.0;
+    for (int i = 0; i < kWheelCount; ++i) {
+        max_dev = std::max(max_dev,
+                           std::fabs(r.height_mm[static_cast<std::size_t>(i)] -
+                                     actual[static_cast<std::size_t>(i)]));
+    }
+    check(max_dev <= 100.0 * 0.005 + 1e-9,
+          "sync 后第一拍各轮位移不得超过一个速率限制步长");
+    std::printf("  sync 后第一拍最大位移 %.3f mm（步长上限 %.3f）\n", max_dev,
+                100.0 * 0.005);
+
+    // ---- 15.6 控制回路真的按参数选控制律 ----
+    // 只测控制器本身不够——还要证明 SuspensionControlLoop 把它接上了。
+    // 行为上的判别：喂恒定横滚，PD 的输出恒定（每拍重算同一个值），
+    // LQI 的输出逐拍变化（积分在累积）。顺带也验证了两种控制律
+    // 都能正常走完启动流程进入闭环
+    // 增益取小一点：ki 太大时输出会在稳定期内就撞到行程上限，
+    // 饱和之后反而看不出"在累积"。这里只用积分项，Δ 项置 0，
+    // 让动态纯粹由 ki·θ 每拍累加驱动，便于推算期望值
+    ControlParams lqi_params;
+    lqi_params.controller_kind = ControllerKind::kIncrementalLqi;
+    lqi_params.lqi_kx1 = 0.0;
+    lqi_params.lqi_kx2 = 0.0;
+    lqi_params.lqi_ki = 1.0;      // θ=0.1 时每拍 +0.1 mm
+
+    LoopFixture fx_lqi(/*attach_driver=*/true, /*require_driver=*/false, &lqi_params);
+    fx_lqi.advance(3.0);
+    check(fx_lqi.loop.status().state == ControlState::kBalancing,
+          "LQI 回路也应能进入闭环");
+
+    LoopFixture fx_pd(/*attach_driver=*/true, /*require_driver=*/false);
+    fx_pd.advance(3.0);
+    check(fx_pd.loop.status().state == ControlState::kBalancing,
+          "PD 回路应能进入闭环");
+
+    // 喂 0.5 s 恒定横滚，比较首尾输出。
+    // 注意必须先让横滚稳定下来再采基准值：PD 是绝对式，输入从 0 变到 0.1 时
+    // 输出当然会变，那不是时变。基准要采在"输入已经恒定"之后
+    const double kSettle = 0.3;
+    fx_lqi.advance(kSettle, 0.0, 0.1, 0.0);
+    fx_pd.advance(kSettle, 0.0, 0.1, 0.0);
+    const int lqi_first = fx_lqi.loop.status().output.height_mm[kFrontRight];
+    const int pd_first = fx_pd.loop.status().output.height_mm[kFrontRight];
+
+    fx_lqi.advance(0.5, 0.0, 0.1, 0.0);
+    fx_pd.advance(0.5, 0.0, 0.1, 0.0);
+    const int lqi_last = fx_lqi.loop.status().output.height_mm[kFrontRight];
+    const int pd_last = fx_pd.loop.status().output.height_mm[kFrontRight];
+
+    check(lqi_last != lqi_first,
+          "LQI 回路在恒定输入下输出应持续变化（积分累积）");
+    check(pd_last == pd_first,
+          "PD 回路在输入恒定后输出应保持不变（每拍重算同一值）");
+    std::printf("  输入恒定后 0.5 s：PD %d -> %d mm（不变），LQI %d -> %d mm（在累积）\n",
+                pd_first, pd_last, lqi_first, lqi_last);
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -680,6 +889,7 @@ int main() {
     test_reference_sync();
     test_degraded_hold_timeout();
     test_dt_clamp();
+    test_incremental_lqi();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");
