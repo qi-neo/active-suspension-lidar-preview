@@ -27,6 +27,11 @@ public:
     std::size_t frames_failed() const { return frames_failed_; }
     const RoadProfileFrame& last_frame() const { return last_frame_; }
 
+    // 最近一帧检出的非地面障碍物（语义预瞄接口；默认实现返回空）
+    const std::vector<Obstacle>& last_obstacles() const {
+        return extractor_->obstacles();
+    }
+
 private:
     std::unique_ptr<IRoadProfileExtractor> extractor_;
     std::vector<std::shared_ptr<IProfileSink>> sinks_;

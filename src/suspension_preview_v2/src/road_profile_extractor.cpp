@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 // PCL 1.12 里这个过滤器头是 passthrough.h，不是 pass_through.h。
@@ -28,6 +29,10 @@ GridRoadProfileExtractor::GridRoadProfileExtractor(const ExtractorParams& params
     if (params_.trend_window_half_m <= 0.0) params_.trend_window_half_m = 0.15;
     if (params_.absolute_z_limit_m <= 0.0) params_.absolute_z_limit_m = 2.0;
     if (params_.trend_fit_range_m <= 0.0) params_.trend_fit_range_m = 3.0;
+    // 障碍物判定阈值也得有正下限：填 0 会让任意高出路面的噪声都成障碍，
+    // 现象是"明明空路却频发障碍告警"
+    if (params_.obstacle_min_height_m <= 0.0) params_.obstacle_min_height_m = 0.08;
+    if (params_.obstacle_min_points <= 0) params_.obstacle_min_points = 4;
     cells_ = static_cast<std::size_t>(
         std::lround(params_.preview_dist / params_.resolution));
     if (cells_ == 0) cells_ = 1;
@@ -41,14 +46,24 @@ bool GridRoadProfileExtractor::extract(const pcl::PointCloud<pcl::PointXYZ>::Con
     out.wheel_dist = static_cast<float>(params_.wheel_dist);
     out.preview_dist = static_cast<float>(params_.preview_dist);
 
-    out.left = extract_lane(cloud, static_cast<float>(-params_.wheel_dist / 2.0));
-    out.right = extract_lane(cloud, static_cast<float>(+params_.wheel_dist / 2.0));
+    // 左右轮迹分别解析，再把两路的障碍物合并（按 x 排序）供语义预瞄消费
+    LaneResult L = extract_lane(cloud, static_cast<float>(-params_.wheel_dist / 2.0));
+    LaneResult R = extract_lane(cloud, static_cast<float>(+params_.wheel_dist / 2.0));
+    out.left = std::move(L.profile);
+    out.right = std::move(R.profile);
+    obstacles_.clear();
+    obstacles_.reserve(L.obstacles.size() + R.obstacles.size());
+    obstacles_.insert(obstacles_.end(), L.obstacles.begin(), L.obstacles.end());
+    obstacles_.insert(obstacles_.end(), R.obstacles.begin(), R.obstacles.end());
+    std::sort(obstacles_.begin(), obstacles_.end(),
+              [](const Obstacle& a, const Obstacle& b) { return a.x_m < b.x_m; });
     return true;
 }
 
-LaneProfile GridRoadProfileExtractor::extract_lane(
+GridRoadProfileExtractor::LaneResult GridRoadProfileExtractor::extract_lane(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud, float y_center) {
-    LaneProfile lane;
+    LaneResult result;
+    LaneProfile& lane = result.profile;
     lane.reset(cells_);
 
     // 1) ROI：先按 y 取条带，再按 x 取前方距离
@@ -65,16 +80,18 @@ LaneProfile GridRoadProfileExtractor::extract_lane(
     pass.setFilterLimits(0.0f, static_cast<float>(params_.preview_dist));
     pass.filter(*roi);
 
-    // 2) 分箱。这一轮【不】套地面窗口：趋势线要先把路面的走向算出来，
-    //    逐格开窗才有依据。这里只剔除非有限值与离谱的远近点（天空、墙壁、
-    //    远处建筑），给趋势拟合一个干净的输入
+    // 2) 分箱 + 收集原始点。分箱只剔非有限值与离谱远近点（天空、墙壁、
+    //    远处建筑），给趋势拟合干净输入；原始点全留下，后面做障碍物检测
     std::vector<std::vector<float>> bins(cells_);
+    std::vector<std::pair<float, float>> lane_points;
+    lane_points.reserve(roi->size());
     for (const auto& pt : roi->points) {
         if (!std::isfinite(pt.z)) continue;
         if (std::fabs(pt.z) > params_.absolute_z_limit_m) continue;
         const auto idx = static_cast<long>(std::floor(pt.x / params_.resolution));
         if (idx < 0 || idx >= static_cast<long>(cells_)) continue;
         bins[static_cast<std::size_t>(idx)].push_back(pt.z);
+        lane_points.push_back({pt.x, pt.z});
     }
 
     // 3) 局部地面趋势：用近处格子的代表高度拟合 h(x) = base + slope·x。
@@ -111,9 +128,26 @@ LaneProfile GridRoadProfileExtractor::extract_lane(
         }
     }
 
-    // 4) 可选插值补洞
+    // 5) 非地面障碍物检测：地面参考优先用剖面估计，缺格用趋势线补。
+    //    这些高出路面的点本身没进剖面（被窗口排除），这里单独回收成
+    //    结构化输出，留给语义预瞄（避让 / 减速），而不是混进高度剖面
+    std::vector<float> ground_ref(cells_, std::numeric_limits<float>::quiet_NaN());
+    for (std::size_t i = 0; i < cells_; ++i) {
+        if (lane.valid[i] != kInvalid) {
+            ground_ref[i] = lane.height[i];
+        } else if (trend.valid) {
+            ground_ref[i] = static_cast<float>(
+                trend_height(trend, static_cast<double>(i) * params_.resolution));
+        }
+    }
+    result.obstacles = detect_lane_obstacles(
+        ground_ref, lane_points, params_.resolution,
+        static_cast<double>(y_center),
+        params_.obstacle_min_height_m, params_.obstacle_min_points);
+
+    // 6) 可选插值补洞（仅作用于高度剖面，不影响已检出的障碍物）
     if (params_.interpolate_gaps) interpolate(lane);
-    return lane;
+    return result;
 }
 
 void GridRoadProfileExtractor::interpolate(LaneProfile& lane) {

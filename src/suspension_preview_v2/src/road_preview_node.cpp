@@ -23,6 +23,7 @@
 #include "suspension_preview_v2/pipeline.hpp"
 #include "suspension_preview_v2/ros_topic_sink.hpp"
 #include "suspension_preview_v2/serial_profile_sink.hpp"
+#include "suspension_preview_v2/msg/road_obstacles.hpp"
 
 using suspension_preview_v2::ExtractorParams;
 using suspension_preview_v2::PreviewPipeline;
@@ -85,6 +86,19 @@ public:
             RCLCPP_INFO(get_logger(), "地面筛选：固定高程窗口 [%.2f, %.2f] m（趋势窗口已关闭）",
                         ground_z_min_, ground_z_max_);
         }
+
+        // 非地面障碍物（语义预瞄）：把高出路面的东西单独发布，供未来避让 /
+        // 减速分支消费，而不是混进高度剖面
+        if (publish_obstacles_) {
+            obstacles_pub_ = create_publisher<suspension_preview_v2::msg::RoadObstacles>(
+                obstacles_topic_, 10);
+            RCLCPP_INFO(get_logger(),
+                        "障碍物发布已启用: %s（高过地面 %.2f m 且单格≥%d 点）",
+                        obstacles_topic_.c_str(), obstacle_min_height_m_,
+                        obstacle_min_points_);
+        } else {
+            RCLCPP_INFO(get_logger(), "publish_obstacles=false，不发布障碍物话题");
+        }
     }
 
 private:
@@ -120,6 +134,14 @@ private:
         // 但它不负责任何地面筛选（那是逐格趋势窗口的职责）
         absolute_z_limit_m_ = declare_parameter<double>("absolute_z_limit_m", 2.0);
 
+        // 非地面障碍物（语义预瞄）参数
+        publish_obstacles_ = declare_parameter<bool>("publish_obstacles", true);
+        obstacles_topic_ = declare_parameter<std::string>("obstacles_topic",
+                                                         "/suspension/road_obstacles");
+        obstacle_min_height_m_ =
+            declare_parameter<double>("obstacle_min_height_m", 0.08);
+        obstacle_min_points_ = declare_parameter<int>("obstacle_min_points", 4);
+
         tf_timeout_ms_ = declare_parameter<int>("tf_timeout_ms", 30);
         publish_marker_ = declare_parameter<bool>("publish_marker", true);
         diag_period_s_ = declare_parameter<double>("diag_period_s", 5.0);
@@ -142,6 +164,8 @@ private:
         p.trend_window_half_m = trend_window_half_m_;
         p.trend_min_cells = trend_min_cells_;
         p.absolute_z_limit_m = absolute_z_limit_m_;
+        p.obstacle_min_height_m = obstacle_min_height_m_;
+        p.obstacle_min_points = obstacle_min_points_;
         return p;
     }
 
@@ -200,6 +224,24 @@ private:
         const double stamp_sec = static_cast<double>(msg->header.stamp.sec) +
                                  static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
         pipeline_->process(cloud, stamp_sec, target_frame_);
+
+        // 语义预瞄：把高出路面的障碍物单独发布（高度剖面不含它们）
+        if (obstacles_pub_) {
+            const auto& obs = pipeline_->last_obstacles();
+            suspension_preview_v2::msg::RoadObstacles m;
+            m.header.stamp = msg->header.stamp;
+            m.header.frame_id = target_frame_;
+            m.obstacles.reserve(obs.size());
+            for (const auto& o : obs) {
+                suspension_preview_v2::msg::Obstacle mo;
+                mo.x_m = static_cast<float>(o.x_m);
+                mo.lateral_m = static_cast<float>(o.lateral_m);
+                mo.height_m = static_cast<float>(o.height_m);
+                mo.half_width_m = static_cast<float>(o.half_width_m);
+                m.obstacles.push_back(mo);
+            }
+            obstacles_pub_->publish(m);
+        }
     }
 
     void log_diagnostics() {
@@ -241,6 +283,10 @@ private:
     double trend_window_half_m_{0.15};
     int trend_min_cells_{6};
     double absolute_z_limit_m_{2.0};
+    bool publish_obstacles_{true};
+    std::string obstacles_topic_;
+    double obstacle_min_height_m_{0.08};
+    int obstacle_min_points_{4};
     int tf_timeout_ms_{30};
     bool publish_marker_{true};
     double diag_period_s_{5.0};
@@ -251,6 +297,7 @@ private:
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
+    rclcpp::Publisher<suspension_preview_v2::msg::RoadObstacles>::SharedPtr obstacles_pub_;
     rclcpp::TimerBase::SharedPtr diag_timer_;
 
     std::size_t frames_{0};

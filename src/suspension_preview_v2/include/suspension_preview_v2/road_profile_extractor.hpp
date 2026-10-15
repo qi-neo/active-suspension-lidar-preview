@@ -4,10 +4,12 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include "suspension_preview_v2/obstacle_detect.hpp"
 #include "suspension_preview_v2/types.hpp"
 
 namespace suspension_preview_v2 {
@@ -40,6 +42,11 @@ struct ExtractorParams {
     // 分箱前的粗筛：剔除天空、墙壁、远处建筑等离谱点，给趋势拟合一个
     // 干净的输入。这一层比趋势窗口宽得多，不承担地面筛选的职责
     double absolute_z_limit_m{2.0};   // |z| 超过该值直接剔除 (m)
+
+    // ---- 非地面（障碍物）检测：把明显高出路面的东西单挑出来，留给
+    //      语义预瞄（未来：避让 / 减速），而不是混进高度剖面 ----
+    double obstacle_min_height_m{0.08};  // 高出地面多少才算障碍候选 (m)
+    int obstacle_min_points{4};          // 单格至少多少候选点才算稳定障碍
 };
 
 // 点云解析接口，实现可替换（网格法、平面拟合等）
@@ -55,6 +62,13 @@ public:
 
     // 单条轮迹的格数
     virtual std::size_t cell_count() const = 0;
+
+    // 最近一次 extract 检出的非地面障碍物（语义预瞄用）。默认返回空——
+    // 子类不实现也能编译，对下游（v3）完全向后兼容
+    virtual const std::vector<Obstacle>& obstacles() const {
+        static const std::vector<Obstacle> kEmpty;
+        return kEmpty;
+    }
 };
 
 // 默认实现：ROI 条带 -> 分箱 -> 鲁棒统计（中位数）-> 有效掩码 -> 可选插值
@@ -71,14 +85,24 @@ public:
     // 累计无效格数（诊断用）
     std::size_t invalid_cells() const { return invalid_cells_; }
 
+    // 最近一次 extract 检出的非地面障碍物（语义预瞄接口）
+    const std::vector<Obstacle>& obstacles() const override { return obstacles_; }
+
 private:
-    LaneProfile extract_lane(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud,
-                             float y_center);
+    // 单条轮迹的解析结果：高度剖面 + 该轮迹检出的障碍物
+    struct LaneResult {
+        LaneProfile profile;
+        std::vector<Obstacle> obstacles;
+    };
+
+    LaneResult extract_lane(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud,
+                            float y_center);
     static void interpolate(LaneProfile& lane);
 
     ExtractorParams params_;
     std::size_t cells_{100};
     std::size_t invalid_cells_{0};
+    std::vector<Obstacle> obstacles_;   // 最近一帧左右轮迹合并后的障碍列表
 };
 
 // 工厂函数

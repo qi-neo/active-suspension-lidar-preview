@@ -40,6 +40,14 @@ road_preview_node:
     trend_min_cells: 6                      # 拟合所需最少有效格数
     absolute_z_limit_m: 2.0                 # 分箱前粗筛：|z| 超过它直接剔除（天空/墙壁）
 
+    # 非地面障碍物（语义预瞄）：把明显高出路面的东西单独发布，供未来避让 /
+    # 减速分支消费，而不是混进高度剖面。这些点本身已被开窗排除出剖面，
+    # 这里只是回收成结构化输出。门槛过低会把噪声当障碍（空路频发告警）
+    publish_obstacles: true                 # 是否发布 /suspension/road_obstacles
+    obstacles_topic: "/suspension/road_obstacles"
+    obstacle_min_height_m: 0.08             # 高出地面多少才算障碍候选 (m)
+    obstacle_min_points: 4                  # 单格至少多少候选点才算稳定障碍
+
     # 其它
     tf_timeout_ms: 30                       # TF 查询超时 (ms)
     publish_marker: true                    # 发布 rviz Marker

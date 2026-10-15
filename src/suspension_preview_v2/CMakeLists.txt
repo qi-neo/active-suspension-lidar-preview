@@ -25,16 +25,20 @@ find_package(PCL REQUIRED COMPONENTS common filters)
 # 自定义消息
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RoadProfile.msg"
+  "msg/Obstacle.msg"
+  "msg/RoadObstacles.msg"
   DEPENDENCIES std_msgs
 )
 
 # 核心库（不依赖 ROS，可离线复用/单测）
 #   types / protocol / serial_port / extractor / sinks / driver / pipeline
 #   road_trend（局部地面趋势，无 PCL，单独自检）
+#   obstacle_detect（非地面障碍物检测，无 PCL，单独自检）
 add_library(suspension_core STATIC
   src/protocol.cpp
   src/serial_port.cpp
   src/road_trend.cpp
+  src/obstacle_detect.cpp
   src/road_profile_extractor.cpp
   src/profile_sink.cpp
   src/serial_profile_sink.cpp
@@ -77,9 +81,15 @@ add_executable(trend_selftest examples/trend_selftest.cpp src/road_trend.cpp)
 target_include_directories(trend_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# 障碍物检测的纯函数自检（同样无 PCL / 无 ROS）
+add_executable(obstacle_selftest
+  examples/obstacle_selftest.cpp src/obstacle_detect.cpp)
+target_include_directories(obstacle_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # 安装
 install(TARGETS road_preview_node suspension_driver_node offline_demo
-  trend_selftest
+  trend_selftest obstacle_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 # suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，

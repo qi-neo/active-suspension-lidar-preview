@@ -20,7 +20,7 @@
 
 | 接口 | 职责 | 提供的实现 |
 |------|------|-----------|
-| `IRoadProfileExtractor` | 点云解析：点云 → 左右轮迹高程剖面 | `GridRoadProfileExtractor`（网格、趋势相对开窗、中位数、有效掩码） |
+| `IRoadProfileExtractor` | 点云解析：点云 → 左右轮迹高程剖面 + 非地面障碍物 | `GridRoadProfileExtractor`（网格、趋势相对开窗、中位数、有效掩码、障碍物检测） |
 | `IProfileSink` | 输出：把剖面送出去 | `RosTopicSink`、`SerialProfileSink` |
 | `ISuspensionDriver` | 悬架驱动：模式、目标高度、急停 | `SerialSuspensionDriver` |
 | `PreviewPipeline` | 组装：解析并分发，不含 ROS、线程、硬件细节 | — |
@@ -75,6 +75,27 @@ source install/setup.bash
 拟合失败（有效格不足）时自动退回旧的 `ground_z_min/max` 绝对窗口，`use_road_trend: false`
 可整体关闭。输出的高度语义不变（仍是车体坐标系下的绝对高度），变的只是"哪些点算地面"。
 
+## 语义预瞄：非地面障碍物检测
+
+窗口只解决"哪些点算地面"，但没把"明显高出路面的东西"单独挑出来。主动悬架需要区分
+**该吸收的路面凸起（减速带、井盖）** 与 **不该当路面的障碍（路沿石、低矮桩、行人腿）**——
+后者若混进剖面，会让前馈误以为前方是连续路面而去做预瞄，实则应当触发"语义预瞄"分支
+（未来：避让 / 减速），而不是压路。
+
+做法是在解析链路里多走一步（纯函数 `detect_lane_obstacles`，无 PCL 依赖）：
+
+1. 用每格的**地面参考高度**（剖面估计优先，缺格用趋势线补）作为基准；
+2. 重新扫描轮迹 ROI 的原始点，凡高于参考地面超过 `obstacle_min_height_m` 且单格
+   候选点 ≥ `obstacle_min_points` 的，聚合成一个障碍物；
+3. 记录其位置（沿车 `x`、横向 `lateral`）、顶端相对地面高度 `height`、沿前进方向半宽
+   `half_width`，发布到 `/suspension/road_obstacles`（`RoadObstacles` 消息，左右轮迹合并、
+   按 `x` 排序）。
+
+关键点：这些高出路面的点**本身就没进高度剖面**（已被开窗排除），这里只是把它们回收成
+结构化输出，因此零侵入、不污染前馈。该输出目前是"接口就绪"状态——控制侧（v3）的语义
+预瞄分支还没接，但数据已经能订阅、能在 rviz 里看、能喂给未来的决策。门槛（`obstacle_min_height_m`）
+过低会把噪声当障碍（空路频发告警），默认值 0.08 m 是在"漏检矮障碍"与"误检噪声"之间的折中。
+
 ## 离线验证
 
 不需要 ROS 运行时，也不需要雷达和硬件：
@@ -82,6 +103,7 @@ source install/setup.bash
 ```bash
 ros2 run suspension_preview_v2 offline_demo      # 端到端：解析 + 协议往返
 ros2 run suspension_preview_v2 trend_selftest    # 趋势与逐格估计的纯函数自检，29 项
+ros2 run suspension_preview_v2 obstacle_selftest # 障碍物检测纯函数自检，12 项
 ```
 
 `offline_demo` 合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，最后做一次协议编解码往返校验：
@@ -188,8 +210,9 @@ driver->emergency_stop();
 
 1. 接收端的闭环控制器还没实现，本包提供 `ISuspensionDriver` 供其调用；
 2. 地面分割已从固定高程窗口升级为逐格趋势相对开窗，但仍是逐格稳健统计，
-   未使用平面拟合（RANSAC / 格内 PCA 法向量），因此**还不能区分"该吸收的
-   路面凸起（减速带）"与"不该当路面的障碍物（行人、路沿）"**；
-3. 分箱逻辑与趋势拟合已有纯函数测试（`trend_selftest`），
+   未使用平面拟合（RANSAC / 格内 PCA 法向量）；
+3. 障碍物已由解析链路单独检测并发布到 `/suspension/road_obstacles`（左右轮迹合并、
+   按 x 排序），但控制侧（v3）的语义预瞄分支（避让 / 减速）尚未接——目前是"接口就绪"；
+4. 分箱逻辑、趋势拟合、障碍物检测都已有纯函数测试（`trend_selftest` / `obstacle_selftest`），
    `protocol::crc16_ccitt` 与 `encode_lane` 仍建议补同类型的测试；
 4. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）。
