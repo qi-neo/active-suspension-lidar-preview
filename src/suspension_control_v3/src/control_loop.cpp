@@ -11,8 +11,20 @@ SuspensionControlLoop::SuspensionControlLoop(const ControlLoopParams& params,
                                              const ControlParams& control_params)
     : params_(params),
       validator_(std::make_unique<RoadProfileValidator>(validator_params)),
-      state_machine_(std::make_unique<SafetyStateMachine>(sm_params)),
-      controller_(std::make_unique<PreviewFeedbackController>(control_params)) {}
+      state_machine_(std::make_unique<SafetyStateMachine>(sm_params)) {
+    // 控制律按参数选。默认走 PD，与加入 LQI 之前的行为完全一致。
+    // 选 LQI 而没填增益时三个 kx*/ki 都是 0，控制器退化成只前馈——
+    // 那种情况不会报错，但也没有闭环，所以节点侧要把增益一起声明
+    switch (control_params.controller_kind) {
+        case ControllerKind::kIncrementalLqi:
+            controller_ = std::make_unique<IncrementalLqiController>(control_params);
+            break;
+        case ControllerKind::kPreviewFeedbackPd:
+        default:
+            controller_ = std::make_unique<PreviewFeedbackController>(control_params);
+            break;
+    }
+}
 
 void SuspensionControlLoop::set_driver(
     std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver) {
