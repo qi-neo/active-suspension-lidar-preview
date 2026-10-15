@@ -14,6 +14,7 @@ namespace suspension_preview_v2 {
 constexpr uint8_t kInvalid = 0;       // 无效
 constexpr uint8_t kMeasured = 1;      // 实测有效
 constexpr uint8_t kInterpolated = 2;  // 插值得到（可用，精度略低）
+constexpr uint8_t kFused = 3;         // 多帧位置对齐融合得到（控制侧生成，不回传串口）
 
 // 轮迹标识（数值与串口帧 id 对齐）
 enum class LaneId : uint8_t {
