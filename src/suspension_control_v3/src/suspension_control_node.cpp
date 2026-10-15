@@ -116,8 +116,9 @@ private:
         // 切成 1 之前必须先把 lqi_kx1 / lqi_kx2 / lqi_ki 三个增益填进来
         // （用 tools/lqr_gain_design.py 算），否则三个都是 0，
         // 控制器会退化成"只前馈、不闭环"——那种情况不报错，但也没有控制
-        const int ctrl_kind =
-            declare_parameter<int>("controller_kind", static_cast<int>(ctrl_.controller_kind));
+        using suspension_control_v3::ControllerKind;
+        const int ctrl_kind = declare_parameter<int>(
+            "controller_kind", static_cast<int>(ctrl_.controller_kind));
         ctrl_.controller_kind = static_cast<ControllerKind>(ctrl_kind);
         if (ctrl_.controller_kind == ControllerKind::kIncrementalLqi &&
             ctrl_.lqi_kx1 == 0.0 && ctrl_.lqi_kx2 == 0.0 && ctrl_.lqi_ki == 0.0) {
