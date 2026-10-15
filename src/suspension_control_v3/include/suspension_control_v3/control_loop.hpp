@@ -69,6 +69,13 @@ struct ControlLoopStatus {
     double speed_mps{0.0};
     double lookahead_m{0.0};
 
+    // 所使用剖面的帧龄 (ms)，以及前轴实际取样位置 (m，含帧龄补偿)。
+    // 剖面 10~20 Hz、控制环 200 Hz，帧龄常年不为 0——不补偿的话高速段
+    // 相当于拿着旧地图找新位置。sample_position_m 是最近一次闭环计算的
+    // 值，降级保持/回中期间不更新
+    double profile_age_ms{0.0};
+    double sample_position_m{0.0};
+
     // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
     std::size_t calibration_samples{0};
     double calibrated_roll_rad{0.0};

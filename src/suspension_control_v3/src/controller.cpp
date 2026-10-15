@@ -70,12 +70,16 @@ bool sample_lane(const suspension_preview_v2::LaneProfile& lane,
 
 // 第 1 步：预瞄前馈。输出四路目标行程（左前/右前/左后/右后）。
 //   a) 取样距离随车速自适应（响应时域恒定，距离 = 车速 × 时域）
-//   b) 后轴取样距离比前轴短一个轴距（后轮晚遇到同一特征）
-//   c) 单侧轮迹无数据时回退用对侧高程（避免左右不对称的伪横滚指令）
+//   b) 帧龄运动补偿：剖面锚定采集时刻的车体原点，取样位置 +车速×帧龄
+//   c) 后轴取样距离比前轴短一个轴距（后轮晚遇到同一特征）
+//   d) 单侧轮迹无数据时回退用对侧高程（避免左右不对称的伪横滚指令）
+// sample_position_m 输出前轴实际取样位置（含 b 的补偿），供上层上报
 void compute_feedforward(const ControlInput& in, const ControlParams& params,
-                         std::array<double, kWheelCount>& ff_mm, bool& fallback) {
+                         std::array<double, kWheelCount>& ff_mm, bool& fallback,
+                         double& sample_position_m) {
     ff_mm.fill(0.0);
     fallback = false;
+    sample_position_m = 0.0;
     if (in.profile == nullptr) return;
 
     const auto& frame = *in.profile;
@@ -85,18 +89,31 @@ void compute_feedforward(const ControlInput& in, const ControlParams& params,
     //    与接入车速之前的行为完全一致
     const double lookahead = effective_lookahead(in, params);
 
-    // b) 后轴比前轴晚一个"轴距/车速"的时间遇到同一路面特征。
+    // b) 帧龄补偿。剖面坐标系锚定在"采集那一刻的车体原点"：从采集到当前
+    //    这一拍，车已经向前行驶了 车速×帧龄，同一段路面在旧坐标系里的坐标
+    //    就小了这么多。取样位置不加回去，等于拿着旧地图找新位置——
+    //    剖面 10~20 Hz、帧龄常年 50~100 ms，2 m/s 时就是 100~200 mm 的
+    //    系统性偏差。没有车速信息时无法补偿，行为与加这个字段之前一致
+    double shift = 0.0;
+    if (in.has_speed && std::isfinite(in.speed_mps) && in.speed_mps > 0.0 &&
+        std::isfinite(in.profile_age_s) && in.profile_age_s > 0.0) {
+        shift = in.speed_mps * in.profile_age_s;
+    }
+    const double sample_pos = lookahead + shift;
+    sample_position_m = sample_pos;
+
+    // c) 后轴比前轴晚一个"轴距/车速"的时间遇到同一路面特征。
     //    低速时该差值为负，钳到 0——后轮此时已经压在目标特征上
-    const double rear_lookahead = std::max(0.0, lookahead - params.wheelbase_m);
+    const double rear_lookahead = std::max(0.0, sample_pos - params.wheelbase_m);
 
     double h_lf = 0.0, h_rf = 0.0, h_lr = 0.0, h_rr = 0.0;
     bool dummy = false;   // 插值标记目前只用于诊断，这里不需要
-    const bool lf_ok = sample_lane(frame.left, lookahead, spacing, h_lf, dummy);
-    const bool rf_ok = sample_lane(frame.right, lookahead, spacing, h_rf, dummy);
+    const bool lf_ok = sample_lane(frame.left, sample_pos, spacing, h_lf, dummy);
+    const bool rf_ok = sample_lane(frame.right, sample_pos, spacing, h_rf, dummy);
     const bool lr_ok = sample_lane(frame.left, rear_lookahead, spacing, h_lr, dummy);
     const bool rr_ok = sample_lane(frame.right, rear_lookahead, spacing, h_rr, dummy);
 
-    // c) 单侧失效时借对侧高程。左右轮迹只差一个轮距，横坡引起的高差远小于
+    // d) 单侧失效时借对侧高程。左右轮迹只差一个轮距，横坡引起的高差远小于
     //    "填 0"造成的台阶——后者等效于给一个伪横滚指令，会把车往一侧推
     if (!lf_ok && rf_ok) { h_lf = h_rf; fallback = true; }
     if (!rf_ok && lf_ok) { h_rf = h_lf; fallback = true; }
@@ -211,12 +228,14 @@ void PreviewFeedbackController::sync_reference(
 ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double dt) {
     ControlOutput out;
 
-    // ---- 1. 预瞄前馈（车速自适应 + 前后轴差异化 + 跨侧回退）----
+    // ---- 1. 预瞄前馈（车速自适应 + 帧龄补偿 + 前后轴差异化 + 跨侧回退）----
     std::array<double, kWheelCount> ff_mm{};
     bool fallback = false;
-    compute_feedforward(in, params_, ff_mm, fallback);
+    double sample_pos = 0.0;
+    compute_feedforward(in, params_, ff_mm, fallback, sample_pos);
     out.feedforward_mm = ff_mm;
     out.feedforward_fallback = fallback;
+    out.sample_position_m = sample_pos;
 
     // ---- 2. 姿态反馈（无导数 PD，角速度代替误差微分）----
     // 绝对式：每拍从当前姿态重算，不依赖历史
@@ -278,12 +297,14 @@ void IncrementalLqiController::clear_incremental_memory() {
 ControlOutput IncrementalLqiController::compute(const ControlInput& in, double dt) {
     ControlOutput out;
 
-    // ---- 1. 预瞄前馈（与 PD 版共用：车速自适应 + 前后轴差异化 + 跨侧回退）----
+    // ---- 1. 预瞄前馈（与 PD 版共用：车速自适应 + 帧龄补偿 + 前后轴差异化 + 跨侧回退）----
     std::array<double, kWheelCount> ff_mm{};
     bool fallback = false;
-    compute_feedforward(in, params_, ff_mm, fallback);
+    double sample_pos = 0.0;
+    compute_feedforward(in, params_, ff_mm, fallback, sample_pos);
     out.feedforward_mm = ff_mm;
     out.feedforward_fallback = fallback;
+    out.sample_position_m = sample_pos;
 
     // ---- 2. 姿态反馈：增量式 LQI ----
     //     u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ

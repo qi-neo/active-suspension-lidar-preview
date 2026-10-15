@@ -9,7 +9,7 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检
-> （v3 控制 130 项、驱动解析 63 项、v2 点云链路）。
+> （v3 控制 142 项、驱动解析 63 项、v2 点云链路）。
 > v3.1.0 起五个包才真正能在干净环境构建通过——
 > **更早的 tag 拉下来是编不过的**，见 [CHANGELOG](CHANGELOG.md)。
 
@@ -210,7 +210,7 @@ flowchart LR
 - **单周期时长封顶**：定时抖动不会把累计时长判据一次性推过阈值造成误动作
 - **硬件急停**：进入急停时同时调用驱动器的 `emergency_stop()`，而不只是下发零位指令
 
-前馈取样距离上的三处算法细节（v3.2.0 起）：
+前馈取样距离上的四处算法细节（v3.2.0 起）：
 
 - **距离随车速自适应**：取样距离 = clamp(车速 × 响应时域, 0.5 m, 5 m)，响应时域取作动器
   走满行程耗时的 2.5 倍（默认 40 mm / 300 mm/s × 2.5 ≈ 0.33 s）。固定距离在低速时
@@ -218,14 +218,19 @@ flowchart LR
   相当于提前 2 s 取路面。没有车速信息（未接 `/odom`）时自动退回固定 `lookahead_m`
 - **前后轴差异化**：后轴取样距离比前轴短一个轴距——后轮比前轮晚一个"轴距/车速"
   的时间遇到同一路面特征，用同一距离会让俯仰前馈拿超前路面去压后轮
+- **帧龄运动补偿**：剖面坐标系锚定在采集时刻的车体原点，车在帧龄内已经前进
+  车速×帧龄，取样位置把这个距离加回去。剖面 10~20 Hz、帧龄常年 50~100 ms，
+  2 m/s 时不补偿就是 100~200 mm 的系统性偏差。实际取样位置
+  （= 生效距离 + 补偿）每拍写进 `ControlStatus.sample_position_m`
 - **括号格插值与跨侧回退**：取样在相邻格间线性插值，避免 5 cm 量化形成台阶式
   行程指令；单侧轮迹无有效数据时借对侧高程，避免左右不对称的伪横滚指令
   （该情况在 `ControlStatus.feedforward_fallback` 置位，可观测）
 
-生效的车速与取样距离每拍写进 `ControlStatus`（`speed_mps` / `lookahead_m`），
+生效的车速、取样距离、帧龄每拍写进 `ControlStatus`
+（`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
 联调时能直接看到"前馈到底按多远取了样"。
 
-离线自检 130 项，不需要 ROS 与硬件：
+离线自检 142 项，不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -281,7 +286,7 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```bash
 ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，130 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，142 项检查
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。

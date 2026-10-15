@@ -226,6 +226,8 @@ def main():
         v_crit, v_crit * 3.6))
     print("  建议 lookahead = clamp(v * {0:.1f}, 0.5, {1:.0f}) m".format(
         t_full * 2.5, 5.0))
+    print("  实际取样位置还要加 车速×帧龄：剖面 10~20 Hz、帧龄常年 50~100 ms，")
+    print("  不补偿的话 2 m/s 时取样点就落后 100~200 mm（控制器已实现该补偿）")
 
     print()
     print("-" * 72)

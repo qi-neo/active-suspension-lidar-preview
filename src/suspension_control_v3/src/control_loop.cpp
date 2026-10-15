@@ -128,6 +128,12 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     suspension_preview_v2::RoadProfileFrame held;
     const bool has_held = validator_->latest(held);
 
+    // 剖面帧龄：当前拍与所使用剖面采集时刻的差。负值（时钟跳变）按 0 计。
+    // 两个用途：填入 ControlInput 做前馈取样的运动补偿；上报供联调观察
+    const double profile_age_s =
+        has_held ? std::max(0.0, now_sec - held.stamp_sec) : 0.0;
+    status_.profile_age_ms = profile_age_s * 1000.0;
+
     // 车速过期判定用控制环时钟（now_sec），不用数据到达时刻。
     // 过期视为无车速：前馈退回固定 lookahead_m，宁可退回旧行为，
     // 也不用一个可能已经不准的车速去算取样距离。
@@ -261,10 +267,14 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     // 车速过期判定在步骤开头做过，这里直接用结论
     ci.has_speed = speed_ok;
     ci.speed_mps = status_.speed_mps;
+    ci.profile_age_s = profile_age_s;
 
     ci.profile = has_held ? &held : nullptr;
 
     status_.output = controller_->compute(ci, step_dt);
+    // 取样位置由控制器算出（单一出处：与真正用来采样的公式同一个），
+    // 这里只做搬运，避免"上报的值"和"实际用的值"漂移
+    status_.sample_position_m = status_.output.sample_position_m;
     if (sm.allow_control) {
         apply_command(status_.output.height_mm);
     }
@@ -300,6 +310,8 @@ bool SuspensionControlLoop::request_reset() {
         speed_stamp_sec_ = 0.0;
         status_.speed_mps = 0.0;
         status_.lookahead_m = 0.0;
+        status_.profile_age_ms = 0.0;
+        status_.sample_position_m = 0.0;
 
         // 复位是外部可见的状态跃迁，立刻反映到 status_，
         // 不必等到下一个控制周期才更新

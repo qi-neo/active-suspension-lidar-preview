@@ -71,6 +71,12 @@ struct ControlInput {
     // 否则退回上面的固定 lookahead_m。接上里程计之前一直走固定值
     bool has_speed{false};
     double speed_mps{0.0};
+
+    // 剖面帧龄 (s)：所使用剖面的采集时刻距当前这一拍的时间差，由控制回路
+    // 填写（now - frame.stamp_sec，负值按 0 计）。路面剖面锚定在采集时刻的
+    // 车体原点，车在帧龄内已经前进 车速×帧龄——取样位置必须把这个距离加
+    // 回去，否则高速长帧龄时取到的是"过去的路面"。无车速信息时无法补偿
+    double profile_age_s{0.0};
 };
 
 // 控制器输出
@@ -84,6 +90,10 @@ struct ControlOutput {
     double pitch_correction_mm{0.0};
     bool saturated{false};   // 是否触发过限幅
     bool rate_limited{false};  // 是否触发过速率限制
+    // 本拍前轴实际取样位置 (m)，已含帧龄补偿：= 生效 lookahead + 车速×帧龄。
+    // 与 feedforward_mm 配套——知道取了多远，才知道前馈对应哪段路面。
+    // 降级保持/回中期间不更新（保留最近一次闭环计算的值）
+    double sample_position_m{0.0};
     // 本拍是否有轮迹因自身无有效数据而回退用了对侧高程。
     // 该位持续置起说明某一侧轮迹长期失效（遮挡/标定），需要关注
     bool feedforward_fallback{false};

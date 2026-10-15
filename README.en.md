@@ -9,7 +9,7 @@ ROS2 · C++ · PCL · Embedded · Multi-sensor fusion
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes three offline self-tests (v3 control: 130 checks, driver parsing: 63
+> executes three offline self-tests (v3 control: 142 checks, driver parsing: 63
 > checks, v2 point-cloud pipeline). Starting from **v3.1.0** the packages build
 > cleanly — **earlier tags do not build**. See [CHANGELOG](CHANGELOG.md).
 
@@ -225,7 +225,7 @@ A few design points worth calling out:
 - **Bounded step duration**: timer jitter cannot push the elapsed-time criteria past their thresholds in one step and cause a spurious stop
 - **Hardware emergency stop**: entering the emergency state calls the driver's `emergency_stop()` in addition to sending a zero-position command
 
-Three algorithmic details on the feedforward sampling distance (since v3.2.0):
+Four algorithmic details on the feedforward sampling distance (since v3.2.0):
 
 - **Distance scales with speed**: sample distance = clamp(speed × response horizon,
   0.5 m, 5 m), where the horizon is 2.5× the time the actuator needs to traverse its
@@ -236,17 +236,23 @@ Three algorithmic details on the feedforward sampling distance (since v3.2.0):
 - **Per-axle distances**: the rear axle samples one wheelbase closer than the front —
   the rear wheels meet the same road feature one "wheelbase / speed" later, so using one
   distance for both would feed pitch with road the rear wheels have not reached yet
+- **Frame-age motion compensation**: the profile frame is anchored to the vehicle origin
+  at capture time; by the current tick the vehicle has already travelled speed × frame
+  age, and the sample position adds that distance back. At 10–20 Hz profiles the frame
+  age is routinely 50–100 ms, so skipping this is a 100–200 mm systematic error at
+  2 m/s. The actual sample position (= effective distance + compensation) is written to
+  `ControlStatus.sample_position_m` every tick
 - **Inter-cell interpolation and cross-lane fallback**: sampling interpolates between
   adjacent cells so the 5 cm quantization does not become a stair-stepped travel command;
   if one wheel track has no valid data the other track's height is borrowed, avoiding an
   asymmetric feedforward that reads as a phantom roll command (signalled by
   `ControlStatus.feedforward_fallback`, so it is observable)
 
-The effective speed and sample distance are written into `ControlStatus` every tick
-(`speed_mps` / `lookahead_m`), so "how far ahead did the feedforward actually look"
-is visible during integration.
+The effective speed, sample distance and frame age are written into `ControlStatus`
+every tick (`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`),
+so "how far ahead did the feedforward actually look" is visible during integration.
 
-130 offline self-test checks, requiring neither ROS nor hardware:
+142 offline self-test checks, requiring neither ROS nor hardware:
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -303,7 +309,7 @@ All three C++ packages ship offline checks that confirm the pipeline without any
 ```bash
 ros2 run unilidar_driver decoder_selftest         # packet parsing, 63 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
-ros2 run suspension_control_v3 control_selftest    # control and safety logic, 89 checks
+ros2 run suspension_control_v3 control_selftest    # control and safety logic, 142 checks
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,

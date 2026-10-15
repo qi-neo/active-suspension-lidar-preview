@@ -20,6 +20,7 @@
 //      以及控制回路按 controller_kind 选控制律
 //  16. 车速自适应预瞄：生效距离的钳位、无车速回退、回路状态上报与过期
 //  17. 前后轴差异化前馈、括号格插值、单侧失效跨侧回退
+//  18. 帧龄运动补偿：取样位置 +车速×帧龄、无车速不补偿、回路帧龄上报
 
 #include <algorithm>
 #include <cmath>
@@ -1019,6 +1020,96 @@ void test_per_axle_feedforward() {
     check(!out.feedforward_fallback, "两侧都有数据时不应置回退标记");
 }
 
+// ---------------------------------------------------------------- 场景 18
+// 帧龄运动补偿。剖面坐标系锚定在采集时刻的车体原点，从采集到当前这一拍
+// 车已经前进了 车速×帧龄；取样位置不加回这段距离，高速长帧龄时拿的就是
+// 旧地图。剖面 10~20 Hz、帧龄常年 50~100 ms，2 m/s 时偏差 100~200 mm
+void test_frame_age_compensation() {
+    section("18. 帧龄运动补偿");
+
+    ControlParams p;
+    p.rate_limit_mm_per_s = 1e9;   // 关掉速率限制，单独看取样
+    PreviewFeedbackController ctrl(p);
+
+    // 剖面 h(x) = 0.02·sin(πx)。车速 1 m/s 的自适应距离 0.35 m 被下限钳到
+    // 0.5 m，该处 sin(0.5π)=1 -> 20 mm；帧龄 0.1 s 补偿 +0.1 m -> 取样
+    // 0.6 m，sin(0.6π)=0.951 -> 19.02 mm
+    const RoadProfileFrame f = make_frame(0.0, 0.02, 0.0);
+    ControlInput in;
+    in.profile = &f;
+    in.lookahead_m = 0.5;
+
+    in.has_speed = true;
+    in.speed_mps = 1.0;
+    in.profile_age_s = 0.1;
+    ControlOutput out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 19.02) < 0.05,
+          "帧龄 0.1 s @ 1 m/s 时应取到 0.6 m 处，前馈 19.02 mm");
+    check(std::fabs(out.sample_position_m - 0.6) < 1e-9,
+          "实际上报取样位置应为 0.6 m");
+    // 后轴：0.6 - 0.25 = 0.35 m，sin(0.35π)=0.891 -> 17.82 mm
+    check(std::fabs(out.feedforward_mm[kRearLeft] - 17.82) < 0.05,
+          "后轴取样 0.35 m，前馈应为 17.82 mm");
+    std::printf("  车速 1 m/s × 帧龄 0.1 s -> 取样 %.2f m，前轴 %.2f / 后轴 %.2f mm\n",
+                out.sample_position_m, out.feedforward_mm[kFrontLeft],
+                out.feedforward_mm[kRearLeft]);
+
+    // 无车速信息：无法知道车走了多远，不做补偿，按固定 lookahead_m=0.5 取
+    ctrl.reset();
+    in.has_speed = false;
+    out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.05,
+          "无车速时不应做帧龄补偿，仍取固定 0.5 m 处");
+    check(std::fabs(out.sample_position_m - 0.5) < 1e-9,
+          "无车速时取样位置应为固定值 0.5 m");
+
+    // 帧龄为负（时钟跳变）或非有限值：按 0 计，不产生反向偏移
+    ctrl.reset();
+    in.has_speed = true;
+    in.profile_age_s = -0.5;
+    out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.05,
+          "帧龄为负应按 0 计，不反向偏移");
+    ctrl.reset();
+    in.profile_age_s = std::nan("");
+    out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.05,
+          "帧龄非有限值应按 0 计");
+
+    // 补偿量与自适应距离叠加：车速 2 m/s -> 自适应 0.7 m，加帧龄 0.1 s 的
+    // 0.2 m -> 实际取样 0.9 m，sin(0.9π)=0.309 -> 6.18 mm
+    ctrl.reset();
+    in.profile_age_s = 0.1;
+    in.speed_mps = 2.0;
+    out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 6.18) < 0.05,
+          "自适应距离与帧龄补偿应叠加：0.7 + 0.2 = 0.9 m");
+    check(std::fabs(out.sample_position_m - 0.9) < 1e-9,
+          "取样位置应为自适应距离 + 帧龄补偿 = 0.9 m");
+    std::printf("  车速 2 m/s × 帧龄 0.1 s -> 自适应 0.7 + 补偿 0.2 = %.2f m，前馈 %.2f mm\n",
+                out.sample_position_m, out.feedforward_mm[kFrontLeft]);
+
+    // ---- 回路级：帧龄上报与取样位置一致性 ----
+    // 注意回路里 lookahead_m 默认 1.0 是"无车速时的固定值"；提交车速后走
+    // 自适应路径：1.0 m/s × 0.35 s = 0.35 m，被 min_lookahead_m 钳到 0.5 m
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    // 提交一帧"旧 100 ms"的剖面并给车速，再推进一拍（5 ms）：
+    // 帧龄 = 105 ms，取样位置 = 0.5（自适应下限）+ 1.0 × 0.105 = 0.605 m
+    fx.loop.submit_profile(make_frame(fx.t - 0.1, 0.02), fx.t);
+    fx.loop.submit_speed(1.0, fx.t);
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(std::fabs(fx.loop.status().profile_age_ms - 105.0) < 0.5,
+          "应上报剖面帧龄约 105 ms（100 ms 旧帧 + 一拍 5 ms）");
+    check(std::fabs(fx.loop.status().sample_position_m - 0.605) < 0.01,
+          "回路取样位置应为 0.605 m（自适应 0.5 + 帧龄补偿 0.105）");
+    std::printf("  回路：帧龄 %.0f ms，取样 %.3f m（自适应 0.5 + 补偿 0.105）\n",
+                fx.loop.status().profile_age_ms, fx.loop.status().sample_position_m);
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1082,6 +1173,7 @@ int main() {
     test_incremental_lqi();
     test_speed_adaptive_lookahead();
     test_per_axle_feedforward();
+    test_frame_age_compensation();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");
