@@ -16,6 +16,7 @@
 #include "suspension_control_v3/controller.hpp"
 #include "suspension_control_v3/input_validator.hpp"
 #include "suspension_control_v3/safety_state_machine.hpp"
+#include "suspension_control_v3/temporal_fuser.hpp"
 #include "suspension_control_v3/types.hpp"
 #include "suspension_preview_v2/suspension_driver.hpp"
 
@@ -45,6 +46,16 @@ struct ControlLoopParams {
     // 车速数据的最大有效期。超过则视为无车速，前馈退回固定 lookahead_m——
     // 用陈旧车速算出的取样距离比不用车速更危险（距离错了但看起来很合理）
     double speed_timeout_s{0.5};
+    // ---- 多帧融合（感知层降噪）----
+    // 参与融合的帧数（含最新帧），1 = 关闭融合直通最新帧。剖面 10~20 Hz、
+    // 控制环 200 Hz，同一条路面会被多帧重复观测，按位置对齐后取中位数
+    // 可以压掉单帧噪声、兜住单帧局部失效
+    int fusion_frames{3};
+    // 参与融合的帧的最大帧龄 (s)
+    double fusion_max_age_s{0.3};
+    // 跨帧离散度阈值 (m)：同一位置各帧读数差异超过它，该格判低置信置无效。
+    // <= 0 关闭该判据
+    double fusion_max_dispersion_m{0.03};
 };
 
 struct ControlLoopStatus {
@@ -75,6 +86,12 @@ struct ControlLoopStatus {
     // 值，降级保持/回中期间不更新
     double profile_age_ms{0.0};
     double sample_position_m{0.0};
+
+    // 多帧融合诊断：本拍实际参与融合的帧数（1 = 未融合）、因跨帧离散度
+    // 过大被判无效的格数（左右合计）、平均跨帧离散度 (mm)
+    std::size_t fused_frames{0};
+    std::size_t low_confidence_cells{0};
+    double mean_dispersion_mm{0.0};
 
     // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
     std::size_t calibration_samples{0};
@@ -117,6 +134,8 @@ public:
     virtual IInputValidator& validator() = 0;
     virtual ISafetyStateMachine& state_machine() = 0;
     virtual IController& controller() = 0;
+    // 多帧融合器：便于调参（frames / max_age / max_dispersion）与测试
+    virtual TemporalProfileFuser& fuser() = 0;
 };
 
 class SuspensionControlLoop : public IControlLoop {
@@ -143,6 +162,7 @@ public:
     IInputValidator& validator() override { return *validator_; }
     ISafetyStateMachine& state_machine() override { return *state_machine_; }
     IController& controller() override { return *controller_; }
+    TemporalProfileFuser& fuser() override { return fuser_; }
 
 private:
     void apply_command(const std::array<double, kWheelCount>& height_mm,
@@ -155,6 +175,11 @@ private:
     // 用接口而不是具体类型，是为了让 PD 与 LQI 可以互换而不动这一层
     std::unique_ptr<IController> controller_;
     std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver_;
+
+    // 多帧融合器与融合输出帧。fused_ 是成员而不是每拍局部量：
+    // 200 Hz 下每拍重新分配两个 100 格的 vector 没有意义
+    TemporalProfileFuser fuser_;
+    suspension_preview_v2::RoadProfileFrame fused_;
 
     Attitude attitude_;
     ControlLoopStatus status_;

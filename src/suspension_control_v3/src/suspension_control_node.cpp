@@ -95,6 +95,14 @@ public:
             RCLCPP_INFO(get_logger(), "前馈取样距离固定 %.2f m（未启用车速自适应）",
                         loop_params_.lookahead_m);
         }
+        if (loop_params_.fusion_frames > 1) {
+            RCLCPP_INFO(get_logger(),
+                        "多帧融合：%d 帧、最大帧龄 %.2f s、离散度阈值 %.3f m",
+                        loop_params_.fusion_frames, loop_params_.fusion_max_age_s,
+                        loop_params_.fusion_max_dispersion_m);
+        } else {
+            RCLCPP_INFO(get_logger(), "多帧融合已关闭（fusion_frames=1，直通最新帧）");
+        }
     }
 
 private:
@@ -223,6 +231,14 @@ private:
         // 车速有效期。超过则视为无车速，前馈退回固定 lookahead_m
         loop_params_.speed_timeout_s =
             declare_parameter<double>("speed_timeout_s", loop_params_.speed_timeout_s);
+        // 多帧融合：把最近 N 帧剖面按位置对齐后取中位数，压单帧噪声、
+        // 兜单帧局部失效。frames=1 即关闭（直通最新帧）
+        loop_params_.fusion_frames =
+            declare_parameter<int>("fusion_frames", loop_params_.fusion_frames);
+        loop_params_.fusion_max_age_s =
+            declare_parameter<double>("fusion_max_age_s", loop_params_.fusion_max_age_s);
+        loop_params_.fusion_max_dispersion_m = declare_parameter<double>(
+            "fusion_max_dispersion_m", loop_params_.fusion_max_dispersion_m);
         // 封顶值不能低于名义控制周期：否则每一拍都被钳制，累计时间推进慢于真实时间，
         // 降级、链路超时这些基于时长的判据会成比例地延迟触发。
         // 低控制频率下这一步尤其关键
@@ -354,6 +370,9 @@ private:
         out.feedforward_fallback = st.output.feedforward_fallback;
         out.profile_age_ms = static_cast<float>(st.profile_age_ms);
         out.sample_position_m = static_cast<float>(st.sample_position_m);
+        out.fused_frames = static_cast<uint32_t>(st.fused_frames);
+        out.low_confidence_cells = static_cast<uint32_t>(st.low_confidence_cells);
+        out.mean_dispersion_mm = static_cast<float>(st.mean_dispersion_mm);
         out.ticks = static_cast<uint32_t>(st.ticks);
         out.profiles_accepted = static_cast<uint32_t>(st.profiles_accepted);
         out.profiles_rejected = static_cast<uint32_t>(st.profiles_rejected);

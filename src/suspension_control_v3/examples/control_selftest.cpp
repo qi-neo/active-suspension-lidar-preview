@@ -21,6 +21,8 @@
 //  16. 车速自适应预瞄：生效距离的钳位、无车速回退、回路状态上报与过期
 //  17. 前后轴差异化前馈、括号格插值、单侧失效跨侧回退
 //  18. 帧龄运动补偿：取样位置 +车速×帧龄、无车速不补偿、回路帧龄上报
+//  19. 多帧位置对齐融合：位置对齐正确性、中位数抑噪、离散度判据、
+//      无车速直通、回路诊断上报
 
 #include <algorithm>
 #include <cmath>
@@ -31,6 +33,7 @@
 #include "suspension_control_v3/control_loop.hpp"
 
 using namespace suspension_control_v3;
+using suspension_preview_v2::kFused;
 using suspension_preview_v2::kInvalid;
 using suspension_preview_v2::kMeasured;
 using suspension_preview_v2::LaneProfile;
@@ -1110,6 +1113,153 @@ void test_frame_age_compensation() {
                 fx.loop.status().profile_age_ms, fx.loop.status().sample_position_m);
 }
 
+// ---------------------------------------------------------------- 场景 19
+// 多帧位置对齐融合。关键验证点是"对齐"：同一段路面在旧帧里的坐标是
+// 最新系坐标 + 车速×帧龄差，对不齐的话融出来的就是把不同位置混在一起
+void test_temporal_fusion() {
+    section("19. 多帧位置对齐融合");
+
+    // ---- 19.1 融合器直测：位置对齐 + 中位数 ----
+    // 构造三帧（车速 1 m/s，帧间隔 0.1 s）：
+    //   帧A t=10.0（帧龄 0.2）、帧B t=10.1（帧龄 0.1）、帧C t=10.2（最新）
+    // 路面是"静止"的：所有帧每个格子都是 0.02 m（常量高程）。
+    // 对齐后任何位置都应融出 0.02——对齐错了就会在某些格取到 NaN 或错值
+    TemporalProfileFuser::Params fp;
+    fp.frames = 3;
+    fp.max_age_s = 0.3;
+    fp.max_dispersion_m = 0.03;
+
+    RoadProfileFrame fa = make_frame(10.0, 0.0, 0.02);
+    RoadProfileFrame fb = make_frame(10.1, 0.0, 0.02);
+    RoadProfileFrame fc = make_frame(10.2, 0.0, 0.02);
+    TemporalProfileFuser f2(fp);
+    f2.push(fa);
+    f2.push(fb);
+    f2.push(fc);
+
+    RoadProfileFrame fused;
+    const bool ok = f2.fuse(10.2, true, 1.0, fused);
+    check(ok, "融合应成功");
+    check(f2.last_used_frames() == 3, "应有三帧参与融合");
+    // 静止路面：每个格都应是 0.02 且有效
+    bool all_ok = true;
+    for (std::size_t i = 0; i < fused.left.size(); ++i) {
+        if (fused.left.valid[i] == kInvalid ||
+            std::fabs(fused.left.height[i] - 0.02f) > 1e-6f) {
+            all_ok = false;
+        }
+    }
+    check(all_ok, "静止路面融合后每格都应为 0.02 m（对齐正确的证据）");
+    check(fused.stamp_sec == 10.2, "融合帧应携带最新帧时间戳");
+    std::printf("  三帧静止路面 -> 融合帧 %zu 格全有效，帧龄基准 %.1f s\n",
+                fused.left.size(), fused.stamp_sec);
+
+    // ---- 19.2 中位数抑噪：旧帧一个格放离群值，融合后应被剔除 ----
+    // 帧A 第 40 格 = 0.5 m（离群），B/C 第 40 格都是 0.02 -> 中位数 0.02
+    RoadProfileFrame noisy = fa;
+    noisy.left.height[40] = 0.5f;
+    noisy.right.height[40] = 0.5f;
+    TemporalProfileFuser f3(fp);
+    f3.push(noisy);
+    f3.push(fb);
+    f3.push(fc);
+    RoadProfileFrame fused2;
+    check(f3.fuse(10.2, true, 1.0, fused2), "含离群帧的融合应成功");
+    check(std::fabs(fused2.left.height[40] - 0.02f) < 1e-6f,
+          "离群值应被中位数剔除（0.02，不是均值 0.18）");
+    check(fused2.left.valid[40] == kFused, "融合格的有效掩码应为 kFused");
+    std::printf("  旧帧第 40 格置 0.5 m 离群 -> 融合后 %.3f m（中位数剔除）\n",
+                fused2.left.height[40]);
+
+    // ---- 19.3 离散度判据：三帧同一格差 0.05 m（>阈值 0.03）-> 判无效 ----
+    // 左右两迹都置出差值，验证两边分别计数
+    RoadProfileFrame spread = fa;
+    spread.left.height[40] = 0.0f;     // A: 0.00
+    spread.right.height[40] = 0.0f;
+    RoadProfileFrame spread_b = fb;
+    spread_b.left.height[40] = 0.02f;  // B: 0.02
+    spread_b.right.height[40] = 0.02f;
+    RoadProfileFrame spread_c = fc;
+    spread_c.left.height[40] = 0.05f;  // C: 0.05，与 A 差 0.05 > 0.03
+    spread_c.right.height[40] = 0.05f;
+    TemporalProfileFuser f4(fp);
+    f4.push(spread);
+    f4.push(spread_b);
+    f4.push(spread_c);
+    RoadProfileFrame fused3;
+    check(f4.fuse(10.2, true, 1.0, fused3), "离散度测试融合应成功");
+    check(fused3.left.valid[40] == kInvalid,
+          "跨帧差 0.05 m 超过阈值，该格应判低置信置无效");
+    check(fused3.right.valid[40] == kInvalid, "右迹同格也应判无效");
+    check(f4.last_low_confidence_cells() == 2,
+          "左右两迹同格都超差，应计 2 个低置信格");
+    std::printf("  同格三帧差 0.05 m -> 判无效，低置信格 %zu 个\n",
+                f4.last_low_confidence_cells());
+
+    // ---- 19.4 无车速 -> 直通最新帧（位置无法对齐，混融比不融更坏）----
+    TemporalProfileFuser f5(fp);
+    f5.push(fa);
+    f5.push(fb);
+    f5.push(fc);
+    RoadProfileFrame passthrough;
+    check(f5.fuse(10.2, false, 0.0, passthrough), "无车速时应直通最新帧");
+    check(f5.last_used_frames() == 1, "无车速时融合帧数应为 1");
+    check(std::fabs(passthrough.left.height[40] - fc.left.height[40]) < 1e-6f,
+          "直通输出应与最新帧一致");
+    std::printf("  无车速 -> 直通最新帧（融合帧数 %zu）\n", f5.last_used_frames());
+
+    // ---- 19.5 单帧 / 关闭融合 -> 直通 ----
+    TemporalProfileFuser f6(fp);
+    f6.push(fc);
+    RoadProfileFrame single;
+    check(f6.fuse(10.2, true, 1.0, single), "单帧应直通");
+    check(f6.last_used_frames() == 1, "单帧时融合帧数应为 1");
+
+    TemporalProfileFuser::Params off = fp;
+    off.frames = 1;
+    TemporalProfileFuser f7(off);
+    f7.push(fa);
+    f7.push(fb);
+    f7.push(fc);
+    RoadProfileFrame off_out;
+    check(f7.fuse(10.2, true, 1.0, off_out), "frames=1 应直通");
+    check(f7.last_used_frames() == 1, "关闭融合时融合帧数应为 1");
+
+    // ---- 19.6 超龄帧不参与 ----
+    TemporalProfileFuser::Params strict = fp;
+    strict.max_age_s = 0.15;   // 帧A 帧龄 0.2 被排除，只剩 B/C 两帧
+    TemporalProfileFuser f8(strict);
+    f8.push(fa);
+    f8.push(fb);
+    f8.push(fc);
+    RoadProfileFrame fused4;
+    check(f8.fuse(10.2, true, 1.0, fused4), "限制帧龄的融合应成功");
+    check(f8.last_used_frames() == 2, "超龄帧不应参与，应只剩 2 帧");
+
+    // ---- 19.7 回路级：融合诊断上报 + 控制器确实吃到融合帧 ----
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+    check(fx.loop.status().fused_frames >= 1, "回路应上报融合帧数");
+
+    // 喂三帧不同时刻的剖面 + 车速，检查诊断字段
+    fx.loop.submit_speed(1.0, fx.t);
+    fx.loop.submit_profile(make_frame(fx.t - 0.2, 0.02), fx.t);
+    fx.loop.submit_profile(make_frame(fx.t - 0.1, 0.02), fx.t);
+    fx.loop.submit_profile(make_frame(fx.t, 0.02), fx.t);
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(fx.loop.status().fused_frames == 3,
+          "回路应融合 3 帧并上报");
+    std::printf("  回路：融合 %zu 帧，低置信格 %zu，平均离散度 %.2f mm\n",
+                fx.loop.status().fused_frames, fx.loop.status().low_confidence_cells,
+                fx.loop.status().mean_dispersion_mm);
+
+    // 控制器输出应反映正弦路面（融合帧有效），而不是零
+    check(std::fabs(fx.loop.status().output.height_mm[kFrontLeft]) > 0.01,
+          "融合帧有效时前馈应有非零输出");
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1174,6 +1324,7 @@ int main() {
     test_speed_adaptive_lookahead();
     test_per_axle_feedforward();
     test_frame_age_compensation();
+    test_temporal_fusion();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

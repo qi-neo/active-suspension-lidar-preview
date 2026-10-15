@@ -24,6 +24,11 @@ SuspensionControlLoop::SuspensionControlLoop(const ControlLoopParams& params,
             controller_ = std::make_unique<PreviewFeedbackController>(control_params);
             break;
     }
+    // 多帧融合参数跟随 ControlLoopParams（关闭融合 = frames 设 1）
+    fuser_.params().frames =
+        static_cast<std::size_t>(std::max(1, params_.fusion_frames));
+    fuser_.params().max_age_s = params_.fusion_max_age_s;
+    fuser_.params().max_dispersion_m = params_.fusion_max_dispersion_m;
 }
 
 void SuspensionControlLoop::set_driver(
@@ -39,6 +44,8 @@ ValidationResult SuspensionControlLoop::submit_profile(
     if (r.ok) {
         ++status_.profiles_accepted;
         new_profile_valid_ = true;
+        // 校验通过的帧才进融合缓冲：坏帧混进去会污染后面每一拍的输出
+        fuser_.push(frame);
     } else {
         ++status_.profiles_rejected;
         new_profile_rejected_ = true;
@@ -149,6 +156,15 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         li.lookahead_m = params_.lookahead_m;
         status_.lookahead_m = effective_lookahead(li, controller_->params());
     }
+
+    // ---- 多帧融合 ----
+    // 状态机的健康度判据仍用原始帧（链路是否在供数、质量如何，那是数据链
+    // 的问题）；融合帧只喂控制器——它是"同样的路更好的估计"，不是新的数据源。
+    // 无车速时融合器自动退化为直通最新帧（位置无法对齐，混融比不融更坏）
+    const bool has_fused = fuser_.fuse(now_sec, speed_ok, status_.speed_mps, fused_);
+    status_.fused_frames = fuser_.last_used_frames();
+    status_.low_confidence_cells = fuser_.last_low_confidence_cells();
+    status_.mean_dispersion_mm = fuser_.last_mean_dispersion_mm();
 
     SafetyInputs in;
     in.profile_valid = new_profile_valid_;
@@ -269,7 +285,10 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     ci.speed_mps = status_.speed_mps;
     ci.profile_age_s = profile_age_s;
 
-    ci.profile = has_held ? &held : nullptr;
+    // 喂给控制器的是融合帧（多帧降噪 + 兜住单帧局部失效），而不是原始帧。
+    // 融合帧携带最新帧的时间戳，控制器的帧龄补偿照旧只补这一份，
+    // 与融合器内部的位置对齐不重不漏
+    ci.profile = has_fused ? &fused_ : nullptr;
 
     status_.output = controller_->compute(ci, step_dt);
     // 取样位置由控制器算出（单一出处：与真正用来采样的公式同一个），
@@ -312,6 +331,10 @@ bool SuspensionControlLoop::request_reset() {
         status_.lookahead_m = 0.0;
         status_.profile_age_ms = 0.0;
         status_.sample_position_m = 0.0;
+        fuser_.reset();
+        status_.fused_frames = 0;
+        status_.low_confidence_cells = 0;
+        status_.mean_dispersion_mm = 0.0;
 
         // 复位是外部可见的状态跃迁，立刻反映到 status_，
         // 不必等到下一个控制周期才更新

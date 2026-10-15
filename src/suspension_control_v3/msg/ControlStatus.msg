@@ -26,6 +26,10 @@ bool    feedforward_fallback  # 前馈是否回退用了对侧轮迹（该侧无
 float32 profile_age_ms    # 所使用剖面的帧龄 (ms)
 float32 sample_position_m # 前轴实际取样位置 (m)，= lookahead + 车速×帧龄
 
+uint32 fused_frames          # 本拍参与融合的帧数（1 = 未融合）
+uint32 low_confidence_cells  # 跨帧离散度过大被判无效的格数（左右合计）
+float32 mean_dispersion_mm   # 平均跨帧离散度 (mm)
+
 uint32 ticks
 uint32 profiles_accepted
 uint32 profiles_rejected
