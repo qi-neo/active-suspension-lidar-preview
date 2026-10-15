@@ -7,7 +7,7 @@
 `suspension_preview_v2`、`suspension_control_v3`、`unilidar_driver`、`car_balancer`。
 本文件按仓库层面的版本记录。
 
-## [未发布]
+## [3.2.1] - 2026-10-15
 
 对应 `suspension_control_v3` 的 3.2.x。主线是前馈取样从"固定距离单点取样"
 改成"车速自适应 + 帧龄补偿 + 前后轴差异化"，把预瞄控制里一直对不上相位的
