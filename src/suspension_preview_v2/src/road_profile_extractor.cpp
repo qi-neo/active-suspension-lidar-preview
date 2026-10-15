@@ -12,6 +12,8 @@
 // 这处先前一直没暴露，是因为从没在干净环境里构建过。
 #include <pcl/filters/passthrough.h>
 
+#include "suspension_preview_v2/road_trend.hpp"
+
 namespace suspension_preview_v2 {
 
 GridRoadProfileExtractor::GridRoadProfileExtractor(const ExtractorParams& params)
@@ -21,6 +23,11 @@ GridRoadProfileExtractor::GridRoadProfileExtractor(const ExtractorParams& params
     if (params_.ground_z_min >= params_.ground_z_max) {
         std::swap(params_.ground_z_min, params_.ground_z_max);
     }
+    // 趋势窗口半高与粗筛上限都是"必须有正数"的量：填 0 会让窗口退化成
+    // 一个平面，逐格全判无效，现象是"突然没有数据"，很难定位
+    if (params_.trend_window_half_m <= 0.0) params_.trend_window_half_m = 0.15;
+    if (params_.absolute_z_limit_m <= 0.0) params_.absolute_z_limit_m = 2.0;
+    if (params_.trend_fit_range_m <= 0.0) params_.trend_fit_range_m = 3.0;
     cells_ = static_cast<std::size_t>(
         std::lround(params_.preview_dist / params_.resolution));
     if (cells_ == 0) cells_ = 1;
@@ -58,41 +65,50 @@ LaneProfile GridRoadProfileExtractor::extract_lane(
     pass.setFilterLimits(0.0f, static_cast<float>(params_.preview_dist));
     pass.filter(*roi);
 
-    // 2) 分箱（地面高程窗口）
+    // 2) 分箱。这一轮【不】套地面窗口：趋势线要先把路面的走向算出来，
+    //    逐格开窗才有依据。这里只剔除非有限值与离谱的远近点（天空、墙壁、
+    //    远处建筑），给趋势拟合一个干净的输入
     std::vector<std::vector<float>> bins(cells_);
     for (const auto& pt : roi->points) {
         if (!std::isfinite(pt.z)) continue;
-        if (pt.z < params_.ground_z_min || pt.z > params_.ground_z_max) continue;
+        if (std::fabs(pt.z) > params_.absolute_z_limit_m) continue;
         const auto idx = static_cast<long>(std::floor(pt.x / params_.resolution));
         if (idx < 0 || idx >= static_cast<long>(cells_)) continue;
         bins[static_cast<std::size_t>(idx)].push_back(pt.z);
     }
 
-    // 3) 逐格鲁棒估计
+    // 3) 局部地面趋势：用近处格子的代表高度拟合 h(x) = base + slope·x。
+    //    拟合失败（点数不足）时返回 invalid，下面自动退回旧的绝对窗口
+    std::vector<float> cell_mid(cells_, std::numeric_limits<float>::quiet_NaN());
     for (std::size_t i = 0; i < cells_; ++i) {
-        const auto& b = bins[i];
-        if (static_cast<int>(b.size()) < params_.min_points_per_cell) {
-            ++invalid_cells_;
-            continue;
-        }
-        const auto mm = std::minmax_element(b.begin(), b.end());
-        if (static_cast<double>(*mm.second - *mm.first) > params_.max_cell_spread) {
-            // 格内高低差过大：疑似障碍物 / 跨越路缘
-            ++invalid_cells_;
-            continue;
+        cell_mid[i] = robust_median(bins[i]);
+    }
+    const RoadTrend trend =
+        params_.use_road_trend
+            ? fit_road_trend(cell_mid, params_.resolution, params_.trend_fit_range_m,
+                             params_.trend_min_cells)
+            : RoadTrend{};
+
+    // 4) 逐格：按趋势线开窗 -> 格内稳健估计 -> 跨度判据
+    for (std::size_t i = 0; i < cells_; ++i) {
+        float lo = static_cast<float>(params_.ground_z_min);
+        float hi = static_cast<float>(params_.ground_z_max);
+        if (trend.valid) {
+            // 窗口跟着路面前移：这一格的窗中心是趋势线在该处的高度，
+            // 斜坡与制动点头下都能把路面框进来
+            const double center =
+                trend_height(trend, static_cast<double>(i) * params_.resolution);
+            lo = static_cast<float>(center - params_.trend_window_half_m);
+            hi = static_cast<float>(center + params_.trend_window_half_m);
         }
         float est = 0.0f;
-        if (params_.use_median) {
-            auto tmp = b;
-            const std::size_t mid = tmp.size() / 2;
-            std::nth_element(tmp.begin(), tmp.begin() + static_cast<long>(mid), tmp.end());
-            est = tmp[mid];
+        if (estimate_cell(bins[i], lo, hi, params_.min_points_per_cell,
+                          params_.max_cell_spread, params_.use_median, est)) {
+            lane.height[i] = est;
+            lane.valid[i] = kMeasured;
         } else {
-            est = std::accumulate(b.begin(), b.end(), 0.0f) /
-                  static_cast<float>(b.size());
+            ++invalid_cells_;   // 点数不足或格内跨度过大（疑似障碍物）
         }
-        lane.height[i] = est;
-        lane.valid[i] = kMeasured;
     }
 
     // 4) 可选插值补洞

@@ -74,6 +74,17 @@ public:
         RCLCPP_INFO(get_logger(), "预瞄节点就绪 | %s -> %s | %zu 格 x %.3f m | 话题: %s",
                     cloud_topic_.c_str(), target_frame_.c_str(), cells, resolution_,
                     publish_topic_.c_str());
+        if (use_road_trend_) {
+            // 车身被悬架维持在水平，车体坐标系下路面是"斜"的，窗口必须跟着路面前移
+            RCLCPP_INFO(get_logger(),
+                        "地面筛选：趋势相对窗口（近景 %.1f m 拟合，上下 ±%.2f m）；"
+                        "拟合失败时退回固定窗口 [%.2f, %.2f] m",
+                        trend_fit_range_m_, trend_window_half_m_, ground_z_min_,
+                        ground_z_max_);
+        } else {
+            RCLCPP_INFO(get_logger(), "地面筛选：固定高程窗口 [%.2f, %.2f] m（趋势窗口已关闭）",
+                        ground_z_min_, ground_z_max_);
+        }
     }
 
 private:
@@ -98,6 +109,17 @@ private:
         use_median_ = declare_parameter<bool>("use_median", true);
         interpolate_gaps_ = declare_parameter<bool>("interpolate_gaps", false);
 
+        // 局部地面趋势：逐格开窗跟着路面前移。固定窗口在斜坡或制动点头时
+        // 会把整段前方路面砍掉（10% 的坡在 5 m 外就是 500 mm 的高度差），
+        // 这是预瞄在真实路面上失效的典型原因
+        use_road_trend_ = declare_parameter<bool>("use_road_trend", true);
+        trend_fit_range_m_ = declare_parameter<double>("trend_fit_range_m", 3.0);
+        trend_window_half_m_ = declare_parameter<double>("trend_window_half_m", 0.15);
+        trend_min_cells_ = declare_parameter<int>("trend_min_cells", 6);
+        // 分箱前的粗筛上限：剔除天空、墙壁等离谱点。趋势拟合需要干净输入，
+        // 但它不负责任何地面筛选（那是逐格趋势窗口的职责）
+        absolute_z_limit_m_ = declare_parameter<double>("absolute_z_limit_m", 2.0);
+
         tf_timeout_ms_ = declare_parameter<int>("tf_timeout_ms", 30);
         publish_marker_ = declare_parameter<bool>("publish_marker", true);
         diag_period_s_ = declare_parameter<double>("diag_period_s", 5.0);
@@ -115,6 +137,11 @@ private:
         p.max_cell_spread = max_cell_spread_;
         p.use_median = use_median_;
         p.interpolate_gaps = interpolate_gaps_;
+        p.use_road_trend = use_road_trend_;
+        p.trend_fit_range_m = trend_fit_range_m_;
+        p.trend_window_half_m = trend_window_half_m_;
+        p.trend_min_cells = trend_min_cells_;
+        p.absolute_z_limit_m = absolute_z_limit_m_;
         return p;
     }
 
@@ -209,6 +236,11 @@ private:
     double max_cell_spread_{0.15};
     bool use_median_{true};
     bool interpolate_gaps_{false};
+    bool use_road_trend_{true};
+    double trend_fit_range_m_{3.0};
+    double trend_window_half_m_{0.15};
+    int trend_min_cells_{6};
+    double absolute_z_limit_m_{2.0};
     int tf_timeout_ms_{30};
     bool publish_marker_{true};
     double diag_period_s_{5.0};

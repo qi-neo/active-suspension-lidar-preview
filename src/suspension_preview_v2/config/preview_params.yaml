@@ -29,6 +29,17 @@ road_preview_node:
     use_median: true                        # 格内取中位数（抗离群点）
     interpolate_gaps: false                 # 是否线性插值补无效格（默认关闭，保留真实缺失）
 
+    # 局部地面趋势：逐格开窗跟着路面前移（斜坡/制动点头下才不会砍掉预瞄）
+    # 主动悬架把车身维持在水平，车体坐标系下路面是"斜"的：10% 的坡在
+    # 5 m 外就是 500 mm 的高度差，固定窗口会把整段前方路面当成非地面。
+    # 开启后先用近处的格子拟合 h(x)=base+slope·x（Theil-Sen 稳健回归），
+    # 再逐格在趋势线附近开窗；拟合失败时自动退回上面的 ground_z_min/max
+    use_road_trend: true
+    trend_fit_range_m: 3.0                  # 拟合所用的近景范围 (m)
+    trend_window_half_m: 0.15               # 趋势线上下各开这么高的窗 (m)
+    trend_min_cells: 6                      # 拟合所需最少有效格数
+    absolute_z_limit_m: 2.0                 # 分箱前粗筛：|z| 超过它直接剔除（天空/墙壁）
+
     # 其它
     tf_timeout_ms: 30                       # TF 查询超时 (ms)
     publish_marker: true                    # 发布 rviz Marker

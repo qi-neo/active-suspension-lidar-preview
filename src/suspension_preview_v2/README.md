@@ -20,7 +20,7 @@
 
 | 接口 | 职责 | 提供的实现 |
 |------|------|-----------|
-| `IRoadProfileExtractor` | 点云解析：点云 → 左右轮迹高程剖面 | `GridRoadProfileExtractor`（网格、中位数、有效掩码） |
+| `IRoadProfileExtractor` | 点云解析：点云 → 左右轮迹高程剖面 | `GridRoadProfileExtractor`（网格、趋势相对开窗、中位数、有效掩码） |
 | `IProfileSink` | 输出：把剖面送出去 | `RosTopicSink`、`SerialProfileSink` |
 | `ISuspensionDriver` | 悬架驱动：模式、目标高度、急停 | `SerialSuspensionDriver` |
 | `PreviewPipeline` | 组装：解析并分发，不含 ROS、线程、硬件细节 | — |
@@ -55,17 +55,36 @@ colcon build --packages-select suspension_preview_v2
 source install/setup.bash
 ```
 
-产出三个目标：`road_preview_node`、`suspension_driver_node`、`offline_demo`。
+产出四个目标：`road_preview_node`、`suspension_driver_node`、`offline_demo`、`trend_selftest`。
+
+## 地面筛选：窗口跟着路面前移
+
+地面高程窗口最容易踩的坑，是把它当成"车体坐标系下的绝对高度"：主动悬架会把车身维持在
+水平，于是车体坐标系下路面是**斜**的——10% 的坡在 5 m 外就是 500 mm 的高度差，制动点头
+（0.05 rad）同样是 250 mm。固定的 `ground_z_min/max`（默认 ±0.25 m）会把整段前方路面当成
+非地面剔掉，预瞄直接失效，而现象只是"远处没数据"，很难定位。
+
+现在的流程是两遍：
+
+1. **粗筛分箱**：只剔除非有限值与 |z| 超限的离谱点（天空、墙壁），不套地面窗口；
+2. **拟合局部趋势**：用近处格子的代表高度（逐格中位数）拟合 `h(x) = base + slope·x`，
+   斜率用 **Theil–Sen 稳健回归**（所有点对连线的斜率取中位数），抗约 29% 的离群格；
+3. **逐格开窗**：第 j 格的窗口是 `trend(j·spacing) ± trend_window_half_m`，跟着路面前移；
+4. **格内稳健估计**：窗口内取中位数，再按 `max_cell_spread` 剔除跨度过大（疑似障碍物）的格。
+
+拟合失败（有效格不足）时自动退回旧的 `ground_z_min/max` 绝对窗口，`use_road_trend: false`
+可整体关闭。输出的高度语义不变（仍是车体坐标系下的绝对高度），变的只是"哪些点算地面"。
 
 ## 离线验证
 
 不需要 ROS 运行时，也不需要雷达和硬件：
 
 ```bash
-ros2 run suspension_preview_v2 offline_demo
+ros2 run suspension_preview_v2 offline_demo      # 端到端：解析 + 协议往返
+ros2 run suspension_preview_v2 trend_selftest    # 趋势与逐格估计的纯函数自检，29 项
 ```
 
-它合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，最后做一次协议编解码往返校验：
+`offline_demo` 合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，最后做一次协议编解码往返校验：
 
 ```
 [demo] 合成点云: 127551 点
@@ -73,6 +92,17 @@ ros2 run suspension_preview_v2 offline_demo
 [demo] 左轮迹高程误差: 均值 0.9 mm / 最大 3.2 mm
 [demo] 协议往返: 通过（帧长 212 字节, id=0x01, seq=7, 100 点）
 ```
+
+`trend_selftest` 覆盖趋势拟合（平地/上下坡/含离群格/样本不足）、趋势外推、逐格开窗估计，
+以及本改动的主线验证——10% 上坡时旧窗口会把 4 m 外的路面判无效，趋势窗口能保住它：
+
+```
+=== 5. 上坡时远处路面应能被保留 ===
+  4.0 m 处：旧窗口 [-0.40, 0.10] -> 无效（预瞄被砍断）；趋势窗口 [0.300, 0.500] -> 0.400 m
+```
+
+它不依赖 PCL（只编译 `road_trend.cpp`），所以在没有 PCL 的机器上也能单独验证——提取器本身
+要 PCL，只能靠 CI。
 
 ## 运行
 
@@ -157,6 +187,9 @@ driver->emergency_stop();
 ## 尚未覆盖
 
 1. 接收端的闭环控制器还没实现，本包提供 `ISuspensionDriver` 供其调用；
-2. 地面分割是高程窗口加格内鲁棒统计，未使用平面拟合；
-3. 没有单元测试，建议对 `protocol::crc16_ccitt`、`encode_lane` 和分箱逻辑补纯函数测试；
+2. 地面分割已从固定高程窗口升级为逐格趋势相对开窗，但仍是逐格稳健统计，
+   未使用平面拟合（RANSAC / 格内 PCA 法向量），因此**还不能区分"该吸收的
+   路面凸起（减速带）"与"不该当路面的障碍物（行人、路沿）"**；
+3. 分箱逻辑与趋势拟合已有纯函数测试（`trend_selftest`），
+   `protocol::crc16_ccitt` 与 `encode_lane` 仍建议补同类型的测试；
 4. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）。

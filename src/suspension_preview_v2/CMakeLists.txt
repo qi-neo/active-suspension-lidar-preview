@@ -30,9 +30,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 # 核心库（不依赖 ROS，可离线复用/单测）
 #   types / protocol / serial_port / extractor / sinks / driver / pipeline
+#   road_trend（局部地面趋势，无 PCL，单独自检）
 add_library(suspension_core STATIC
   src/protocol.cpp
   src/serial_port.cpp
+  src/road_trend.cpp
   src/road_profile_extractor.cpp
   src/profile_sink.cpp
   src/serial_profile_sink.cpp
@@ -69,8 +71,15 @@ ament_target_dependencies(suspension_driver_node rclcpp std_msgs)
 add_executable(offline_demo examples/offline_demo.cpp)
 target_link_libraries(offline_demo suspension_core ${PCL_LIBRARIES})
 
+# 局部地面趋势的纯函数自检：不依赖 PCL、不依赖 ROS，因此可以在没有 PCL
+# 的机器上单独编译验证（提取器本身要 PCL，只能靠 CI）
+add_executable(trend_selftest examples/trend_selftest.cpp src/road_trend.cpp)
+target_include_directories(trend_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # 安装
 install(TARGETS road_preview_node suspension_driver_node offline_demo
+  trend_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 # suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，
