@@ -112,6 +112,26 @@ private:
         ctrl_.rate_limit_mm_per_s = declare_parameter<double>("rate_limit_mm_per_s",
                                                               ctrl_.rate_limit_mm_per_s);
 
+        // 控制律选择：0 = 绝对式 PD（默认），1 = 增量式 LQI。
+        // 切成 1 之前必须先把 lqi_kx1 / lqi_kx2 / lqi_ki 三个增益填进来
+        // （用 tools/lqr_gain_design.py 算），否则三个都是 0，
+        // 控制器会退化成"只前馈、不闭环"——那种情况不报错，但也没有控制
+        const int ctrl_kind =
+            declare_parameter<int>("controller_kind", static_cast<int>(ctrl_.controller_kind));
+        ctrl_.controller_kind = static_cast<ControllerKind>(ctrl_kind);
+        if (ctrl_.controller_kind == ControllerKind::kIncrementalLqi &&
+            ctrl_.lqi_kx1 == 0.0 && ctrl_.lqi_kx2 == 0.0 && ctrl_.lqi_ki == 0.0) {
+            RCLCPP_WARN(get_logger(),
+                        "controller_kind=1（增量式 LQI）但三个 LQI 增益全是 0，"
+                        "控制器将退化为只前馈、不做姿态闭环。请先用 "
+                        "tools/lqr_gain_design.py 算出增益并填入 lqi_kx1/kx2/ki");
+        }
+
+        // LQI 增益。PD 模式下这三个参数被忽略
+        ctrl_.lqi_kx1 = declare_parameter<double>("lqi_kx1", ctrl_.lqi_kx1);
+        ctrl_.lqi_kx2 = declare_parameter<double>("lqi_kx2", ctrl_.lqi_kx2);
+        ctrl_.lqi_ki = declare_parameter<double>("lqi_ki", ctrl_.lqi_ki);
+
         // 校验
         val_.max_age_ms = declare_parameter<double>("max_age_ms", val_.max_age_ms);
         val_.max_jump_m = declare_parameter<double>("max_jump_m", val_.max_jump_m);
