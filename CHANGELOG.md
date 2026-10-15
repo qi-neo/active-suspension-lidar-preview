@@ -9,6 +9,44 @@
 
 ## [未发布]
 
+对应 `suspension_control_v3` 的 3.2.0。主线是前馈取样从"固定距离单点取样"
+改成"车速自适应 + 前后轴差异化"，把预瞄控制里一直对不上相位的部分补上。
+
+### 新增
+
+- **前馈取样距离随车速自适应**：距离 = clamp(车速 × `lookahead_time_s`,
+  `min_lookahead_m`, `max_lookahead_m`)，响应时域取作动器走满行程耗时的
+  2.5 倍余量（默认 0.35 s）。固定距离在低速时取样点落到有效范围外，高速时
+  来不及——论文实验车速 0.5 m/s，固定 1 m 相当于提前 2 s 取路面。
+  节点新增 `speed_topic`（默认 `/odom`）订阅车速；没有车速信息时自动退回
+  固定 `lookahead_m`，与旧行为一致。`assume_speed_mps` 面向没有里程计的
+  台架匀速实验
+- **前后轴差异化预瞄**：后轴取样距离比前轴短一个轴距（`wheelbase_m`），
+  后轮比前轮晚一个"轴距/车速"遇到同一路面特征。前馈输出从左右两路扩为
+  四路（左前/右前/左后/右后），`ControlOutput::feedforward_mm` 随之扩为 4 元素
+- **取样线性插值**：在目标距离两侧的括号格之间插值，不再直接取最近格，
+  避免 5 cm 量化在前馈里形成台阶式行程指令
+- **单侧轮迹失效跨侧回退**：某一侧无有效数据时借对侧高程，避免左右不对称的
+  前馈（等效于一个伪横滚指令）。该情况由 `ControlStatus.feedforward_fallback`
+  置位，可观测
+- `ControlStatus.msg` 新增 `lookahead_m` / `speed_mps` / `feedforward_fallback`
+  三个字段，"前馈到底按多远取了样"在联调时直接可见
+- 控制回路新增 `submit_speed()` 与 `speed_timeout_s`（默认 0.5 s）：
+  过期视为无车速并退回固定取样距离
+- `tools/lqr_gain_design.py` 新增第 6 节，直接打印与
+  `config/control_params.yaml` 一一对应的落地参数
+
+### 修改
+
+- `ControlInput` 新增 `has_speed` / `speed_mps`；`IControlLoop` 接口新增
+  `submit_speed()`
+- 离线自检 89 项 -> 130 项：新增场景 16（车速自适应预瞄：钳位、无车速回退、
+  回路状态上报与过期）与场景 17（前后轴差异化、括号格插值、跨侧回退）
+- 控制节点 `package.xml` / `CMakeLists.txt` 补 `nav_msgs` 依赖声明
+  （接 `/odom` 用），`tools/check_deps.py` 核对通过
+
+### 修复
+
 - 驱动副本 `unilidar_driver` 同步到独立仓库的 v1.0.1（`package.xml` 补
   `geometry_msgs` 依赖后独立仓库版本号随之更新，本仓库副本原停留在 1.0.0）。
 

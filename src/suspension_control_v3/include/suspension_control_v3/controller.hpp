@@ -40,8 +40,23 @@ struct ControlParams {
     double height_limit_mm{40.0};
     double rate_limit_mm_per_s{300.0};
 
-    // 前馈只在前方这段距离内取样，超出则退回最近的有效格
+    // ---- 前馈取样距离 ----
+    // 没有车速信息时用固定值 max_lookahead_m 封顶；
+    // 有车速时按"作动器响应时域"自适应：距离 = clamp(车速 × lookahead_time_s,
+    //   min_lookahead_m, max_lookahead_m)
+    // 为什么要自适应：前馈必须赶在车轮到达之前把行程走完。走满行程最短耗时
+    // t_full = height_limit / rate_limit（默认 40/300 ≈ 0.13 s），取 2.5 倍余量
+    // 约 0.33 s，出厂默认 0.35 s 再略留一点。固定距离在低速时会让取样点落在
+    // 有效范围外（过量程），高速时则根本来不及（临界车速 = 1/t_full，默认约
+    // 7.5 m/s，论文实验车速只有 0.5 m/s，固定 1 m 时前馈提前了 2 s，对不上路面）
+    double lookahead_time_s{0.35};
+    double min_lookahead_m{0.5};
     double max_lookahead_m{5.0};
+
+    // 轴距 (m)。后轴预瞄距离 = 前轴距离 - 轴距：后轮比前轮晚一个
+    // "轴距/车速"的时间遇到同一路面特征，用同一个取样距离会让俯仰前馈
+    // 拿超前的路面去压后轮。默认 0.25 m 是小车量级，上台架前必须实测
+    double wheelbase_m{0.25};
 
     // 姿态一阶低通系数，1.0 为直通（默认）。D 项直接吃陀螺仪角速度，
     // 低成本 IMU 的噪声会被放大成抖动，必要时调小
@@ -66,6 +81,11 @@ struct ControlParams {
     // 用哪个控制律。默认 PD，行为与加入 LQI 之前完全一致
     ControllerKind controller_kind{ControllerKind::kPreviewFeedbackPd};
 };
+
+// 本拍实际生效的前馈取样距离 (m)。有有效车速时按 lookahead_time_s 自适应，
+// 否则用 ControlInput::lookahead_m 固定值。控制回路用它做状态上报，
+// 与控制器内部取样用的是同一个函数，保证"上报的值"就是"实际用的值"
+double effective_lookahead(const ControlInput& in, const ControlParams& params);
 
 class IController {
 public:

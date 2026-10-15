@@ -57,24 +57,36 @@ struct ControlInput {
     double pitch_rate{0.0};  // rad/s
 
     // 零位基准：标定阶段测得的姿态偏置，控制器以它为"水平"。
-    // 车停在斜坡上时 IMU 读到的不是 0，不减掉这个偏置就会一直朝着一个方向纠偏
+    // 车停在斜坡上时 IMU 读到的 0 不是水平，不减掉这个偏置就会一直朝着一个方向纠偏
     double roll_offset_rad{0.0};
     double pitch_offset_rad{0.0};
 
     // 预瞄剖面，可为空表示本次没有可用前馈
     const suspension_preview_v2::RoadProfileFrame* profile{nullptr};
-    // 前馈取样距离 (m)
+    // 固定前馈取样距离 (m)。仅在没有车速信息时使用
     double lookahead_m{1.0};
+
+    // 车速 (m/s)。has_speed 为真且取值为有限正数时，前馈取样距离按
+    // ControlParams::lookahead_time_s 自适应（距离 = 车速 × 响应时域）；
+    // 否则退回上面的固定 lookahead_m。接上里程计之前一直走固定值
+    bool has_speed{false};
+    double speed_mps{0.0};
 };
 
 // 控制器输出
 struct ControlOutput {
     std::array<double, kWheelCount> height_mm{0.0, 0.0, 0.0, 0.0};
-    std::array<double, 2> feedforward_mm{0.0, 0.0};  // 左/右前馈分量，调试用
+    // 四路前馈分量（左前/右前/左后/右后），调试用。
+    // 前后轴取值不同：后轮比前轮晚一个"轴距/车速"遇到同一路面特征，
+    // 因此后轴取样距离比前轴短一个轴距（见 controller.cpp）
+    std::array<double, kWheelCount> feedforward_mm{0.0, 0.0, 0.0, 0.0};
     double roll_correction_mm{0.0};
     double pitch_correction_mm{0.0};
     bool saturated{false};   // 是否触发过限幅
     bool rate_limited{false};  // 是否触发过速率限制
+    // 本拍是否有轮迹因自身无有效数据而回退用了对侧高程。
+    // 该位持续置起说明某一侧轮迹长期失效（遮挡/标定），需要关注
+    bool feedforward_fallback{false};
 };
 
 }  // namespace suspension_control_v3

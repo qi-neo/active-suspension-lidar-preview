@@ -94,8 +94,17 @@ Boot ──► Calibrating ──► Leveling ──► Balancing
 
 ## 五、控制律
 
-- **预瞄前馈**：在 `lookahead_m` 处取左右轮迹高程，转成目标行程，让车身提前动作；
-  目标格无效时向两侧找最近有效格，找不到就不做前馈（不会拿 0 当路面）。
+- **预瞄前馈**：把路面高程转成目标行程，让车身提前动作。取样规则有三处细节：
+  - **距离随车速自适应**：有车速时取样距离 = clamp(车速 × `lookahead_time_s`,
+    `min_lookahead_m`, `max_lookahead_m`)，响应时域取作动器走满行程耗时的
+    2.5 倍余量（默认 0.35 s）；没有车速信息时退回固定 `lookahead_m`。
+    固定距离在低速时取样点落到有效范围外，高速时来不及——论文实验车速
+    0.5 m/s，固定 1 m 相当于提前 2 s 取路面
+  - **前后轴差异化**：后轴取样距离比前轴短一个 `wheelbase_m`（轴距），
+    后轮比前轮晚一个"轴距/车速"遇到同一路面特征
+  - **插值与回退**：在括号格之间线性插值，避免 5 cm 量化形成台阶；
+    单侧轮迹无有效数据时借对侧高程（`feedforward_fallback` 置位，可观测），
+    不会拿 0 当路面，也不会形成左右不对称的伪横滚指令
 - **姿态反馈**：两种可选，见 5.1。
 - **运动学解耦**：俯仰量加到前轴减到后轴，横滚量加到右侧减到左侧。
 - **限幅与速率限制**：先按 `height_limit_mm` 限幅，再按 `rate_limit_mm_per_s × dt` 限制单周期变化量。
@@ -142,9 +151,10 @@ colcon build --packages-select suspension_control_v3
 source install/setup.bash
 ```
 
-**离线自检不需要 ROS、不需要硬件**，覆盖 14 个场景共 89 项检查：正常启动流程、九种坏数据拒绝、
+**离线自检不需要 ROS、不需要硬件**，覆盖 16 个场景共 130 项检查：正常启动流程、九种坏数据拒绝、
 过期降级与恢复、姿态超限、急停锁存与复位、控制器数值、闭环下发去重、驱动缺失、零位标定、
-姿态低通、速率限制基准同步、降级保持时限、单拍时长封顶、急停与回中下发。
+姿态低通、速率限制基准同步、降级保持时限、单拍时长封顶、急停与回中下发、增量式 LQI、
+车速自适应预瞄（钳位 / 无车速回退 / 状态上报与过期）、前后轴差异化与插值回退。
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -159,7 +169,7 @@ ros2 run suspension_control_v3 control_selftest
   采样间距非法 -> 拒绝（采样间距非法）
   帧间跳变 实际 1.10 m，阈值 1.00 m -> 拒绝（帧间跳变过大）
 ...
-检查项 48，失败 0 -> 全部通过
+检查项 130，失败 0 -> 全部通过
 ```
 
 ## 七、运行
@@ -197,14 +207,19 @@ if (!loop.submit_profile(frame, now_sec).ok) { /* 已在内部计数与置故障
 Attitude a;  a.valid = true;  a.stamp_sec = now_sec;  /* 填入姿态 */
 loop.submit_attitude(a, now_sec);
 
+// 车速（可选）：不提交则前馈走固定 lookahead_m；过期按 speed_timeout_s 自动失效
+loop.submit_speed(speed_mps, now_sec);
+
 // 控制周期
 const auto& st = loop.step(now_sec, dt);
 if (st.state == ControlState::kEmergency) { /* 处理安全态 */ }
+// 联调时可观察：st.speed_mps / st.lookahead_m 是本拍生效的值
 ```
 
 ## 九、尚未覆盖
 
-1. 增益是按物理量级给的初值，未做实车整定，PID 参数需要现场标；
+1. 增益是按物理量级给的初值，未做实车整定，PID 参数需要现场标；`wheelbase_m`
+   （后轴预瞄用）同理，必须按实车测量，填错会让俯仰前馈系统性超前或滞后；
 2. 未接作动器位置反馈，无法判断"指令下去但没动"（`ISuspensionDriver` 目前只有下发方向）；
 3. 状态机的 `Calibrating` 只做静止判定，未实现论文里的施密特正交化零位标定；
 4. 未做多帧时间域融合与路面坡度估计。

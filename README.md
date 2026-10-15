@@ -9,7 +9,7 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检
-> （v3 控制 89 项、驱动解析 63 项、v2 点云链路）。
+> （v3 控制 130 项、驱动解析 63 项、v2 点云链路）。
 > v3.1.0 起五个包才真正能在干净环境构建通过——
 > **更早的 tag 拉下来是编不过的**，见 [CHANGELOG](CHANGELOG.md)。
 
@@ -18,7 +18,8 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 一套基于激光雷达路面预瞄的主动悬架系统。以 ROS2 为框架、香橙派 AI Pro 为车载计算平台，通过激光雷达提前感知
 车前路面高程，融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架，在非结构化路面上抑制车身振动与姿态波动。
 
-与常见的反馈式悬架不同，本方案把路面信息提前 5 m 拿到手，从源头绕开了"先颠簸、后补偿"的滞后问题。
+与常见的反馈式悬架不同，本方案把路面信息提前拿到手（取样距离随车速在 0.5–5 m 间自适应），
+从源头绕开了"先颠簸、后补偿"的滞后问题。
 
 ### 硬件平台
 
@@ -44,7 +45,7 @@ flowchart TB
         F["多传感器融合<br/>时间戳对齐"]
         P["路面高程提取<br/>PCL"]
         A["姿态解算<br/>互补滤波"]
-        C["闭环控制<br/>预瞄前馈 + 姿态 PD"]
+        C["闭环控制<br/>预瞄前馈(车速自适应) + 姿态 PD"]
     end
     subgraph S3["执行层"]
         K["运动学解耦<br/>迟滞 PWM"]
@@ -198,7 +199,7 @@ flowchart LR
 |------|------|
 | `IInputValidator` | 剖面校验，拒绝 9 类坏数据（NaN、超范围、质量不足、间距与轮距非法、坐标系不符、时间戳过旧、帧间跳变过大等） |
 | `ISafetyStateMachine` | 安全状态机与三分支输出契约：用控制器输出 / 保持上次值 / 强制回中 |
-| `IController` | 预瞄前馈 + 无导数 PD + 运动学解耦 + 限幅与速率限制 |
+| `IController` | 预瞄前馈（车速自适应 + 前后轴差异化）+ 无导数 PD + 运动学解耦 + 限幅与速率限制 |
 | `IControlLoop` | 把校验、状态机、控制器、驱动器串成一条链 |
 
 几个值得单独说明的设计：
@@ -209,7 +210,22 @@ flowchart LR
 - **单周期时长封顶**：定时抖动不会把累计时长判据一次性推过阈值造成误动作
 - **硬件急停**：进入急停时同时调用驱动器的 `emergency_stop()`，而不只是下发零位指令
 
-离线自检 89 项，不需要 ROS 与硬件：
+前馈取样距离上的三处算法细节（v3.2.0 起）：
+
+- **距离随车速自适应**：取样距离 = clamp(车速 × 响应时域, 0.5 m, 5 m)，响应时域取作动器
+  走满行程耗时的 2.5 倍（默认 40 mm / 300 mm/s × 2.5 ≈ 0.33 s）。固定距离在低速时
+  取样点落到有效范围外，高速时则根本来不及——论文实验车速 0.5 m/s，固定 1 m
+  相当于提前 2 s 取路面。没有车速信息（未接 `/odom`）时自动退回固定 `lookahead_m`
+- **前后轴差异化**：后轴取样距离比前轴短一个轴距——后轮比前轮晚一个"轴距/车速"
+  的时间遇到同一路面特征，用同一距离会让俯仰前馈拿超前路面去压后轮
+- **括号格插值与跨侧回退**：取样在相邻格间线性插值，避免 5 cm 量化形成台阶式
+  行程指令；单侧轮迹无有效数据时借对侧高程，避免左右不对称的伪横滚指令
+  （该情况在 `ControlStatus.feedforward_fallback` 置位，可观测）
+
+生效的车速与取样距离每拍写进 `ControlStatus`（`speed_mps` / `lookahead_m`），
+联调时能直接看到"前馈到底按多远取了样"。
+
+离线自检 130 项，不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -265,10 +281,10 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```bash
 ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，89 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，130 项检查
 ```
 
-依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
+依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
 雷达驱动包 `unilidar_driver` 额外需要 `tf2`、`tf2_ros`，**不依赖** Unitree Lidar SDK。
 
 ## 关键参数

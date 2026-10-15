@@ -12,6 +12,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(suspension_preview_v2 REQUIRED)
 
@@ -76,7 +77,7 @@ else()
                   "若出现 undefined reference 请检查 v2 是否安装该库")
 endif()
 ament_target_dependencies(suspension_control_node
-  rclcpp std_msgs sensor_msgs suspension_preview_v2
+  rclcpp std_msgs sensor_msgs nav_msgs suspension_preview_v2
 )
 # 节点用到 v2 的 RoadProfile 消息，要链它的 typesupport。
 #

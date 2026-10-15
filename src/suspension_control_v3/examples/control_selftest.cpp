@@ -18,6 +18,8 @@
 //  14. 急停与回中的下发路径
 //  15. 增量式 LQI：递推正确性、积分保持、修正量限幅、sync 后无跳变、
 //      以及控制回路按 controller_kind 选控制律
+//  16. 车速自适应预瞄：生效距离的钳位、无车速回退、回路状态上报与过期
+//  17. 前后轴差异化前馈、括号格插值、单侧失效跨侧回退
 
 #include <algorithm>
 #include <cmath>
@@ -829,6 +831,194 @@ void test_incremental_lqi() {
                 pd_first, pd_last, lqi_first, lqi_last);
 }
 
+// ---------------------------------------------------------------- 场景 16
+// 前馈取样距离必须随车速放大：作动器走满行程最短耗时
+// t_full = height_limit / rate_limit（默认 40/300 ≈ 0.13 s），前馈要赶在
+// 车轮到达之前把行程走完，取样距离就得是 车速 × 响应时域。固定距离在
+// 论文实验车速 0.5 m/s 下会提前 2 s 取到路面，完全对不上
+void test_speed_adaptive_lookahead() {
+    section("16. 车速自适应预瞄");
+
+    ControlParams p;
+    p.rate_limit_mm_per_s = 1e9;   // 关掉速率限制，单独看取样距离
+    PreviewFeedbackController ctrl(p);
+
+    // ---- 16.1 生效距离的钳位（直接测 effective_lookahead）----
+    ControlInput li;
+    li.lookahead_m = 1.0;
+    check(std::fabs(effective_lookahead(li, p) - 1.0) < 1e-9,
+          "无车速信息时应使用固定 lookahead_m");
+
+    li.has_speed = true;
+    li.speed_mps = 0.5;   // 论文实验车速：0.5*0.35=0.175，被下限钳回 0.5
+    check(std::fabs(effective_lookahead(li, p) - p.min_lookahead_m) < 1e-9,
+          "低速时应钳到 min_lookahead_m");
+    li.speed_mps = 2.0;   // 2.0*0.35 = 0.7，在区间内
+    check(std::fabs(effective_lookahead(li, p) - 0.7) < 1e-9,
+          "中速时应为 车速×响应时域 = 0.7 m");
+    li.speed_mps = 20.0;  // 20*0.35 = 7.0，被上限钳回 5.0
+    check(std::fabs(effective_lookahead(li, p) - p.max_lookahead_m) < 1e-9,
+          "高速时应钳到 max_lookahead_m");
+    li.speed_mps = 0.0;   // 车速为 0（停车）：按无车速处理，退回固定值
+    check(std::fabs(effective_lookahead(li, p) - 1.0) < 1e-9,
+          "车速为 0 时应退回固定 lookahead_m");
+    li.speed_mps = std::nan("");
+    check(std::fabs(effective_lookahead(li, p) - 1.0) < 1e-9,
+          "车速非有限值时应退回固定 lookahead_m");
+
+    // ---- 16.2 取样距离直接决定前馈量 ----
+    // 剖面 h(x) = 0.02·sin(πx)：0.7 m 处 sin(0.7π)=0.809 -> 16.18 mm；
+    // 后轴少一个轴距，0.45 m 处 sin(0.45π)=0.988 -> 19.75 mm
+    const RoadProfileFrame f = make_frame(0.0, 0.02, 0.0);
+    ControlInput in;
+    in.profile = &f;
+    in.lookahead_m = 1.0;
+
+    in.has_speed = true;
+    in.speed_mps = 2.0;
+    ControlOutput out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 16.18) < 0.05,
+          "车速 2 m/s 时前轴前馈应为 16.18 mm");
+    check(std::fabs(out.feedforward_mm[kRearLeft] - 19.75) < 0.05,
+          "后轴取样距离短一个轴距，前馈应为 19.75 mm");
+    std::printf("  车速 2 m/s -> 取样 %.2f m，前轴 %.2f / 后轴 %.2f mm\n",
+                effective_lookahead(in, p), out.feedforward_mm[kFrontLeft],
+                out.feedforward_mm[kRearLeft]);
+
+    // 低速被钳到 0.5 m：前轴 sin(0.5π)=1 -> 20 mm，后轴 0.25 m -> 14.14 mm
+    ctrl.reset();
+    in.speed_mps = 0.5;
+    out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.05,
+          "车速 0.5 m/s（钳到 0.5 m）前轴前馈应为 20 mm");
+    check(std::fabs(out.feedforward_mm[kRearLeft] - 14.14) < 0.05,
+          "车速 0.5 m/s 时后轴前馈应为 14.14 mm");
+    std::printf("  车速 0.5 m/s -> 取样 %.2f m，前轴 %.2f / 后轴 %.2f mm\n",
+                effective_lookahead(in, p), out.feedforward_mm[kFrontLeft],
+                out.feedforward_mm[kRearLeft]);
+
+    // 无车速：固定 1.0 m，sin(π)=0 -> 前馈为 0（与接入车速之前一致）
+    ctrl.reset();
+    in.has_speed = false;
+    out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft]) < 0.01,
+          "无车速时按固定 1.0 m 取样，该处高程为 0");
+
+    // ---- 16.3 控制回路：状态上报与过期回退 ----
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    fx.loop.submit_speed(2.0, fx.t);
+    fx.advance(0.2);   // 0.2 s < speed_timeout(0.5 s)，保持供数
+    check(std::fabs(fx.loop.status().speed_mps - 2.0) < 1e-9,
+          "状态应上报生效车速 2.0 m/s");
+    check(std::fabs(fx.loop.status().lookahead_m - 0.7) < 1e-9,
+          "状态应上报生效取样距离 0.7 m");
+    std::printf("  回路状态：车速 %.1f m/s，取样 %.2f m\n",
+                fx.loop.status().speed_mps, fx.loop.status().lookahead_m);
+
+    // 不再提交车速：超过 speed_timeout_s 后应视为无车速，退回固定值
+    fx.advance(0.6);
+    check(std::fabs(fx.loop.status().speed_mps) < 1e-9,
+          "车速过期后应视为无车速");
+    check(std::fabs(fx.loop.status().lookahead_m - 1.0) < 1e-9,
+          "车速过期前馈应退回固定 lookahead_m");
+    std::printf("  车速过期 0.6 s 后 -> 车速 0，取样 %.2f m（固定值）\n",
+                fx.loop.status().lookahead_m);
+}
+
+// ---------------------------------------------------------------- 场景 17
+void test_per_axle_feedforward() {
+    section("17. 前后轴差异化 / 插值 / 跨侧回退");
+
+    ControlParams p;
+    p.rate_limit_mm_per_s = 1e9;   // 关掉速率限制，单独看前馈
+    PreviewFeedbackController ctrl(p);
+
+    // ---- 17.1 前后轴取样距离不同 ----
+    // 固定 1.0 m：前轴 sin(π)=0 -> 0 mm；后轴 0.75 m，sin(0.75π)=0.707
+    // -> 0.02*0.707 = 14.14 mm。若前后轴用同一距离，这个差值不存在
+    const RoadProfileFrame f = make_frame(0.0, 0.02, 0.0);
+    ControlInput in;
+    in.profile = &f;
+    in.lookahead_m = 1.0;
+    ControlOutput out = ctrl.compute(in, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft]) < 0.01,
+          "前轴取样 1.0 m，该处高程为 0");
+    check(std::fabs(out.feedforward_mm[kRearLeft] - 14.14) < 0.05,
+          "后轴取样 0.75 m，前馈应为 14.14 mm");
+    check(std::fabs(out.height_mm[kRearLeft] - 14.14) < 0.05,
+          "后轴行程指令应反映各自的前馈");
+    std::printf("  固定 1.0 m -> 前轴 %.2f / 后轴 %.2f mm\n",
+                out.feedforward_mm[kFrontLeft], out.feedforward_mm[kRearLeft]);
+
+    // ---- 17.2 括号格线性插值 ----
+    // 只留 20、21 两格有效（0 与 0.04 m），取样 1.025 m 即格坐标 20.5，
+    // 插值应得 0.02 m -> 20 mm；若仍取最近格则是 0 或 40 mm
+    RoadProfileFrame sparse = make_frame(0.0);
+    for (auto* lane : {&sparse.left, &sparse.right}) {
+        for (std::size_t i = 0; i < lane->size(); ++i) lane->valid[i] = kInvalid;
+        lane->height[20] = 0.0f;
+        lane->height[21] = 0.04f;
+        lane->valid[20] = kMeasured;
+        lane->valid[21] = kMeasured;
+    }
+    ctrl.reset();
+    ControlInput si;
+    si.profile = &sparse;
+    si.lookahead_m = 1.025;   // pos = 20.5
+    out = ctrl.compute(si, 0.005);
+    check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.1,
+          "括号格插值应得 20 mm（最近格会给 0 或 40 mm）");
+    std::printf("  稀疏剖面 1.025 m -> 插值前馈 %.2f mm（期望 20.00）\n",
+                out.feedforward_mm[kFrontLeft]);
+
+    // ---- 17.3 单侧失效跨侧回退 ----
+    // 右迹全无效：右前馈应借左迹高程，且回退标记置起。
+    // 不回退而填 0 会形成左右不对称的前馈，等效于一个伪横滚指令
+    RoadProfileFrame one_side = make_frame(0.0, 0.0, 0.02);   // 恒定 0.02 m
+    for (std::size_t i = 0; i < one_side.right.size(); ++i) {
+        one_side.right.valid[i] = kInvalid;
+    }
+    ctrl.reset();
+    ControlInput oi;
+    oi.profile = &one_side;
+    oi.lookahead_m = 1.0;
+    out = ctrl.compute(oi, 0.005);
+    check(out.feedforward_fallback, "单侧轮迹失效应置跨侧回退标记");
+    check(std::fabs(out.feedforward_mm[kFrontRight] - 20.0) < 0.1,
+          "右前馈应回退用左迹高程 20 mm");
+    check(std::fabs(out.feedforward_mm[kFrontLeft] -
+                    out.feedforward_mm[kFrontRight]) < 1e-9,
+          "回退后左右前馈应对称（不产生伪横滚）");
+    std::printf("  右迹失效 -> 回退：左 %.2f / 右 %.2f mm（对称）\n",
+                out.feedforward_mm[kFrontLeft], out.feedforward_mm[kFrontRight]);
+
+    // 两侧都无效：没有可借的数据，前馈为 0 且不回退标记
+    RoadProfileFrame no_side = one_side;
+    for (std::size_t i = 0; i < no_side.left.size(); ++i) {
+        no_side.left.valid[i] = kInvalid;
+    }
+    ctrl.reset();
+    ControlInput ni;
+    ni.profile = &no_side;
+    ni.lookahead_m = 1.0;
+    out = ctrl.compute(ni, 0.005);
+    check(!out.feedforward_fallback, "两侧都无数据时不应置回退标记");
+    check(std::fabs(out.feedforward_mm[kFrontLeft]) < 1e-9 &&
+              std::fabs(out.feedforward_mm[kRearRight]) < 1e-9,
+          "两侧都无数据时前馈应为 0");
+
+    // 对照组：两侧都有效，不应出现回退
+    ctrl.reset();
+    ControlInput bi;
+    bi.profile = &f;
+    bi.lookahead_m = 1.0;
+    out = ctrl.compute(bi, 0.005);
+    check(!out.feedforward_fallback, "两侧都有数据时不应置回退标记");
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -890,6 +1080,8 @@ int main() {
     test_degraded_hold_timeout();
     test_dt_clamp();
     test_incremental_lqi();
+    test_speed_adaptive_lookahead();
+    test_per_axle_feedforward();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

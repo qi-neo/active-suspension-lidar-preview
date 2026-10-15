@@ -31,7 +31,7 @@ struct Attitude {
 };
 
 struct ControlLoopParams {
-    double lookahead_m{1.0};             // 前馈取样距离
+    double lookahead_m{1.0};             // 前馈取样距离（无车速信息时的固定值）
     double max_attitude_age_ms{50.0};    // 姿态数据最大有效期
     double max_abs_attitude_rad{1.2};    // 单帧姿态的物理上限（约 69°）
     bool enable_driver{true};            // false 时只算不下发，便于纯软件联调
@@ -42,6 +42,9 @@ struct ControlLoopParams {
     // 远大于控制周期，若不封顶，链路丢失计时、降级计时会被一次性推过阈值而误动作，
     // 速率限制也会按这个大 dt 放行一个本不该有的跳变。取名义周期的若干倍
     double max_step_dt{0.05};
+    // 车速数据的最大有效期。超过则视为无车速，前馈退回固定 lookahead_m——
+    // 用陈旧车速算出的取样距离比不用车速更危险（距离错了但看起来很合理）
+    double speed_timeout_s{0.5};
 };
 
 struct ControlLoopStatus {
@@ -59,6 +62,12 @@ struct ControlLoopStatus {
     ValidationResult last_validation;   // 最近一次剖面的校验结果
     bool attitude_accepted{false};
     double attitude_age_ms{0.0};
+
+    // 本拍生效的车速与前馈取样距离（0 表示未使用车速自适应）。
+    // 上报这两个值是为了让"前馈到底按多远取样"在联调时可见——
+    // 自适应逻辑在控制器内部，不外曝就等于黑盒
+    double speed_mps{0.0};
+    double lookahead_m{0.0};
 
     // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
     std::size_t calibration_samples{0};
@@ -84,6 +93,11 @@ public:
 
     // 提交一次姿态；返回 false 表示被拒绝
     virtual bool submit_attitude(const Attitude& attitude, double now_sec) = 0;
+
+    // 提交一次车速读数 (m/s)。非有限值或负值（倒档）被忽略。
+    // 过期（超过 ControlLoopParams::speed_timeout_s）后前馈自动退回
+    // 固定取样距离，不需要调用方显式清除
+    virtual void submit_speed(double speed_mps, double now_sec) = 0;
 
     // 推进一个控制周期
     virtual const ControlLoopStatus& step(double now_sec, double dt) = 0;
@@ -111,6 +125,7 @@ public:
     ValidationResult submit_profile(const suspension_preview_v2::RoadProfileFrame& frame,
                                     double now_sec) override;
     bool submit_attitude(const Attitude& attitude, double now_sec) override;
+    void submit_speed(double speed_mps, double now_sec) override;
     const ControlLoopStatus& step(double now_sec, double dt) override;
 
     void request_estop(const char* reason) override;
@@ -136,6 +151,12 @@ private:
 
     Attitude attitude_;
     ControlLoopStatus status_;
+
+    // 车速：保存最后一次有效读数及其时刻，过期判定在 step() 里做
+    // （用控制环自己的时钟，而不是数据到达时刻，避免两个时钟漂移）
+    bool has_speed_{false};
+    double speed_mps_{0.0};
+    double speed_stamp_sec_{0.0};
 
     suspension_preview_v2::SuspensionMode last_mode_{
         suspension_preview_v2::SuspensionMode::Passive};

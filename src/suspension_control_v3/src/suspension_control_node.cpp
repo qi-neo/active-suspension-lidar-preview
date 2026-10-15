@@ -7,6 +7,7 @@
 // 急停与复位通过话题触发：/suspension/emergency_stop、/suspension/reset（std_msgs/Bool）
 
 #include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/bool.hpp>
 
@@ -49,6 +50,11 @@ public:
         imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
             imu_topic_, rclcpp::SensorDataQoS(),
             std::bind(&SuspensionControlNode::on_imu, this, std::placeholders::_1));
+        if (use_speed_adaptive_lookahead_) {
+            speed_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+                speed_topic_, rclcpp::SensorDataQoS(),
+                std::bind(&SuspensionControlNode::on_odom, this, std::placeholders::_1));
+        }
 
         status_pub_ = create_publisher<suspension_control_v3::msg::ControlStatus>(
             status_topic_, 10);
@@ -78,6 +84,17 @@ public:
         last_tick_ = now();
         RCLCPP_INFO(get_logger(), "闭环控制节点就绪 | 控制环 %.0f Hz | 串口 %s",
                     control_rate_hz_, enable_driver_ ? serial_port_.c_str() : "(未启用)");
+        if (use_speed_adaptive_lookahead_) {
+            RCLCPP_INFO(get_logger(),
+                        "前馈取样距离自适应：车速 %s × %.2f s，钳位 [%.1f, %.1f] m，"
+                        "轴距 %.2f m",
+                        assume_speed_mps_ > 0.0 ? "(假设恒定)" : "来自里程计",
+                        ctrl_.lookahead_time_s, ctrl_.min_lookahead_m,
+                        ctrl_.max_lookahead_m, ctrl_.wheelbase_m);
+        } else {
+            RCLCPP_INFO(get_logger(), "前馈取样距离固定 %.2f m（未启用车速自适应）",
+                        loop_params_.lookahead_m);
+        }
     }
 
 private:
@@ -111,6 +128,26 @@ private:
             declare_parameter<double>("height_limit_mm", ctrl_.height_limit_mm);
         ctrl_.rate_limit_mm_per_s = declare_parameter<double>("rate_limit_mm_per_s",
                                                               ctrl_.rate_limit_mm_per_s);
+
+        // 前馈取样距离。有车速时按"车速 × 响应时域"自适应，没有车速时用
+        // 固定 lookahead_m（在 build_loop() 里声明）。响应时域取作动器
+        // 走满行程耗时的 2.5 倍余量：height_limit / rate_limit × 2.5
+        ctrl_.lookahead_time_s =
+            declare_parameter<double>("lookahead_time_s", ctrl_.lookahead_time_s);
+        ctrl_.min_lookahead_m =
+            declare_parameter<double>("min_lookahead_m", ctrl_.min_lookahead_m);
+        // 轴距：后轴预瞄距离 = 前馈距离 - 轴距（后轮晚遇到同一路面特征）。
+        // 这个值必须按实车测量，填错会让俯仰前馈系统性超前或滞后
+        ctrl_.wheelbase_m = declare_parameter<double>("wheelbase_m", ctrl_.wheelbase_m);
+
+        // 车速源。use_speed_adaptive_lookahead 为 false 时不订阅，
+        // 前馈全程走固定 lookahead_m（与接入车速之前的行为一致）。
+        // assume_speed_mps > 0 用于没有里程计的台架：按恒定车速前馈
+        speed_topic_ = declare_parameter<std::string>("speed_topic", "/odom");
+        use_speed_adaptive_lookahead_ =
+            declare_parameter<bool>("use_speed_adaptive_lookahead", true);
+        assume_speed_mps_ = declare_parameter<double>("assume_speed_mps", 0.0);
+        if (assume_speed_mps_ < 0.0) assume_speed_mps_ = 0.0;
 
         // 控制律选择：0 = 绝对式 PD（默认），1 = 增量式 LQI。
         // 切成 1 之前必须先把 lqi_kx1 / lqi_kx2 / lqi_ki 三个增益填进来
@@ -183,6 +220,9 @@ private:
                                       loop_params_.max_attitude_age_ms);
         loop_params_.max_step_dt =
             declare_parameter<double>("max_step_dt", loop_params_.max_step_dt);
+        // 车速有效期。超过则视为无车速，前馈退回固定 lookahead_m
+        loop_params_.speed_timeout_s =
+            declare_parameter<double>("speed_timeout_s", loop_params_.speed_timeout_s);
         // 封顶值不能低于名义控制周期：否则每一拍都被钳制，累计时间推进慢于真实时间，
         // 降级、链路超时这些基于时长的判据会成比例地延迟触发。
         // 低控制频率下这一步尤其关键
@@ -254,10 +294,23 @@ private:
         angle_.pitch_deg = a.pitch_rad * kRadToDeg;
     }
 
+    // 车速只取前向分量。倒档（负值）由 submit_speed 内部忽略：
+    // 预瞄取样对前进方向有意义，倒档时按前进距离取样会取到车身侧后方
+    void on_odom(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        loop_->submit_speed(msg->twist.twist.linear.x, now().seconds());
+    }
+
     void on_tick() {
         const auto t = now();
         const double dt = (t - last_tick_).seconds();
         last_tick_ = t;
+
+        // 台架无里程计的回退：按假设的恒定车速每拍提交。
+        // 注意它会覆盖里程计读数——两者不要同时用，假设车速只面向
+        // "没有 /odom 可接"的台架匀速实验
+        if (assume_speed_mps_ > 0.0) {
+            loop_->submit_speed(assume_speed_mps_, t.seconds());
+        }
 
         const auto& st = loop_->step(t.seconds(), dt > 0.0 ? dt : 0.005);
 
@@ -296,6 +349,9 @@ private:
         out.calibration_samples = static_cast<uint32_t>(st.calibration_samples);
         out.profile_quality = st.last_validation.quality;
         out.reject_reason = static_cast<uint8_t>(st.last_validation.reason);
+        out.lookahead_m = static_cast<float>(st.lookahead_m);
+        out.speed_mps = static_cast<float>(st.speed_mps);
+        out.feedforward_fallback = st.output.feedforward_fallback;
         out.ticks = static_cast<uint32_t>(st.ticks);
         out.profiles_accepted = static_cast<uint32_t>(st.profiles_accepted);
         out.profiles_rejected = static_cast<uint32_t>(st.profiles_rejected);
@@ -315,6 +371,11 @@ private:
     std::string serial_port_;
     int baud_rate_{115200};
 
+    // 车速源
+    std::string speed_topic_;
+    bool use_speed_adaptive_lookahead_{true};
+    double assume_speed_mps_{0.0};
+
     suspension_control_v3::ControlLoopParams loop_params_;
     suspension_control_v3::ValidatorParams val_;
     suspension_control_v3::StateMachineParams sm_;
@@ -328,6 +389,7 @@ private:
     std::unique_ptr<suspension_control_v3::SuspensionControlLoop> loop_;
     rclcpp::Subscription<suspension_preview_v2::msg::RoadProfile>::SharedPtr profile_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr speed_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
     rclcpp::Publisher<suspension_control_v3::msg::ControlStatus>::SharedPtr status_pub_;

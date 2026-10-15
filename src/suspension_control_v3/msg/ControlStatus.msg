@@ -19,6 +19,10 @@ uint32 calibration_samples
 uint8  profile_quality    # 当前使用剖面的质量分
 uint8  reject_reason      # 最近一次剖面被拒的原因（0 表示通过）
 
+float32 lookahead_m       # 本拍生效的前馈取样距离 (m)
+float32 speed_mps         # 本拍生效的车速 (m/s)，0 表示未使用车速自适应
+bool    feedforward_fallback  # 前馈是否回退用了对侧轮迹（该侧无有效数据）
+
 uint32 ticks
 uint32 profiles_accepted
 uint32 profiles_rejected

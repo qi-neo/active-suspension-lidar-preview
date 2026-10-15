@@ -16,7 +16,7 @@ suspension_control_node:
     baud_rate: 115200
 
     # ---- 控制器 ----
-    lookahead_m: 1.0                # 前馈取样距离 (m)
+    lookahead_m: 1.0                # 前馈取样距离 (m)，仅无车速信息时使用
     # 控制律：0 = 绝对式 PD（默认），1 = 增量式 LQI。
     # 切成 1 之前必须先把下面三个 LQI 增益填进来（用 tools/lqr_gain_design.py
     # 算），否则三个都是 0，控制器退化成"只前馈、不闭环"。
@@ -30,6 +30,19 @@ suspension_control_node:
     feedforward_sign: 1.0           # 依作动器安装方向在台架上确认正负
     height_limit_mm: 40.0           # 单轮行程限幅
     rate_limit_mm_per_s: 300.0      # 作动器速率限制
+
+    # ---- 前馈取样距离（车速自适应）----
+    # 有车速时：取样距离 = clamp(车速 × lookahead_time_s, min, max)；
+    # 没有车速（未接 /odom 且 assume_speed_mps=0）时退回上面的 lookahead_m。
+    # lookahead_time_s 取作动器走满行程耗时的 2.5 倍余量：
+    #   height_limit_mm / rate_limit_mm_per_s × 2.5 = 40/300×2.5 ≈ 0.33 s
+    use_speed_adaptive_lookahead: true
+    speed_topic: "/odom"            # 车速来源（nav_msgs/Odometry，取 twist.linear.x）
+    speed_timeout_s: 0.5            # 车速过期多久后视为无车速，退回固定 lookahead_m
+    assume_speed_mps: 0.0           # >0 时按此恒定车速前馈，仅限无里程计的台架
+    lookahead_time_s: 0.35          # 响应时域 (s)
+    min_lookahead_m: 0.5            # 取样距离下限 (m)
+    wheelbase_m: 0.25               # 轴距 (m)，后轴取样 = 前馈距离 - 轴距，需实测
 
     # ---- 增量式 LQI 增益（controller_kind=1 时生效，PD 模式下忽略）----
     # 控制律：u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ

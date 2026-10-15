@@ -15,16 +15,42 @@ namespace {
 //
 // 抽取之后 PreviewFeedbackController 的既有自检仍然全过，说明行为未变。
 
-// 在剖面中按 lookahead 距离取样该轮迹的高程，返回 false 表示该处无有效数据
+// 在剖面中按 lookahead 距离取样该轮迹的高程。
+// interpolated 标记本结果是否由括号格线性插值得来（供诊断）。
+// 返回 false 表示整条轮迹都没有可用数据
 bool sample_lane(const suspension_preview_v2::LaneProfile& lane,
-                 double lookahead_m, double spacing, double& height_m) {
+                 double lookahead_m, double spacing, double& height_m,
+                 bool& interpolated) {
+    interpolated = false;
     if (lane.empty() || spacing <= 0.0) return false;
 
     const long cells = static_cast<long>(lane.size());
-    long idx = static_cast<long>(std::lround(lookahead_m / spacing));
-    idx = std::clamp(idx, 0L, cells - 1);
+    const double pos = lookahead_m / spacing;   // 连续格坐标（格 = 5 cm）
 
-    // 从目标格向两侧找最近的有效格，越远越说明前馈不可信
+    // 1) 括号格线性插值。路面高程在格间连续变化是合理假设；直接取最近格
+    //    等于把 5 cm 量化引进入前馈，车辆前进时形成台阶式的行程指令。
+    //    插值要求两侧都有效，缺一侧就退化到第 2 步
+    const long lo = static_cast<long>(std::floor(pos));
+    const long hi = lo + 1;
+    if (lo >= 0 && hi < cells) {
+        const auto usable = [&lane](long i) {
+            return lane.valid[static_cast<std::size_t>(i)] !=
+                       suspension_preview_v2::kInvalid &&
+                   std::isfinite(lane.height[static_cast<std::size_t>(i)]);
+        };
+        if (usable(lo) && usable(hi)) {
+            const double t = pos - static_cast<double>(lo);
+            const double h0 = lane.height[static_cast<std::size_t>(lo)];
+            const double h1 = lane.height[static_cast<std::size_t>(hi)];
+            height_m = h0 + (h1 - h0) * t;
+            interpolated = true;
+            return true;
+        }
+    }
+
+    // 2) 从目标格向两侧找最近的有效格，越远越说明前馈不可信
+    long idx = static_cast<long>(std::lround(pos));
+    idx = std::clamp(idx, 0L, cells - 1);
     for (long offset = 0; offset < cells; ++offset) {
         const long probe[2] = {idx - offset, idx + offset};
         for (const long p : probe) {
@@ -42,23 +68,49 @@ bool sample_lane(const suspension_preview_v2::LaneProfile& lane,
     return false;
 }
 
-// 第 1 步：预瞄前馈。取 lookahead 处的路面高程，转成目标行程
+// 第 1 步：预瞄前馈。输出四路目标行程（左前/右前/左后/右后）。
+//   a) 取样距离随车速自适应（响应时域恒定，距离 = 车速 × 时域）
+//   b) 后轴取样距离比前轴短一个轴距（后轮晚遇到同一特征）
+//   c) 单侧轮迹无数据时回退用对侧高程（避免左右不对称的伪横滚指令）
 void compute_feedforward(const ControlInput& in, const ControlParams& params,
-                         double& ff_left_mm, double& ff_right_mm) {
-    ff_left_mm = 0.0;
-    ff_right_mm = 0.0;
+                         std::array<double, kWheelCount>& ff_mm, bool& fallback) {
+    ff_mm.fill(0.0);
+    fallback = false;
     if (in.profile == nullptr) return;
 
     const auto& frame = *in.profile;
-    const double lookahead = std::clamp(in.lookahead_m, 0.0, params.max_lookahead_m);
     const double spacing = frame.spacing;
 
-    double h = 0.0;
-    if (sample_lane(frame.left, lookahead, spacing, h)) {
-        ff_left_mm = params.feedforward_sign * params.feedforward_gain * h * 1000.0;
+    // a) 自适应取样距离。没有车速信息时退回固定 lookahead_m，
+    //    与接入车速之前的行为完全一致
+    const double lookahead = effective_lookahead(in, params);
+
+    // b) 后轴比前轴晚一个"轴距/车速"的时间遇到同一路面特征。
+    //    低速时该差值为负，钳到 0——后轮此时已经压在目标特征上
+    const double rear_lookahead = std::max(0.0, lookahead - params.wheelbase_m);
+
+    double h_lf = 0.0, h_rf = 0.0, h_lr = 0.0, h_rr = 0.0;
+    bool dummy = false;   // 插值标记目前只用于诊断，这里不需要
+    const bool lf_ok = sample_lane(frame.left, lookahead, spacing, h_lf, dummy);
+    const bool rf_ok = sample_lane(frame.right, lookahead, spacing, h_rf, dummy);
+    const bool lr_ok = sample_lane(frame.left, rear_lookahead, spacing, h_lr, dummy);
+    const bool rr_ok = sample_lane(frame.right, rear_lookahead, spacing, h_rr, dummy);
+
+    // c) 单侧失效时借对侧高程。左右轮迹只差一个轮距，横坡引起的高差远小于
+    //    "填 0"造成的台阶——后者等效于给一个伪横滚指令，会把车往一侧推
+    if (!lf_ok && rf_ok) { h_lf = h_rf; fallback = true; }
+    if (!rf_ok && lf_ok) { h_rf = h_lf; fallback = true; }
+    if (!lr_ok && rr_ok) { h_lr = h_rr; fallback = true; }
+    if (!rr_ok && lr_ok) { h_rr = h_lr; fallback = true; }
+
+    const double gain_mm = params.feedforward_sign * params.feedforward_gain * 1000.0;
+    if (lf_ok || rf_ok) {
+        ff_mm[kFrontLeft] = gain_mm * h_lf;
+        ff_mm[kFrontRight] = gain_mm * h_rf;
     }
-    if (sample_lane(frame.right, lookahead, spacing, h)) {
-        ff_right_mm = params.feedforward_sign * params.feedforward_gain * h * 1000.0;
+    if (lr_ok || rr_ok) {
+        ff_mm[kRearLeft] = gain_mm * h_lr;
+        ff_mm[kRearRight] = gain_mm * h_rr;
     }
 }
 
@@ -93,16 +145,17 @@ void filter_attitude(const ControlInput& in, double alpha, double& f_roll,
 
 // 第 3、4 步：运动学解耦到四轮 + 幅值限幅 + 速率限制。
 // last_output 既是输入（速率限制的基准），也会被更新为本次输出
-void apply_kinematics(double ff_left_mm, double ff_right_mm, double u_roll,
+void apply_kinematics(const std::array<double, kWheelCount>& ff_mm, double u_roll,
                       double u_pitch, const ControlParams& params, double dt,
                       std::array<double, kWheelCount>& last_output,
                       ControlOutput& out) {
-    // 前轴加俯仰修正、后轴减；右侧加横滚修正、左侧减
+    // 前轴加俯仰修正、后轴减；右侧加横滚修正、左侧减。
+    // 前馈按轴取不同的值：后轴比前轴短一个轴距取样（见 compute_feedforward）
     const double raw[kWheelCount] = {
-        ff_left_mm + u_pitch - u_roll,   // 左前
-        ff_right_mm + u_pitch + u_roll,  // 右前
-        ff_left_mm - u_pitch - u_roll,   // 左后
-        ff_right_mm - u_pitch + u_roll,  // 右后
+        ff_mm[kFrontLeft] + u_pitch - u_roll,   // 左前
+        ff_mm[kFrontRight] + u_pitch + u_roll,  // 右前
+        ff_mm[kRearLeft] - u_pitch - u_roll,    // 左后
+        ff_mm[kRearRight] - u_pitch + u_roll,   // 右后
     };
 
     const double max_step =
@@ -124,6 +177,16 @@ void apply_kinematics(double ff_left_mm, double ff_right_mm, double u_roll,
 }
 
 }  // namespace
+
+// 生效的前馈取样距离。放在匿名 namespace 外：控制回路（control_loop.cpp）
+// 也要用它做状态上报，两边必须是同一个函数，"上报的值"才等于"实际用的值"
+double effective_lookahead(const ControlInput& in, const ControlParams& params) {
+    if (in.has_speed && std::isfinite(in.speed_mps) && in.speed_mps > 0.0) {
+        return std::clamp(in.speed_mps * params.lookahead_time_s,
+                          params.min_lookahead_m, params.max_lookahead_m);
+    }
+    return std::clamp(in.lookahead_m, 0.0, params.max_lookahead_m);
+}
 
 // ---------------------------------------------------------------- PD 版
 
@@ -148,12 +211,12 @@ void PreviewFeedbackController::sync_reference(
 ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double dt) {
     ControlOutput out;
 
-    // ---- 1. 预瞄前馈 ----
-    double ff_left_mm = 0.0;
-    double ff_right_mm = 0.0;
-    compute_feedforward(in, params_, ff_left_mm, ff_right_mm);
-    out.feedforward_mm[0] = ff_left_mm;
-    out.feedforward_mm[1] = ff_right_mm;
+    // ---- 1. 预瞄前馈（车速自适应 + 前后轴差异化 + 跨侧回退）----
+    std::array<double, kWheelCount> ff_mm{};
+    bool fallback = false;
+    compute_feedforward(in, params_, ff_mm, fallback);
+    out.feedforward_mm = ff_mm;
+    out.feedforward_fallback = fallback;
 
     // ---- 2. 姿态反馈（无导数 PD，角速度代替误差微分）----
     // 绝对式：每拍从当前姿态重算，不依赖历史
@@ -175,8 +238,7 @@ ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double 
     out.pitch_correction_mm = u_pitch;
 
     // ---- 3. 运动学解耦 + 4. 限幅与速率限制 ----
-    apply_kinematics(ff_left_mm, ff_right_mm, u_roll, u_pitch, params_, dt, last_output_,
-                     out);
+    apply_kinematics(ff_mm, u_roll, u_pitch, params_, dt, last_output_, out);
     return out;
 }
 
@@ -216,12 +278,12 @@ void IncrementalLqiController::clear_incremental_memory() {
 ControlOutput IncrementalLqiController::compute(const ControlInput& in, double dt) {
     ControlOutput out;
 
-    // ---- 1. 预瞄前馈（与 PD 版共用）----
-    double ff_left_mm = 0.0;
-    double ff_right_mm = 0.0;
-    compute_feedforward(in, params_, ff_left_mm, ff_right_mm);
-    out.feedforward_mm[0] = ff_left_mm;
-    out.feedforward_mm[1] = ff_right_mm;
+    // ---- 1. 预瞄前馈（与 PD 版共用：车速自适应 + 前后轴差异化 + 跨侧回退）----
+    std::array<double, kWheelCount> ff_mm{};
+    bool fallback = false;
+    compute_feedforward(in, params_, ff_mm, fallback);
+    out.feedforward_mm = ff_mm;
+    out.feedforward_fallback = fallback;
 
     // ---- 2. 姿态反馈：增量式 LQI ----
     //     u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
@@ -279,8 +341,7 @@ ControlOutput IncrementalLqiController::compute(const ControlInput& in, double d
     out.pitch_correction_mm = u_pitch;
 
     // ---- 3. 运动学解耦 + 4. 限幅与速率限制（与 PD 版共用）----
-    apply_kinematics(ff_left_mm, ff_right_mm, u_roll, u_pitch, params_, dt, last_output_,
-                     out);
+    apply_kinematics(ff_mm, u_roll, u_pitch, params_, dt, last_output_, out);
     return out;
 }
 

@@ -76,6 +76,15 @@ bool SuspensionControlLoop::submit_attitude(const Attitude& attitude, double now
     return true;
 }
 
+void SuspensionControlLoop::submit_speed(double speed_mps, double now_sec) {
+    // 负车速（倒档）与非有限值直接忽略：预瞄取样只对前进方向有意义，
+    // 倒档时按前进距离取样会取到车身侧后方的路面
+    if (!std::isfinite(speed_mps) || speed_mps < 0.0) return;
+    has_speed_ = true;
+    speed_mps_ = speed_mps;
+    speed_stamp_sec_ = now_sec;
+}
+
 void SuspensionControlLoop::apply_command(
     const std::array<double, kWheelCount>& height_mm, bool force) {
     std::array<int, kWheelCount> next{};
@@ -118,6 +127,22 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     // 单帧被拒不代表当前数据变差，否则会因一帧坏数据误判为不健康
     suspension_preview_v2::RoadProfileFrame held;
     const bool has_held = validator_->latest(held);
+
+    // 车速过期判定用控制环时钟（now_sec），不用数据到达时刻。
+    // 过期视为无车速：前馈退回固定 lookahead_m，宁可退回旧行为，
+    // 也不用一个可能已经不准的车速去算取样距离。
+    // 放在契约分支之前：降级保持期不上新输出，但这两个诊断字段仍要反映
+    // 当前真实状态，否则联调时看到的是上一段闭环的陈旧值
+    const bool speed_ok =
+        has_speed_ && (now_sec - speed_stamp_sec_) <= params_.speed_timeout_s;
+    status_.speed_mps = speed_ok ? speed_mps_ : 0.0;
+    {
+        ControlInput li;
+        li.has_speed = speed_ok;
+        li.speed_mps = status_.speed_mps;
+        li.lookahead_m = params_.lookahead_m;
+        status_.lookahead_m = effective_lookahead(li, controller_->params());
+    }
 
     SafetyInputs in;
     in.profile_valid = new_profile_valid_;
@@ -233,6 +258,10 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     ci.pitch_offset_rad = status_.calibrated_pitch_rad;
     ci.lookahead_m = params_.lookahead_m;
 
+    // 车速过期判定在步骤开头做过，这里直接用结论
+    ci.has_speed = speed_ok;
+    ci.speed_mps = status_.speed_mps;
+
     ci.profile = has_held ? &held : nullptr;
 
     status_.output = controller_->compute(ci, step_dt);
@@ -266,6 +295,11 @@ bool SuspensionControlLoop::request_reset() {
         status_.calibration_samples = 0;
         status_.calibrated_roll_rad = 0.0;
         status_.calibrated_pitch_rad = 0.0;
+        has_speed_ = false;
+        speed_mps_ = 0.0;
+        speed_stamp_sec_ = 0.0;
+        status_.speed_mps = 0.0;
+        status_.lookahead_m = 0.0;
 
         // 复位是外部可见的状态跃迁，立刻反映到 status_，
         // 不必等到下一个控制周期才更新

@@ -9,7 +9,7 @@ ROS2 · C++ · PCL · Embedded · Multi-sensor fusion
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes three offline self-tests (v3 control: 89 checks, driver parsing: 63
+> executes three offline self-tests (v3 control: 130 checks, driver parsing: 63
 > checks, v2 point-cloud pipeline). Starting from **v3.1.0** the packages build
 > cleanly — **earlier tags do not build**. See [CHANGELOG](CHANGELOG.md).
 
@@ -214,7 +214,7 @@ flowchart LR
 |-----------|----------------|
 | `IInputValidator` | Profile validation, rejecting 9 classes of bad data (NaN, out-of-range, low quality, illegal spacing or track width, frame mismatch, stale timestamp, excessive inter-frame jump, ...) |
 | `ISafetyStateMachine` | Safety state machine and its three-branch output contract: use controller output / hold last value / force to neutral |
-| `IController` | Preview feedforward + derivative-free PD + kinematic decoupling + amplitude and rate limiting |
+| `IController` | Preview feedforward (speed-adaptive + per-axle) + derivative-free PD + kinematic decoupling + amplitude and rate limiting |
 | `IControlLoop` | Wires validation, state machine, controller and driver into one chain |
 
 A few design points worth calling out:
@@ -225,7 +225,28 @@ A few design points worth calling out:
 - **Bounded step duration**: timer jitter cannot push the elapsed-time criteria past their thresholds in one step and cause a spurious stop
 - **Hardware emergency stop**: entering the emergency state calls the driver's `emergency_stop()` in addition to sending a zero-position command
 
-89 offline self-test checks, requiring neither ROS nor hardware:
+Three algorithmic details on the feedforward sampling distance (since v3.2.0):
+
+- **Distance scales with speed**: sample distance = clamp(speed × response horizon,
+  0.5 m, 5 m), where the horizon is 2.5× the time the actuator needs to traverse its
+  full stroke (default 40 mm / 300 mm/s × 2.5 ≈ 0.33 s). A fixed distance under-samples
+  at low speed and is simply too late at high speed — the paper's test speed is 0.5 m/s,
+  where a fixed 1 m looks 2 s down the road. With no speed input (no `/odom`), the
+  controller falls back to the fixed `lookahead_m`
+- **Per-axle distances**: the rear axle samples one wheelbase closer than the front —
+  the rear wheels meet the same road feature one "wheelbase / speed" later, so using one
+  distance for both would feed pitch with road the rear wheels have not reached yet
+- **Inter-cell interpolation and cross-lane fallback**: sampling interpolates between
+  adjacent cells so the 5 cm quantization does not become a stair-stepped travel command;
+  if one wheel track has no valid data the other track's height is borrowed, avoiding an
+  asymmetric feedforward that reads as a phantom roll command (signalled by
+  `ControlStatus.feedforward_fallback`, so it is observable)
+
+The effective speed and sample distance are written into `ControlStatus` every tick
+(`speed_mps` / `lookahead_m`), so "how far ahead did the feedforward actually look"
+is visible during integration.
+
+130 offline self-test checks, requiring neither ROS nor hardware:
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
