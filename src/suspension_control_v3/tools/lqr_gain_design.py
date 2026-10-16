@@ -14,6 +14,10 @@
     2) 增量式 LQI   -> kx1 / kx2 / ki，能补掉常值横坡的稳态残留
     3) 稳态残留解析 -> theta_ss / z_road = 1 / (1 + 2*kp/轮距)
 
+每次解出增益都会附带自校验（report_gain）：**迭代是否收敛、DARE 残差是否够小、
+闭环谱半径是否 < 1**。三者缺一就明确标成"不可用"——这些数是要抄进 YAML 的，
+万一给了会把作动器推离稳定的增益，必须当场看出来，而不是等上台架炸。
+
 第七节新增：预瞄前馈优化（垂向 heave 通道）。前面几节只管"反馈"，
 前馈一直是"比例映射 + 拍脑袋增益 1.0"。这一节把未来 N 拍的路面高程当作
 已知量，用增广状态 DARE 解出最优预瞄前馈，并与比例前馈直接对比
@@ -87,7 +91,71 @@ def dare(Ad, Bd, Q, r, iters=300000, tol=1e-13):
             break
     K = mm(mm(tr(Bd), P), Ad)
     den = r + mm(mm(tr(Bd), P), Bd)[0][0]
-    return [[K[0][j] / den for j in range(len(Ad))]], used, converged
+    return [[K[0][j] / den for j in range(len(Ad))]], used, converged, P
+
+
+def dare_residual(Ad, Bd, Q, r, P):
+    """DARE 残差（无穷范数）。
+
+        res = P - (A^T P A - A^T P B (r + B^T P B)^-1 B^T P A + Q)
+
+    理论上收敛解应使之为 0。这个值大说明"收敛"是假的（比如迭代次数不够、
+    或者系统根本不可稳）。给出增益的同时必须给出这个数，否则抄进 YAML 的
+    可能是把作动器推离稳定的数。
+    """
+    AtP = mm(tr(Ad), P)
+    AtPAd = mm(AtP, Ad)
+    AtPBd = mm(AtP, Bd)
+    BtPBd = mm(mm(tr(Bd), P), Bd)[0][0]
+    Pn = add(sub(AtPAd, scal(mm(AtPBd, tr(AtPBd)), 1.0 / (r + BtPBd))), Q)
+    return max(abs(Pn[i][j] - P[i][j]) for i in range(len(P)) for j in range(len(P)))
+
+
+def spectral_radius_bound(Ad, Bd, K, steps=4000):
+    """估计闭环 A - B·K 的谱半径。
+
+    > 1 表示增益会把系统推离稳定。判据用
+        rho = exp( (1/m) * Σ log|A·v_i| )
+    即 ‖A^m v‖^(1/m) 的极限 = 谱半径。
+
+    为什么不用幂迭代取末次范数：幂迭代只在主导特征值是**单实根**时收敛。
+    悬架是欠阻尼系统，主导特征值几乎总是一对共轭复根，迭代方向会来回摆，
+    取任何一步的范数都没有意义（实测把稳定的 0.99 报成 1.28，直接颠倒结论）。
+    几何平均对复根同样成立：它按定义收敛到谱半径，与主导根是否复数无关。
+    """
+    n = len(Ad)
+    M = [[Ad[i][j] - Bd[i][0] * K[0][j] for j in range(n)] for i in range(n)]
+    v = [1.0] + [0.5] + [0.0] * (n - 2) if n > 1 else [1.0]
+    log_sum = 0.0
+    for _ in range(steps):
+        w = [sum(M[i][j] * v[j] for j in range(n)) for i in range(n)]
+        nw = max(abs(x) for x in w)
+        if nw < 1e-300:
+            return 0.0
+        # 归一化后 |v|_inf 恒为 1，故 log(nw) 累加即 log‖A^m v‖
+        log_sum += math.log(nw)
+        v = [x / nw for x in w]
+    return math.exp(log_sum / steps)
+
+
+def report_gain(Ad, Bd, Q, r, K, iters, conv, P, label):
+    """给出增益的同时证明它可用：收敛 + 残差小 + 闭环稳定。
+
+    三者缺一，抄进 YAML 的就是会把作动器推离稳定的数。
+    返回 True 表示通过。
+    """
+    res = dare_residual(Ad, Bd, Q, r, P)
+    rho = spectral_radius_bound(Ad, Bd, K)
+    stable = rho < 1.0
+    ok = conv and res < 1e-6 and stable
+    print("    [{0}] {1}: 迭代 {2} {3}，残差 {4:.2e}，闭环谱半径 {5:.4f}（{6}）".format(
+        "通过" if ok else "不可用", label, iters,
+        "收敛" if conv else "未收敛", res, rho,
+        "稳定" if stable else "不稳定！禁用"))
+    if not ok:
+        print("          ^ 增益不可用：调大 --dare-iters，或检查模型/权重是否合理")
+    return ok
+
 
 # ---------------------------------------------------------------- modelling
 
@@ -356,7 +424,8 @@ def main():
     print("-" * 72)
     print("1) 无积分 LQR —— 与现有 PD 结构完全同构，只是增益来源不同")
     print("-" * 72)
-    K, it, conv = dare(Ad, Bd, Q, 1.0 / a.u_max ** 2)
+    K, it, conv, P = dare(Ad, Bd, Q, 1.0 / a.u_max ** 2)
+    report_gain(Ad, Bd, Q, 1.0 / a.u_max ** 2, K, it, conv, P, "无积分 LQR")
     kp, kd = -K[0][0], -K[0][1]
     print("  kp = {0:.1f} mm/rad        kd = {1:.1f} mm/(rad/s)".format(kp, kd))
     print("  ({0} 次迭代收敛)".format(it))
@@ -370,7 +439,8 @@ def main():
           [Ad[0][0], Ad[0][1], 1.0]]
     Be = [[Bd[0][0]], [Bd[1][0]], [Bd[0][0]]]
     Qe = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0 / a.theta_max ** 2]]
-    Ke, it2, conv2 = dare(Ae, Be, Qe, 1.0 / du_max ** 2)
+    Ke, it2, conv2, Pe = dare(Ae, Be, Qe, 1.0 / du_max ** 2)
+    report_gain(Ae, Be, Qe, 1.0 / du_max ** 2, Ke, it2, conv2, Pe, "增量式 LQI")
     kx1, kx2, ki = -Ke[0][0], -Ke[0][1], -Ke[0][2]
     print("  kx1 = {0:.1f}   kx2 = {1:.1f}   ki = {2:.2f}".format(kx1, kx2, ki))
     print("  (注意 R 必须按 Δu 的量级取，照搬 u_max 会让 R 小两个数量级而失稳)")
@@ -447,7 +517,9 @@ def main():
     Qh = [[0.0] * n_state for _ in range(n_state)]
     Qh[0][0] = 1.0 / a.heave_zmax ** 2
     Qh[1][1] = 1.0 / a.heave_vmax ** 2
-    Kh, ith, convh = dare(Adh, Bdh, Qh, 1.0 / a.stroke ** 2)
+    Kh, ith, convh, Ph = dare(Adh, Bdh, Qh, 1.0 / a.stroke ** 2)
+    report_gain(Adh, Bdh, Qh, 1.0 / a.stroke ** 2, Kh, ith, convh, Ph,
+                "垂向反馈 LQR")
     k_fb = [-Kh[0][i] for i in range(n_state)]
     print("  垂向模型 : {0} Hz (wn={1:.3f} rad/s), zeta={2}, 作动器滞后 tau={3:.3f} s"
           "（= {4:.0f} 拍）".format(a.heave_hz, wh, a.zeta, a.actuator_tau,
@@ -463,7 +535,10 @@ def main():
     Qaug = [[0.0] * dim for _ in range(dim)]
     Qaug[0][0] = 1.0 / a.heave_zmax ** 2
     Qaug[1][1] = 1.0 / a.heave_vmax ** 2
-    Kp, itp, convp = dare(Aaug, Baug, Qaug, 1.0 / a.stroke ** 2, iters=a.dare_iters)
+    Kp, itp, convp, Pp = dare(Aaug, Baug, Qaug, 1.0 / a.stroke ** 2,
+                             iters=a.dare_iters)
+    report_gain(Aaug, Baug, Qaug, 1.0 / a.stroke ** 2, Kp, itp, convp, Pp,
+                "预瞄 LQR")
     # u = -K*xi，所以前馈增益就是 K 中对应各路面的系数本身（不要再取负，
     # 否则符号反了会变成"助推"而不是"抵消"——前馈越强车身越抖）。
     # 语义：u_ff = -sum(f[j] * z_r[k+j])，故 sum(f) 应接近 1
@@ -587,10 +662,10 @@ def main():
         Qa2 = [[0.0] * d2 for _ in range(d2)]
         Qa2[0][0] = 1.0 / a.heave_zmax ** 2
         Qa2[1][1] = 1.0 / a.heave_vmax ** 2
-        K2, _, cv2 = dare(Aa2, Ba2, Qa2, 1.0 / a.stroke ** 2,
-                          iters=a.dare_iters)
+        K2, _, cv2, P2 = dare(Aa2, Ba2, Qa2, 1.0 / a.stroke ** 2,
+                              iters=a.dare_iters)
         if not cv2:
-            print("  {0:<14}{1:>12}{2:>12}{3:>14}{4:>12}".format(
+            print("  {0:<14.3f}{1:>12}{2:>12}{3:>14}{4:>12}".format(
                 tau, "未收敛", "-", "-", "-"))
             continue
         pg = [K2[0][n_state + j] for j in range(a.preview_horizon)]

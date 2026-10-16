@@ -514,6 +514,7 @@ private:
         out.lookahead_m = static_cast<float>(st.lookahead_m);
         out.speed_mps = static_cast<float>(st.speed_mps);
         out.feedforward_fallback = st.output.feedforward_fallback;
+        out.feedforward_fir = st.output.feedforward_fir;
         out.profile_age_ms = static_cast<float>(st.profile_age_ms);
         out.sample_position_m = static_cast<float>(st.sample_position_m);
         out.fused_frames = static_cast<uint32_t>(st.fused_frames);

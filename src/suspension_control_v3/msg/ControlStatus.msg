@@ -24,7 +24,9 @@ float32 speed_mps         # 本拍生效的车速 (m/s)，0 表示未使用车�
 bool    feedforward_fallback  # 前馈是否回退用了对侧轮迹（该侧无有效数据）
 
 float32 profile_age_ms    # 所使用剖面的帧龄 (ms)
-float32 sample_position_m # 前轴实际取样位置 (m)，= lookahead + 车速×帧龄
+float32 sample_position_m # 前轴前馈锚点 (m)：单点模式 = lookahead + 车速×帧龄；
+                          # FIR 模式 = FIR 起点（= 帧龄补偿后位置 + preview_start_m）
+bool    feedforward_fir   # 本拍前馈走的是 FIR（true）还是单点比例（false）
 
 uint32 fused_frames          # 本拍参与融合的帧数（1 = 未融合）
 uint32 low_confidence_cells  # 跨帧离散度过大被判无效的格数（左右合计）

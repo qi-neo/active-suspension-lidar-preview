@@ -294,6 +294,10 @@ ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double 
     out.feedforward_mm = ff_mm;
     out.feedforward_fallback = fallback;
     out.sample_position_m = sample_pos;
+    // 与 compute_feedforward 里的判定条件保持一致（那边才是真正做选择的地方），
+    // 这样上报的"用的是哪种前馈"就是实际用的那种
+    out.feedforward_fir =
+        params_.use_preview_fir && !params_.preview_gains.empty();
 
     // ---- 2. 姿态反馈（无导数 PD，角速度代替误差微分）----
     // 绝对式：每拍从当前姿态重算，不依赖历史
@@ -364,6 +368,10 @@ ControlOutput IncrementalLqiController::compute(const ControlInput& in, double d
     out.feedforward_mm = ff_mm;
     out.feedforward_fallback = fallback;
     out.sample_position_m = sample_pos;
+    // 与 compute_feedforward 里的判定条件保持一致（那边才是真正做选择的地方），
+    // 这样上报的"用的是哪种前馈"就是实际用的那种
+    out.feedforward_fir =
+        params_.use_preview_fir && !params_.preview_gains.empty();
 
     // ---- 2. 姿态反馈：增量式 LQI ----
     //     u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ

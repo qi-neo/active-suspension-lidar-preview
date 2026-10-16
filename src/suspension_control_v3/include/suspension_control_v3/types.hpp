@@ -103,6 +103,9 @@ struct ControlOutput {
     // 前后轴取值不同：后轮比前轮晚一个"轴距/车速"遇到同一路面特征，
     // 因此后轴取样距离比前轴短一个轴距（见 controller.cpp）
     std::array<double, kWheelCount> feedforward_mm{0.0, 0.0, 0.0, 0.0};
+    // 本拍前馈走的是 FIR 还是单点比例。诊断用：单看 sample_position_m
+    // 分不出它是"lookahead + 帧龄"还是"FIR 起点"，两者量级差一个数量级
+    bool feedforward_fir{false};
     double roll_correction_mm{0.0};
     double pitch_correction_mm{0.0};
     bool saturated{false};   // 是否触发过限幅

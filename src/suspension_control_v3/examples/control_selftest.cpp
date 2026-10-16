@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -1921,6 +1922,133 @@ void test_position_feedback_topic() {
     }
 }
 
+// ---------------------------------------------------------------- 25. FIR 与既有特性的组合
+//
+// 23 组只单独验了 FIR 本身。但 FIR 是插在既有链路中间的新分支，与另外三个
+// 特性（跨侧回退、语义预瞄、诊断上报）的组合从来没测过——而组合处恰恰
+// 最容易出问题：每条特性单独看都对，接起来却未必。
+void test_fir_combinations() {
+    section("25. FIR 与既有特性的组合");
+
+    constexpr double kSpacing = 0.05;
+    auto make_road_frame = [](std::size_t bump_cell, double bump) {
+        RoadProfileFrame f;
+        f.stamp_sec = 100.0;
+        f.frame_id = "base_link";
+        f.spacing = static_cast<float>(kSpacing);
+        f.wheel_dist = 0.6f;
+        f.preview_dist = 5.0f;
+        constexpr std::size_t kCells = 100;
+        f.left.reset(kCells);
+        f.right.reset(kCells);
+        for (std::size_t i = 0; i < kCells; ++i) {
+            f.left.height[i] = 0.02f;
+            f.right.height[i] = 0.02f;
+            f.left.valid[i] = kMeasured;
+            f.right.valid[i] = kMeasured;
+        }
+        f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
+        f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
+        return f;
+    };
+
+    ControlParams base;
+    base.use_preview_fir = true;
+    base.use_semantic_preview = true;   // 25.3 要验两者组合，开关别忘
+    PreviewFeedbackController ctrl(base);
+
+    // ---- 25.1 默认权重的直流增益必须为 1 ----
+    // 这是硬编码默认值的不变式：谁改坏了它，恒定路面下会产生稳态偏移，
+    // 而现象只是"车停不平"，极难追溯到权重上
+    {
+        // 注意：必须绑定到具名对象。写成 ControlParams{}.begin() 与
+        // ControlParams{}.end() 会拿到两个不同临时对象的迭代器，跨容器迭代是
+        // 未定义行为——实测恰好读出两倍元素，把不变式测成 2.0 而看不出错
+        const ControlParams defaults;
+        const double sum = std::accumulate(defaults.preview_gains.begin(),
+                                           defaults.preview_gains.end(), 0.0);
+        check(std::fabs(sum - 1.0) < 0.01,
+              "默认 preview_gains 的直流增益应为 1.0（否则恒定路面有稳态偏移）");
+        std::printf("  默认权重直流增益 = %.4f（应为 1.0）\n", sum);
+    }
+
+    // ---- 25.2 FIR + 跨侧回退：一侧整条无效时借用对侧 ----
+    {
+        RoadProfileFrame f = make_road_frame(999, 0.0);
+        for (std::size_t i = 0; i < f.left.size(); ++i) f.left.valid[i] = kInvalid;
+        ctrl.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        const ControlOutput out = ctrl.compute(in, 0.005);
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "左迹全无效时 FIR 路径也应借用右迹高程");
+        check(out.feedforward_fallback, "跨侧回退应置 fallback 标记");
+        std::printf("  左迹全无效 -> 左前 %.1f mm（借用右迹），fallback=%d\n",
+                    out.feedforward_mm[kFrontLeft], out.feedforward_fallback);
+    }
+
+    // ---- 25.3 FIR + 语义预瞄：作用范围按 FIR 真实覆盖算 ----
+    // FIR 覆盖 [start, start + last*spacing] = [0, 0.5 m]（11 拍、last=10）。
+    // 若这里误用了单点模式的 lookahead(1.0 m)，范围外的障碍也会误抑制
+    {
+        const double reach = 10 * kSpacing;   // 0.5 m
+        // 范围内（0.3 m）的左迹障碍 -> 抑制左侧
+        RoadProfileFrame f = make_road_frame(999, 0.0);
+        std::vector<ObstacleAhead> near_obs{{0.3, -0.3, 0.30}};
+        ctrl.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        in.obstacles = &near_obs;
+        in.has_obstacles = true;
+        const ControlOutput o1 = ctrl.compute(in, 0.005);
+        check(o1.feedforward_mm[kFrontLeft] == 0.0, "FIR 范围内的左迹障碍应抑制左前");
+        check(std::fabs(o1.feedforward_mm[kFrontRight] - 20.0) < 0.5,
+              "同时不应影响右前");
+
+        // 范围外（reach + 0.1 = 0.6 m）的障碍 -> 不抑制。
+        // 这一条专门盯 reach：写成单点模式的 lookahead(1.0 m) 就会误杀
+        std::vector<ObstacleAhead> far_obs{{reach + 0.1, -0.3, 0.30}};
+        ctrl.reset();
+        ControlInput in2;
+        in2.profile = &f;
+        in2.lookahead_m = 1.0;
+        in2.obstacles = &far_obs;
+        in2.has_obstacles = true;
+        const ControlOutput o2 = ctrl.compute(in2, 0.005);
+        check(std::fabs(o2.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "FIR 覆盖范围外的障碍不应抑制前馈");
+        std::printf("  语义预瞄作用范围 = FIR 真实覆盖 [0, %.2f] m："
+                    "范围内抑制、范围外不抑制\n", reach);
+    }
+
+    // ---- 25.4 诊断字段如实反映用的是哪种前馈 ----
+    {
+        const RoadProfileFrame f = make_road_frame(999, 0.0);
+        ctrl.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        check(ctrl.compute(in, 0.005).feedforward_fir, "开 FIR 时应上报 feedforward_fir=true");
+
+        ControlParams off;
+        PreviewFeedbackController c2(off);
+        c2.reset();
+        check(!c2.compute(in, 0.005).feedforward_fir,
+              "未开 FIR 时应上报 feedforward_fir=false");
+
+        // 开了开关但权重为空 -> 实际走的是单点，上报必须跟着变成 false
+        ControlParams empty = base;
+        empty.preview_gains.clear();
+        PreviewFeedbackController c3(empty);
+        c3.reset();
+        const ControlOutput o = c3.compute(in, 0.005);
+        check(!o.feedforward_fir, "权重为空（实际走单点）时不应上报 FIR");
+        std::printf("  诊断：开 FIR -> true；未开 -> false；权重为空 -> false\n");
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1991,6 +2119,7 @@ int main() {
     test_actuator_position_feedback();
     test_preview_fir_feedforward();
     test_position_feedback_topic();
+    test_fir_combinations();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");
