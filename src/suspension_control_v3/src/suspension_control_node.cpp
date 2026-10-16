@@ -10,6 +10,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/int32_multi_array.hpp>
 
 #include <suspension_preview_v2/msg/road_obstacles.hpp>
 #include <suspension_preview_v2/msg/road_profile.hpp>
@@ -56,6 +57,14 @@ public:
             speed_sub_ = create_subscription<nav_msgs::msg::Odometry>(
                 speed_topic_, rclcpp::SensorDataQoS(),
                 std::bind(&SuspensionControlNode::on_odom, this, std::placeholders::_1));
+        }
+        // 位置反馈：外部桥接节点上报作动器实际位置（四轮 mm）。
+        // 订阅后才有可能判堵转；没订阅时驱动轮询那条路仍可用
+        if (enable_driver_) {
+            position_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
+                actuator_position_topic_, rclcpp::SensorDataQoS(),
+                std::bind(&SuspensionControlNode::on_actuator_position, this,
+                          std::placeholders::_1));
         }
         // 语义预瞄：订阅 v2 发布的非地面障碍物。未开启时不订阅——
         // 没订阅就没有数据，控制器会整段跳过语义分支
@@ -322,6 +331,12 @@ private:
         // 驱动不支持位置反馈时该参数不起作用
         loop_params_.stall_error_mm =
             declare_parameter<double>("stall_error_mm", loop_params_.stall_error_mm);
+        // 位置上报话题与有效期。过期后按"无反馈"处理——陈旧位置不能当实际值，
+        // 更不能因为有最后一帧就继续判堵转
+        loop_params_.position_timeout_s =
+            declare_parameter<double>("position_timeout_s", loop_params_.position_timeout_s);
+        actuator_position_topic_ = declare_parameter<std::string>(
+            "actuator_position_topic", "/suspension/actuator_position");
         // 封顶值不能低于名义控制周期：否则每一拍都被钳制，累计时间推进慢于真实时间，
         // 降级、链路超时这些基于时长的判据会成比例地延迟触发。
         // 低控制频率下这一步尤其关键
@@ -402,6 +417,23 @@ private:
 
         angle_.roll_deg = a.roll_rad * kRadToDeg;
         angle_.pitch_deg = a.pitch_rad * kRadToDeg;
+    }
+
+    // 位置反馈：把四轮实际位置 (mm) 转给控制回路。长度不对就直接丢：
+    // 少一路位置会让那一轮的偏差恒等于指令值，看起来像"永远堵转"
+    void on_actuator_position(const std_msgs::msg::Int32MultiArray::SharedPtr msg) {
+        if (msg->data.size() != suspension_preview_v2::kSuspensionWheelCount) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "作动器位置上报长度 %zu，应为 %d，已丢弃",
+                                 msg->data.size(),
+                                 suspension_preview_v2::kSuspensionWheelCount);
+            return;
+        }
+        std::array<int, suspension_preview_v2::kSuspensionWheelCount> mm{};
+        for (std::size_t i = 0; i < mm.size(); ++i) {
+            mm[i] = msg->data[i];
+        }
+        loop_->submit_actuator_position(mm, now().seconds());
     }
 
     // 语义预瞄：把 v2 检出的非地面障碍物转成控制核心的结构。整包替换——
@@ -494,6 +526,8 @@ private:
         out.position_error_mm.assign(st.position_error_mm.begin(),
                                      st.position_error_mm.end());
         out.max_position_error_mm = static_cast<float>(st.max_position_error_mm);
+        out.position_age_ms = static_cast<float>(st.position_age_ms);
+        out.position_from_topic = st.position_from_topic;
         out.ticks = static_cast<uint32_t>(st.ticks);
         out.profiles_accepted = static_cast<uint32_t>(st.profiles_accepted);
         out.profiles_rejected = static_cast<uint32_t>(st.profiles_rejected);
@@ -516,6 +550,7 @@ private:
     // 车速源
     std::string speed_topic_;
     std::string obstacles_topic_;
+    std::string actuator_position_topic_;
     bool use_speed_adaptive_lookahead_{true};
     double assume_speed_mps_{0.0};
 
@@ -534,6 +569,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr speed_sub_;
     rclcpp::Subscription<suspension_preview_v2::msg::RoadObstacles>::SharedPtr obstacles_sub_;
+    rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr position_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_sub_;
     rclcpp::Publisher<suspension_control_v3::msg::ControlStatus>::SharedPtr status_pub_;

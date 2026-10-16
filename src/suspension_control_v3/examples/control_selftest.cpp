@@ -1828,6 +1828,99 @@ void test_preview_fir_feedforward() {
     }
 }
 
+// ---------------------------------------------------------------- 24. 位置反馈：外部话题通路
+//
+// 驱动轮询（22 组）适合"驱动自己能读到位置"的场合；但作动器 MCU 常由另一路
+// 节点/桥接收发，那种情况下由它把位置发到话题上更自然，也不必在 200 Hz 控制
+// 环里做阻塞式串口读。这里验这条通路的四件事：能检堵转、过期能退出判定、
+// 优先于驱动轮询、没上报就不判。
+void test_position_feedback_topic() {
+    section("24. 位置反馈：外部话题通路");
+
+    constexpr double kOffset = 0.02;   // 恒定 20 mm 路面 -> 前馈指令 20 mm
+
+    // 模拟外部桥接节点：每拍上报四轮位置，同时照常喂剖面与姿态
+    auto step_with_position = [](LoopFixture& fx, double duration,
+                                 const std::array<int, kWheelCount>& pos,
+                                 double offset) {
+        constexpr double kDt = 0.005;
+        constexpr double kProfilePeriod = 0.1;
+        const double end = fx.t + duration;
+        double next_profile = fx.t;
+        while (fx.t < end) {
+            if (fx.t >= next_profile) {
+                fx.loop.submit_profile(make_frame(fx.t, 0.0, offset), fx.t);
+                next_profile += kProfilePeriod;
+            }
+            Attitude a;
+            a.valid = true;
+            a.stamp_sec = fx.t;
+            fx.loop.submit_attitude(a, fx.t);
+            fx.loop.submit_actuator_position(pos, fx.t);
+            fx.loop.step(fx.t, kDt);
+            fx.t += kDt;
+        }
+    };
+
+    // ---- 24.1 话题通路同样能检出堵转 ----
+    {
+        LoopFixture fx(true, false);
+        fx.advance(1.5, 0.0, 0.0, 0.0, kOffset);   // 先规规矩矩进闭环
+        check(!fx.loop.status().has_position_feedback, "未上报位置时应为无反馈");
+
+        const std::array<int, kWheelCount> stuck{0, 20, 20, 20};   // 左前卡死在 0
+        step_with_position(fx, 0.3, stuck, kOffset);
+        check(fx.loop.status().position_from_topic, "应使用话题上报的位置");
+        check(fx.loop.status().max_position_error_mm > 8.0, "左前偏差应超过阈值");
+        check((fx.loop.status().faults & kFaultActuatorStall) != 0,
+              "话题通路也应检出堵转");
+        step_with_position(fx, 0.4, stuck, kOffset);
+        check(fx.loop.status().state == ControlState::kDegraded,
+              "堵转持续应降级（与驱动轮询通路一致）");
+        std::printf("  话题上报左前=0（指令 20 mm）-> 偏差 %.1f mm，0.5 s 后降级\n",
+                    fx.loop.status().max_position_error_mm);
+    }
+
+    // ---- 24.2 话题过期 -> 退出判定，故障位跟着清 ----
+    // 这条最关键：上报链路断了不能让人以为"还在盯着实际位置"，
+    // 更不能因为最后一帧陈旧位置把堵转永久锁死
+    {
+        LoopFixture fx(true, false);
+        fx.advance(1.5, 0.0, 0.0, 0.0, kOffset);
+        const std::array<int, kWheelCount> stuck{0, 20, 20, 20};
+        step_with_position(fx, 0.4, stuck, kOffset);
+        check((fx.loop.status().faults & kFaultActuatorStall) != 0, "先确认堵转已置位");
+
+        // 之后不再喂位置（模拟桥接节点挂了），只推路面
+        fx.advance(0.5, 0.0, 0.0, 0.0, kOffset);
+        check(!fx.loop.status().has_position_feedback,
+              "超过 position_timeout_s 后应按无反馈处理");
+        check(fx.loop.status().position_age_ms < 0.0, "无有效位置时龄应为负");
+        check((fx.loop.status().faults & kFaultActuatorStall) == 0,
+              "无反馈时不应继续报堵转（否则丢一次包就永久降级）");
+        std::printf("  撤掉上报 0.5 s 后 -> has_position_feedback=false，堵转位已清除\n");
+    }
+
+    // ---- 24.3 新鲜话题优先于驱动轮询 ----
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.driver->follow_ratio_[0] = 0.0;   // 驱动轮询这条路会报左前=0
+        fx.advance(1.5, 0.0, 0.0, 0.0, kOffset);
+        check(!fx.loop.status().position_from_topic, "此前应走驱动轮询");
+        check((fx.loop.status().faults & kFaultActuatorStall) != 0,
+              "驱动轮询先报出堵转");
+
+        // 话题开始上报"正常跟随"的位置 -> 应切换数据源，堵转消失
+        const std::array<int, kWheelCount> good{20, 20, 20, 20};
+        step_with_position(fx, 0.2, good, kOffset);
+        check(fx.loop.status().position_from_topic, "话题新鲜时应优先于驱动轮询");
+        check((fx.loop.status().faults & kFaultActuatorStall) == 0,
+              "话题报告正常跟随时不应再报堵转");
+        std::printf("  驱动轮询报卡死、话题报正常 -> 切到话题，堵转位清除\n");
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -1897,6 +1990,7 @@ int main() {
     test_semantic_preview();
     test_actuator_position_feedback();
     test_preview_fir_feedforward();
+    test_position_feedback_topic();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

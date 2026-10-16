@@ -104,3 +104,7 @@ suspension_control_node:
     stall_error_mm: 8.0             # 指令与实际位置偏差超过该值视为"跟不上"
     stall_degrade_after_s: 0.5      # 堵转持续多久后降级；降级后不复原则由
                                     # degraded_hold_timeout_s 接手转 Emergency
+    # 位置来源可以是驱动轮询，也可以是外部桥接节点往话题上上报（两者互补，
+    # 话题新鲜时优先）。过期后按无反馈处理
+    position_timeout_s: 0.2         # 位置上报的最大有效期
+    actuator_position_topic: "/suspension/actuator_position"   # Int32MultiArray，四轮 mm

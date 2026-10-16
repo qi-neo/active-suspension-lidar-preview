@@ -107,21 +107,55 @@ void SuspensionControlLoop::submit_obstacles(std::vector<ObstacleAhead> obstacle
         obstacles_.end());
 }
 
-void SuspensionControlLoop::update_actuator_feedback() {
+void SuspensionControlLoop::submit_actuator_position(
+    std::array<int, kWheelCount> height_mm, double now_sec) {
+    for (int i = 0; i < kWheelCount; ++i) {
+        // 非有限值直接忽略：一个坏点进了堵转判据会让偏差长期不为零，
+        // 表现是无缘无故降级，且很难查到是位置上报的问题
+        if (!std::isfinite(static_cast<double>(height_mm[static_cast<std::size_t>(i)]))) {
+            return;
+        }
+    }
+    position_topic_mm_ = height_mm;
+    position_stamp_sec_ = now_sec;
+    has_position_topic_ = true;
+}
+
+void SuspensionControlLoop::update_actuator_feedback(double now_sec) {
     // 无反馈时全部归位：has_position_feedback 为假，上层整段跳过
     status_.has_position_feedback = false;
+    status_.position_from_topic = false;
     status_.max_position_error_mm = 0.0;
     status_.actual_mm.fill(0);
     status_.position_error_mm.fill(0.0);
     stalled_now_ = false;
 
-    if (!params_.enable_driver || !driver_) return;
-    if (!driver_->has_position_feedback()) return;
+    // 位置来源优先级：新鲜的话题 > 驱动轮询 > 无反馈。
+    // 话题优先，是因为发布者通常比这里的轮询更靠近硬件（串口可能在另一路节点上），
+    // 而且不占控制环的阻塞读预算
+    const bool topic_fresh =
+        has_position_topic_ &&
+        (now_sec - position_stamp_sec_) <= params_.position_timeout_s;
 
     std::array<int, suspension_preview_v2::kSuspensionWheelCount> actual{};
-    // 读失败按"本拍无反馈"处理，不据此判故障：一次通信丢包不该引起降级，
-    // 那与真的堵转是两回事
-    if (!driver_->get_position(actual)) return;
+    if (topic_fresh) {
+        actual = position_topic_mm_;
+        status_.position_age_ms =
+            std::max(0.0, (now_sec - position_stamp_sec_) * 1000.0);
+        status_.position_from_topic = true;
+    } else if (params_.enable_driver && driver_ &&
+               driver_->has_position_feedback()) {
+        // 读失败按"本拍无反馈"处理，不据此判故障：一次通信丢包不该引起降级，
+        // 那与真的堵转是两回事
+        if (!driver_->get_position(actual)) {
+            status_.position_age_ms = -1.0;
+            return;
+        }
+        status_.position_age_ms = 0.0;   // 同步轮询，龄为 0
+    } else {
+        status_.position_age_ms = -1.0;
+        return;
+    }
 
     status_.has_position_feedback = true;
     double max_err = 0.0;
@@ -228,7 +262,7 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     status_.mean_dispersion_mm = fuser_.last_mean_dispersion_mm();
 
     // 作动器位置反馈：有反馈才能判堵转，也才能让 sync_reference 用实际位置
-    update_actuator_feedback();
+    update_actuator_feedback(now_sec);
 
     SafetyInputs in;
     in.profile_valid = new_profile_valid_;
@@ -417,6 +451,17 @@ bool SuspensionControlLoop::request_reset() {
         speed_mps_ = 0.0;
         speed_stamp_sec_ = 0.0;
         status_.speed_mps = 0.0;
+        // 位置上报状态一并清掉：复位意味着"此前的历史与实际执行情况脱节了"，
+        // 陈旧位置会让第一拍就基于错误基准判堵转
+        has_position_topic_ = false;
+        position_topic_mm_.fill(0);
+        position_stamp_sec_ = 0.0;
+        status_.has_position_feedback = false;
+        status_.position_from_topic = false;
+        status_.position_age_ms = 0.0;
+        status_.max_position_error_mm = 0.0;
+        status_.actual_mm.fill(0);
+        status_.position_error_mm.fill(0.0);
         status_.lookahead_m = 0.0;
         status_.profile_age_ms = 0.0;
         status_.sample_position_m = 0.0;

@@ -41,6 +41,8 @@ bool    has_position_feedback
 int32[] actual_mm            # 四轮实际位置 (mm)
 float32[] position_error_mm  # 四轮 |指令 - 实际| (mm)
 float32 max_position_error_mm
+float32 position_age_ms     # 位置数据龄 (ms)，<0 表示本拍无有效位置
+bool    position_from_topic # true=来自外部话题上报，false=驱动轮询
 
 uint32 ticks
 uint32 profiles_accepted

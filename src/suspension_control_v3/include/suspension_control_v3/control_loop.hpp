@@ -48,6 +48,12 @@ struct ControlLoopParams {
     // 指令与实际位置的偏差超过该值即视为"跟不上"。阈值要大于正常情况下的
     // 跟随误差（含通信与伺服延迟），否则一次正常的快速动作就会被误判成堵转
     double stall_error_mm{8.0};
+    // ---- 位置反馈来源二：外部话题上报 ----
+    // 驱动轮询（ISuspensionDriver::get_position）适合"驱动自己能读到位置"的场合；
+    // 但作动器 MCU 常常由另一路节点/桥接在收发，那种情况下由它把位置发到话题上
+    // 更自然，也不需要在 200 Hz 控制环里做阻塞式串口读。
+    // 过期后按"无反馈"处理：既不能把陈旧位置当实际值，也不能因此报堵转
+    double position_timeout_s{0.2};
     // 车速数据的最大有效期。超过则视为无车速，前馈退回固定 lookahead_m——
     // 用陈旧车速算出的取样距离比不用车速更危险（距离错了但看起来很合理）
     double speed_timeout_s{0.5};
@@ -110,6 +116,10 @@ struct ControlLoopStatus {
     std::array<int, kWheelCount> actual_mm{0, 0, 0, 0};
     std::array<double, kWheelCount> position_error_mm{0.0, 0.0, 0.0, 0.0};
     double max_position_error_mm{0.0};
+    // 位置数据的龄 (ms)。远大于 position_timeout_s 说明上报链路断了——
+    // 此时堵转判定已自动退出，这个字段用来解释"为什么不判堵转了"
+    double position_age_ms{0.0};
+    bool position_from_topic{false};   // 本拍用的是话题还是驱动轮询
 
     // 零位标定结果：标定阶段静止时测得的姿态基准，控制器以它为"水平"
     std::size_t calibration_samples{0};
@@ -177,6 +187,12 @@ public:
     // 跨帧保留。传空列表表示"视野内无障碍"（不是"未订阅"）
     void submit_obstacles(std::vector<ObstacleAhead> obstacles);
 
+    // 提交作动器实际位置（来自外部话题，例如作动器 MCU 桥接节点发布）。
+    // 与驱动轮询互补：话题新鲜时优先用它。整包替换，非有限值被忽略——
+    // 一个坏点若进了堵转判据，会让偏差长期不为零而误降级
+    void submit_actuator_position(std::array<int, kWheelCount> height_mm,
+                                  double now_sec);
+
     void request_estop(const char* reason) override;
     void clear_estop() override;
     bool request_reset() override;
@@ -189,8 +205,9 @@ public:
 
 private:
     // 读取作动器实际位置并判定堵转。驱动不支持位置反馈时全部保持初值，
-    // 上层据此整段跳过——没有反馈就不能凭空判故障
-    void update_actuator_feedback();
+    // 上层据此整段跳过——没有反馈就不能凭空判故障。
+    // now_sec 用于判定话题位置是否过期
+    void update_actuator_feedback(double now_sec);
 
     // 速率限制基准：有位置反馈时用实际位置，否则用指令值（既有行为）。
     // 用指令值同步的问题在于：堵转/失步时基准与实际情况脱节，恢复闭环的
@@ -219,6 +236,12 @@ private:
     // 但对诊断是有区别的
     std::vector<ObstacleAhead> obstacles_;
     bool has_obstacles_{false};
+
+    // 位置反馈来源二：外部话题上报的四轮实际位置。与驱动轮询互补：
+    // 话题新鲜时优先用它（发布者通常比轮询更接近硬件），否则退回驱动轮询
+    bool has_position_topic_{false};
+    std::array<int, kWheelCount> position_topic_mm_{0, 0, 0, 0};
+    double position_stamp_sec_{0.0};
 
     // 本拍是否判定为堵转（有位置反馈且偏差超阈值）
     bool stalled_now_{false};
