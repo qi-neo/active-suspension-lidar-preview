@@ -44,6 +44,7 @@
 
 #include "suspension_control_v3/attitude_filter.hpp"
 #include "suspension_control_v3/control_loop.hpp"
+#include "suspension_control_v3/msg_convert.hpp"
 
 using namespace suspension_control_v3;
 using suspension_preview_v2::kFused;
@@ -2058,6 +2059,201 @@ void test_fir_combinations() {
     }
 }
 
+// ---------------------------------------------------------------- 26. 节点消息转换层
+//
+// 这些转换原先写在 ROS 节点的 .cpp 里，CI 碰不到、自检也覆盖不了，而它们恰是
+// 最容易出错的地方。现在抽成了不依赖 ROS 的 msg_convert.hpp，在这里覆盖。
+//
+// 四元数部分的关键：**不能拿同一个公式验自己**。这里用一条完全独立的路径求真值：
+// 已知 roll/pitch -> 半角公式构造四元数 -> 用 v' = q·v·q⁻¹ 旋转三个基向量得到
+// 旋转矩阵 -> 用 ZYX 标准欧拉角公式反解。整条路与被测的 atan2/asin 公式无关。
+namespace {
+
+// 用半角公式构造 (roll, pitch) 对应的四元数。与 msg_convert.hpp 里的公式无关
+struct Quat {
+    double x, y, z, w;
+};
+
+Quat quat_from_roll_pitch(double roll, double pitch) {
+    const double cr = std::cos(roll * 0.5), sr = std::sin(roll * 0.5);
+    const double cp = std::cos(pitch * 0.5), sp = std::sin(pitch * 0.5);
+    // q = qy(pitch) ⊗ qx(roll)
+    return Quat{sr * cp, cr * sp, -sr * sp, cr * cp};
+}
+
+// v' = q · v · q⁻¹，通用四元数旋转（独立实现，不复用被测代码）
+void rotate_by_quat(const Quat& q, double vx, double vy, double vz, double& ox,
+                    double& oy, double& oz) {
+    const double tx = 2.0 * (q.y * vz - q.z * vy);
+    const double ty = 2.0 * (q.z * vx - q.x * vz);
+    const double tz = 2.0 * (q.x * vy - q.y * vx);
+    ox = vx + q.w * tx + (q.y * tz - q.z * ty);
+    oy = vy + q.w * ty + (q.z * tx - q.x * tz);
+    oz = vz + q.w * tz + (q.x * ty - q.y * tx);
+}
+
+// 独立真值：转出旋转矩阵后用 ZYX 标准公式反解 roll / pitch
+void reference_roll_pitch(double roll_in, double pitch_in, double& roll_out,
+                          double& pitch_out) {
+    const Quat q = quat_from_roll_pitch(roll_in, pitch_in);
+    double r00, r01, r02, r10, r11, r12, r20, r21, r22;
+    rotate_by_quat(q, 1.0, 0.0, 0.0, r00, r10, r20);
+    rotate_by_quat(q, 0.0, 1.0, 0.0, r01, r11, r21);
+    rotate_by_quat(q, 0.0, 0.0, 1.0, r02, r12, r22);
+    (void)r01;
+    (void)r02;
+    (void)r11;
+    (void)r12;
+    (void)r20;
+    // ZYX（yaw-pitch-roll）标准解：pitch = asin(-R[2][0])，roll = atan2(R[2][1], R[2][2])
+    pitch_out = std::asin(std::max(-1.0, std::min(1.0, -r20)));
+    roll_out = std::atan2(r21, r22);
+}
+
+}  // namespace
+
+void test_msg_conversion() {
+    section("26. 节点消息转换层（四元数转姿态 / 剖面字段映射）");
+
+    // ---- 26.1 单位四元数 -> 全零 ----
+    {
+        double roll = 9.9, pitch = 9.9;
+        suspension_control_v3::quaternion_to_roll_pitch(0.0, 0.0, 0.0, 1.0, roll, pitch);
+        check(std::fabs(roll) < 1e-12 && std::fabs(pitch) < 1e-12,
+              "单位四元数应给出 roll=pitch=0");
+    }
+
+    // ---- 26.2 与独立真值逐点对照 ----
+    // 覆盖正负、大小、以及接近万向锁的组合
+    const double cases[][2] = {
+        {0.30, 0.00},   // 纯 roll
+        {-0.30, 0.00},  // 负 roll（验证没取绝对值）
+        {0.00, 0.20},   // 纯 pitch
+        {0.00, -0.20},  // 负 pitch
+        {0.25, 0.15},   // 组合
+        {-0.12, 0.33},  // 另一个组合
+        {0.05, 1.55},   // 接近万向锁（约 89°），well-defined 但极端
+    };
+    std::printf("  %-22s%-22s%s\n", "输入 (roll,pitch)", "被测函数", "独立真值");
+    for (const auto& c : cases) {
+        const double r = c[0], p = c[1];
+        const Quat q = quat_from_roll_pitch(r, p);
+        double roll = 0.0, pitch = 0.0;
+        suspension_control_v3::quaternion_to_roll_pitch(q.x, q.y, q.z, q.w, roll, pitch);
+        double roll_ref = 0.0, pitch_ref = 0.0;
+        reference_roll_pitch(r, p, roll_ref, pitch_ref);
+        check(std::fabs(roll - roll_ref) < 1e-9 && std::fabs(pitch - pitch_ref) < 1e-9,
+              "四元数转 roll/pitch 应与独立推导的真值一致");
+        std::printf("  (%+.3f,%+.3f)      (%+.6f,%+.6f)   (%+.6f,%+.6f)\n", r, p, roll,
+                    pitch, roll_ref, pitch_ref);
+    }
+
+    // ---- 26.3 非单位四元数：两个输出都不对，不是"某个更糟" ----
+    // 我最初的假设是"atan2 能自归一化、只有 pitch 会错"，被这条测试直接推翻：
+    // |q|=2 时 roll 从 0.3 变成 0.999，pitch 从 0.2 变成 0.918（变大不是变小）。
+    // 原因是放大 k 倍后两项都按 k^2 走，而分母里的常数 1 不缩放。
+    // 结论写进头文件注释：调用方必须自己保证单位四元数
+    {
+        const Quat q = quat_from_roll_pitch(0.3, 0.2);
+        const double k = 2.0;   // 故意放大一倍，模长为 2
+        double roll = 0.0, pitch = 0.0;
+        suspension_control_v3::quaternion_to_roll_pitch(q.x * k, q.y * k, q.z * k,
+                                                        q.w * k, roll, pitch);
+        double roll_ref = 0.0, pitch_ref = 0.0;
+        reference_roll_pitch(0.3, 0.2, roll_ref, pitch_ref);
+        check(std::fabs(roll - roll_ref) > 1e-3,
+              "非单位四元数下 roll 也不对——不能假设 atan2 自归一化");
+        check(std::fabs(pitch - pitch_ref) > 1e-3, "非单位四元数下 pitch 同样不对");
+        check(std::isfinite(roll) && std::isfinite(pitch),
+              "但至少仍应给出有限值（asin 有钳位）");
+        std::printf("  非单位四元数(模长2)：真值(%.3f,%.3f) -> 实得(%.3f,%.3f)，"
+                    "两个都错\n", roll_ref, pitch_ref, roll, pitch);
+    }
+
+    // ---- 26.4 极端输入不产出 NaN ----
+    {
+        double roll = 0.0, pitch = 0.0;
+        suspension_control_v3::quaternion_to_roll_pitch(1e16, 1e16, 1e16, 1.0, roll,
+                                                        pitch);
+        check(std::isfinite(roll) && std::isfinite(pitch),
+              "极端四元数也应给出有限值（asin 钳位起作用）");
+    }
+
+    // ---- 26.5 剖面字段映射：正常等长 ----
+    {
+        const std::vector<float> lh{0.01f, 0.02f, 0.03f};
+        const std::vector<uint8_t> lv{1, 0, 1};
+        const std::vector<float> rh{0.04f, 0.05f, 0.06f};
+        const std::vector<uint8_t> rv{1, 1, 2};
+        suspension_preview_v2::RoadProfileFrame f;
+        const bool ok = suspension_control_v3::road_profile_from_fields(
+            12.5, "base_link", 0.05, 0.6, 0.15, lh, lv, rh, rv, f);
+        check(ok, "等长输入应转换成功");
+        check(f.left.size() == 3 && f.right.size() == 3, "格子数应为 3");
+        check(f.left.height[1] == 0.02f && f.right.height[2] == 0.06f, "高度应原样搬过去");
+        check(f.left.valid[1] == 0 && f.right.valid[2] == 2, "有效性掩码应原样搬过去");
+        check(f.spacing == 0.05f && f.wheel_dist == 0.6f && f.preview_dist == 0.15f,
+              "几何参数应原样搬过去");
+        check(f.stamp_sec == 12.5 && f.frame_id == "base_link", "时间戳与 frame_id 应搬对");
+    }
+
+    // ---- 26.6 左右不等长 -> 按短边截断 ----
+    {
+        const std::vector<float> lh{0.01f, 0.02f, 0.03f, 0.04f};
+        const std::vector<uint8_t> lv{1, 1, 1, 1};
+        const std::vector<float> rh{0.05f, 0.06f};
+        const std::vector<uint8_t> rv{1, 1, 1, 1};
+        suspension_preview_v2::RoadProfileFrame f;
+        const bool ok = suspension_control_v3::road_profile_from_fields(
+            0.0, "", 0.05, 0.6, 0.1, lh, lv, rh, rv, f);
+        check(ok, "一侧较短时应截断而非失败");
+        check(f.left.size() == 2 && f.right.size() == 2, "应截到较短一侧的 2 格");
+        check(f.left.height[0] == 0.01f && f.right.height[1] == 0.06f,
+              "截断后前 2 格内容仍应对");
+        std::printf("  左右 4/2 格 -> 截断为 %zu 格\n", f.left.size());
+    }
+
+    // ---- 26.7 有效性数组比高度短 -> 整帧丢弃 ----
+    // 高度与掩码对不上意味着发布方有 bug，截救不回来
+    {
+        const std::vector<float> lh{0.01f, 0.02f, 0.03f};
+        const std::vector<uint8_t> lv{1, 1};            // 长度 2 < 3
+        const std::vector<float> rh{0.05f, 0.06f, 0.07f};
+        const std::vector<uint8_t> rv{1, 1, 1};
+        suspension_preview_v2::RoadProfileFrame f;
+        const bool ok = suspension_control_v3::road_profile_from_fields(
+            0.0, "", 0.05, 0.6, 0.15, lh, lv, rh, rv, f);
+        check(!ok, "有效性数组比高度数组短时应返回 false（整帧丢弃）");
+    }
+
+    // ---- 26.8 全空数组：返回 true 但 0 格（由后续校验去拒）----
+    // 这里断言的是真实行为：转换层不判断"空剖面是否合法"，那是 validator 的职责
+    {
+        suspension_preview_v2::RoadProfileFrame f;
+        const bool ok = suspension_control_v3::road_profile_from_fields(
+            0.0, "", 0.05, 0.6, 0.0, {}, {}, {}, {}, f);
+        check(ok && f.left.empty(), "全空数组应转换成功且 0 格（合法性交给校验层）");
+    }
+
+    // ---- 26.9 NaN 高度原样搬过去，不在转换层净化 ----
+    // 净化是 validator 的职责；转换层若擅自把 NaN 改成 0，会把"这一格没数据"
+    // 伪装成"这一格高程是 0"，比留着 NaN 危险得多
+    {
+        const float nan_v = std::numeric_limits<float>::quiet_NaN();
+        const std::vector<float> lh{nan_v, 0.02f};
+        const std::vector<uint8_t> lv{0, 1};
+        const std::vector<float> rh{0.05f, nan_v};
+        const std::vector<uint8_t> rv{1, 0};
+        suspension_preview_v2::RoadProfileFrame f;
+        const bool ok = suspension_control_v3::road_profile_from_fields(
+            0.0, "", 0.05, 0.6, 0.1, lh, lv, rh, rv, f);
+        check(ok, "含 NaN 的输入也应转换成功");
+        check(std::isnan(f.left.height[0]) && std::isnan(f.right.height[1]),
+              "NaN 应原样保留（净化是校验层的职责）");
+        check(f.left.valid[0] == 0 && f.right.valid[1] == 0, "对应掩码也应搬对");
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -2129,6 +2325,7 @@ int main() {
     test_preview_fir_feedforward();
     test_position_feedback_topic();
     test_fir_combinations();
+    test_msg_conversion();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

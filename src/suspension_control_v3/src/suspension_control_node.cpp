@@ -25,20 +25,13 @@
 #include <vector>
 
 #include "suspension_control_v3/control_loop.hpp"
+#include "suspension_control_v3/msg_convert.hpp"
 
 namespace {
 
 constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
 
 // 由四元数解出横滚与俯仰（车体 x 前、y 左、z 上）
-void quaternion_to_rp(const sensor_msgs::msg::Imu& imu, double& roll, double& pitch) {
-    const auto& q = imu.orientation;
-    const double x = q.x, y = q.y, z = q.z, w = q.w;
-    roll = std::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
-    const double sp = 2.0 * (w * y - z * x);
-    pitch = std::asin(std::max(-1.0, std::min(1.0, sp)));
-}
-
 }  // namespace
 
 class SuspensionControlNode : public rclcpp::Node {
@@ -376,26 +369,17 @@ private:
 
     void on_profile(const suspension_preview_v2::msg::RoadProfile::SharedPtr msg) {
         suspension_preview_v2::RoadProfileFrame frame;
-        frame.stamp_sec = static_cast<double>(msg->header.stamp.sec) +
-                          static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
-        frame.frame_id = msg->header.frame_id;
-        frame.spacing = msg->spacing;
-        frame.wheel_dist = msg->wheel_dist;
-        frame.preview_dist = msg->preview_dist;
-
-        const std::size_t n = std::min(msg->left_height.size(), msg->right_height.size());
-        if (msg->left_valid.size() < n || msg->right_valid.size() < n) {
+        const bool ok = suspension_control_v3::road_profile_from_fields(
+            static_cast<double>(msg->header.stamp.sec) +
+                static_cast<double>(msg->header.stamp.nanosec) * 1e-9,
+            msg->header.frame_id, msg->spacing, msg->wheel_dist, msg->preview_dist,
+            msg->left_height, msg->left_valid, msg->right_height, msg->right_valid,
+            frame);
+        if (!ok) {
+            // 高度与有效性数组长度对不上：发布方有 bug，截救不回来
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                                  "剖面消息字段长度不一致，丢弃");
             return;
-        }
-        frame.left.reset(n);
-        frame.right.reset(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            frame.left.height[i] = msg->left_height[i];
-            frame.left.valid[i] = msg->left_valid[i];
-            frame.right.height[i] = msg->right_height[i];
-            frame.right.valid[i] = msg->right_valid[i];
         }
 
         const auto r = loop_->submit_profile(frame, now().seconds());
@@ -410,7 +394,9 @@ private:
         a.valid = true;
         a.stamp_sec = static_cast<double>(msg->header.stamp.sec) +
                       static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
-        quaternion_to_rp(*msg, a.roll_rad, a.pitch_rad);
+        const auto& q = msg->orientation;
+        suspension_control_v3::quaternion_to_roll_pitch(
+            q.x, q.y, q.z, q.w, a.roll_rad, a.pitch_rad);
         a.roll_rate = msg->angular_velocity.x;
         a.pitch_rate = msg->angular_velocity.y;
         loop_->submit_attitude(a, now().seconds());

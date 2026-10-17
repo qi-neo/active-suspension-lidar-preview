@@ -23,6 +23,11 @@ v2 解决了"路面数据算得准、发得稳"，但链路是开环的：算出
 | `IController` | 控制律 | `PreviewFeedbackController`（PD）、`IncrementalLqiController`（LQI），按 `controller_kind` 选 |
 | `IControlLoop` | 把上面三者与作动器驱动串成一条链 | `SuspensionControlLoop` |
 
+另有 `msg_convert.hpp`：把 ROS 消息字段转成内部结构的纯函数（四元数转 roll/pitch、
+剖面字段映射）。原先这些写在节点的 `.cpp` 里，CI 碰不到；抽成不依赖 ROS 的头文件后
+由自检第 26 组覆盖——四元数那部分还对的是**独立推导的真值**（半角公式构造四元数 →
+`v' = q·v·q⁻¹` 转基向量 → ZYX 标准欧拉角反解），不是拿同一个公式验自己。
+
 控制核心（`suspension_control_core`）**不依赖 ROS、不依赖 PCL**，可以脱离整车单独编译与自检。
 
 ## 三、输入校验：坏数据怎么被拒
@@ -301,7 +306,7 @@ colcon build --packages-select suspension_control_v3
 source install/setup.bash
 ```
 
-**离线自检不需要 ROS、不需要硬件**，覆盖 25 个场景共 234 项检查：正常启动流程、九种坏数据拒绝、
+**离线自检不需要 ROS、不需要硬件**，覆盖 26 个场景共 260 项检查：正常启动流程、九种坏数据拒绝、
 过期降级与恢复、姿态超限、急停锁存与复位、控制器数值、闭环下发去重、驱动缺失、零位标定、
 姿态低通、速率限制基准同步、降级保持时限、单拍时长封顶、急停与回中下发、增量式 LQI、
 车速自适应预瞄（钳位 / 无车速回退 / 状态上报与过期）、前后轴差异化与插值回退、
@@ -315,7 +320,9 @@ source install/setup.bash
 远端缺格回退 / 窗口位置 / 权重为空退回单点）、
 位置反馈外部话题通路（能检堵转 / 过期退出判定且故障位清除 / 新鲜话题优先于驱动轮询）、
 FIR 与既有特性的组合（默认权重直流增益不变式 / 跨侧回退 / 语义预瞄按 FIR 真实覆盖定范围 /
-诊断字段如实反映前馈模式）。
+诊断字段如实反映前馈模式）、
+节点消息转换层（四元数转 roll/pitch 对独立推导真值、含万向锁/负角/非单位四元数；
+剖面字段映射的截断 / 掩码过短丢弃 / NaN 原样保留）。
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
