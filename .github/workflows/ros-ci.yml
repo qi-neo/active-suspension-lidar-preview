@@ -74,7 +74,7 @@ jobs:
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（89 项）
+      - name: v3 控制与安全逻辑自检（234 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
@@ -88,9 +88,85 @@ jobs:
           . install/setup.sh
           ros2 run unilidar_driver decoder_selftest
 
+      # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
+      # install(TARGETS) 里装了可执行，却没有任何步骤调用它
+      - name: v2 纯函数自检（69 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          for t in trend_selftest obstacle_selftest protocol_selftest; do
+            echo "--- $t ---"
+            ros2 run suspension_preview_v2 "$t"
+          done
+
       - name: v2 点云解析链路离线示例
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run suspension_preview_v2 offline_demo || true
+
+  # 内存与未定义行为检查。与 build 分开而不是加一个 step：插桩要改编译 flag，
+  # 与上面的常规构建产物混在一起会互相污染。
+  #
+  # 只编"不依赖 ROS 与 PCL"的四个离线自检，直接用 g++ 而不走 colcon：
+  #   - 这些自检才是真正跑控制逻辑与解析逻辑的地方，bug 只可能在这里
+  #   - 不拉 PCL，整个 job 十几秒就跑完，不占额度
+  # 已经抓到过东西：用 999 当"无凸起"哨兵去索引 100 格数组，堆溢出，
+  # 而当时 234 项断言是全过的——断言验的是"值对不对"，验不出"写没写错地方"
+  sanitize:
+    name: ASan + UBSan（离线自检）
+    runs-on: ubuntu-latest
+    container:
+      # 直接写死而不是用 ${{ matrix.* }}：本 job 没有 strategy.matrix，
+      # 引用它会展开成 ros:-ros-base 这种空镜像名，整个 job 起不来
+      image: ros:humble-ros-base
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          path: src/active-suspension-lidar-preview
+
+      - name: 安装编译器
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends g++
+
+      - name: v3 控制与安全逻辑（ASan + UBSan）
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -I src/suspension_control_v3/include -I src/suspension_preview_v2/include \
+            src/suspension_control_v3/examples/control_selftest.cpp \
+            src/suspension_control_v3/src/input_validator.cpp \
+            src/suspension_control_v3/src/controller.cpp \
+            src/suspension_control_v3/src/attitude_filter.cpp \
+            src/suspension_control_v3/src/safety_state_machine.cpp \
+            src/suspension_control_v3/src/control_loop.cpp \
+            src/suspension_control_v3/src/temporal_fuser.cpp \
+            -o /tmp/asan_control
+          /tmp/asan_control
+
+      # v2 三个纯函数自检同样过一遍。它们与 PCL 无关，只需 v2 的 include 目录
+      - name: v2 纯函数自检（ASan + UBSan）
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          for pair in \
+            "trend_selftest:road_trend.cpp" \
+            "obstacle_selftest:obstacle_detect.cpp" \
+            "protocol_selftest:protocol.cpp"; do
+            name="${pair%%:*}"
+            src="${pair##*:}"
+            echo "--- $name ---"
+            g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
+              -fno-omit-frame-pointer -I src/suspension_preview_v2/include \
+              "src/suspension_preview_v2/examples/${name}.cpp" \
+              "src/suspension_preview_v2/src/${src}" \
+              -o "/tmp/asan_${name}"
+            "/tmp/asan_${name}"
+          done

@@ -322,6 +322,22 @@ ros2 run suspension_control_v3 control_selftest
 # 或直接执行 lib/suspension_control_v3/control_selftest
 ```
 
+**带 ASan / UBSan 再跑一遍**（强烈建议每次提交前做，CI 的 `sanitize` job 也在做）：
+
+```bash
+g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -I src/suspension_control_v3/include -I src/suspension_preview_v2/include \
+  src/suspension_control_v3/examples/control_selftest.cpp \
+  src/suspension_control_v3/src/{input_validator,controller,attitude_filter,\
+safety_state_machine,control_loop,temporal_fuser}.cpp \
+  -o /tmp/asan_control && /tmp/asan_control
+```
+
+它和上面那条断言自检**不是一回事**：断言验的是"算出来的值对不对"，sanitizer 验的是
+"有没有碰不该碰的内存、有没有踩未定义行为"。本项目已经靠它抓到东西——测试里用 999 当
+"无凸起"哨兵去索引一个 100 格的数组，堆越界写，而当时 234 项断言是全过的。代价是
+内存约 3 倍、速度约 2 倍慢，所以只用于自检，不用于上车站。
+
 输出形如：
 
 ```

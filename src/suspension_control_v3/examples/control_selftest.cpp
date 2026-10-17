@@ -1654,8 +1654,13 @@ void test_preview_fir_feedforward() {
             f.left.valid[i] = kMeasured;
             f.right.valid[i] = kMeasured;
         }
-        f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
-        f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
+        // bump_cell 超出范围表示"这一帧不放凸起"。必须判，不能直接写——
+        // 早先用 999 当"无凸起"的哨兵，ASan 报的就是这里堆溢出：
+        // 100 格的数组写了第 999 格，而 234 项断言当时是全过的
+        if (bump_cell < kCells) {
+            f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
+            f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
+        }
         return f;
     };
     // 只保留前 n 格有效，其余判无效（模拟远端没数据）
@@ -1947,8 +1952,12 @@ void test_fir_combinations() {
             f.left.valid[i] = kMeasured;
             f.right.valid[i] = kMeasured;
         }
-        f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
-        f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
+        // 与场景 23 同一份边界保护：bump_cell 越界表示"不放凸起"，
+        // 直接写就是堆溢出（这份是复制过来的，上次只修了场景 23 那份）
+        if (bump_cell < kCells) {
+            f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
+            f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
+        }
         return f;
     };
 
