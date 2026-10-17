@@ -46,6 +46,13 @@
 #include "suspension_control_v3/control_loop.hpp"
 #include "suspension_control_v3/msg_convert.hpp"
 
+// 让 FIR 的"时间步长折算成距离"恰好等于剖面格距的车速：
+//   v × control_period_s = spacing  =>  v = 0.05 / 0.005 = 10 m/s
+// 场景 23/25 要验的是**权重怎么用**（归一化、分摊、回退），不是车速标定，
+// 所以取这个速度让第 j 拍正好落在第 j 格，断言可以精确到格。
+// 真实车速下窗口会按比例缩放——那才是场景 27 要验的东西。
+constexpr double kFirAlignSpeed = 0.05 / 0.005;
+
 using namespace suspension_control_v3;
 using suspension_preview_v2::kFused;
 using suspension_preview_v2::kInvalid;
@@ -89,6 +96,35 @@ RoadProfileFrame make_frame(double stamp, double amp = 0.0, double offset = 0.0)
         f.right.height[i] = static_cast<float>(h);
         f.left.valid[i] = kMeasured;
         f.right.valid[i] = kMeasured;
+    }
+    return f;
+}
+
+// 测试用路面：100 格、格距 5 cm、全格 base；bump_cell 越界即"不放凸起"。
+//
+// 单独抽出来是因为同一个 lambda 曾被复制成三份，其中两份都用 999 当"无凸起"
+// 哨兵却直接拿去索引 100 格数组——ASan 抓到两次堆溢出。复制粘贴的 lambda 会
+// 连 bug 一起复制，所以把边界检查放进这一份 helper 才是根治。
+RoadProfileFrame make_test_road(std::size_t bump_cell, double bump,
+                                double base = 0.02) {
+    RoadProfileFrame f;
+    f.stamp_sec = 100.0;
+    f.frame_id = "base_link";
+    f.spacing = 0.05f;
+    f.wheel_dist = 0.6f;
+    f.preview_dist = 5.0f;
+    constexpr std::size_t kCells = 100;
+    f.left.reset(kCells);
+    f.right.reset(kCells);
+    for (std::size_t k = 0; k < kCells; ++k) {
+        f.left.height[k] = static_cast<float>(base);
+        f.right.height[k] = static_cast<float>(base);
+        f.left.valid[k] = kMeasured;
+        f.right.valid[k] = kMeasured;
+    }
+    if (bump_cell < kCells) {
+        f.left.height[bump_cell] = static_cast<float>(base + bump);
+        f.right.height[bump_cell] = static_cast<float>(base + bump);
     }
     return f;
 }
@@ -1637,33 +1673,7 @@ void test_actuator_position_feedback() {
 void test_preview_fir_feedforward() {
     section("23. 预瞄前馈 FIR");
 
-    constexpr double kSpacing = 0.05;
-    // 造一条可逐格控制的路面：全格 base，再把指定格抬高 bump
-    auto make_road_frame = [](std::size_t bump_cell, double bump) {
-        RoadProfileFrame f;
-        f.stamp_sec = 100.0;
-        f.frame_id = "base_link";
-        f.spacing = static_cast<float>(kSpacing);
-        f.wheel_dist = 0.6f;
-        f.preview_dist = 5.0f;
-        constexpr std::size_t kCells = 100;
-        f.left.reset(kCells);
-        f.right.reset(kCells);
-        for (std::size_t i = 0; i < kCells; ++i) {
-            f.left.height[i] = 0.02f;
-            f.right.height[i] = 0.02f;
-            f.left.valid[i] = kMeasured;
-            f.right.valid[i] = kMeasured;
-        }
-        // bump_cell 超出范围表示"这一帧不放凸起"。必须判，不能直接写——
-        // 早先用 999 当"无凸起"的哨兵，ASan 报的就是这里堆溢出：
-        // 100 格的数组写了第 999 格，而 234 项断言当时是全过的
-        if (bump_cell < kCells) {
-            f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
-            f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
-        }
-        return f;
-    };
+    // 路面由 make_test_road 统一构造（见其注释：重复 lambda 会连 bug 一起复制）
     // 只保留前 n 格有效，其余判无效（模拟远端没数据）
     auto keep_only = [](RoadProfileFrame& f, std::size_t n) {
         for (std::size_t i = n; i < f.left.size(); ++i) {
@@ -1679,12 +1689,14 @@ void test_preview_fir_feedforward() {
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         return ctrl.compute(in, 0.005).feedforward_mm;
     };
 
     // ---- 23.1 关闭时与接入前完全一致（回归护栏）----
     {
-        const auto ff = ff_of(make_road_frame(999, 0.0));   // 999 越界即无凸起
+        const auto ff = ff_of(make_test_road(999, 0.0));   // 999 越界即无凸起
         check(std::fabs(ff[kFrontLeft] - 20.0) < 0.5,
               "FIR 关闭时均匀 20 mm 路面应给出 +20 mm（与接入前一致）");
         std::printf("  FIR 关闭：均匀路面 -> 左前 %.1f mm（基线）\n", ff[kFrontLeft]);
@@ -1698,9 +1710,11 @@ void test_preview_fir_feedforward() {
         PreviewFeedbackController c2(q);
         c2.reset();
         ControlInput in;
-        const RoadProfileFrame f = make_road_frame(999, 0.0);
+        const RoadProfileFrame f = make_test_road(999, 0.0);
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         const auto ff = c2.compute(in, 0.005).feedforward_mm;
         check(std::fabs(ff[kFrontLeft] - 20.0) < 0.5,
               "FIR 开启但路面均匀时仍应为 +20 mm（直流增益守恒）");
@@ -1717,15 +1731,20 @@ void test_preview_fir_feedforward() {
         PreviewFeedbackController c2(q);
         c2.reset();
         ControlInput in;
-        const RoadProfileFrame f = make_road_frame(5, 0.10);
+        const RoadProfileFrame f = make_test_road(5, 0.10);
         in.profile = &f;
-        in.lookahead_m = 0.25;   // 单点路径会正好落在第 5 格
+        in.lookahead_m = 0.25;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;   // 单点路径会正好落在第 5 格
         const auto ff_fir = c2.compute(in, 0.005).feedforward_mm;
 
-        PreviewFeedbackController c3(p);   // 单点路径
+        PreviewFeedbackController c3(p);   // 单点路径（对照基准）
         c3.reset();
         ControlInput in2;
         in2.profile = &f;
+        // 这里**故意不给车速**：单点路径在有车速时会走"车速自适应 lookahead"，
+        // 取样点就不再是 0.25 m 了。这条对照要的就是"无车速 + 固定 lookahead"
+        // 的既有行为，才能和 FIR 在同一取样位置上比
         in2.lookahead_m = 0.25;
         const auto ff_pt = c3.compute(in2, 0.005).feedforward_mm;
 
@@ -1748,12 +1767,14 @@ void test_preview_fir_feedforward() {
         for (std::size_t j = 6; j < q.preview_gains.size(); ++j) {
             q.preview_gains[j] = 0.0;
         }
-        RoadProfileFrame f = make_road_frame(2, 0.10);
+        RoadProfileFrame f = make_test_road(2, 0.10);
         PreviewFeedbackController c2(q);
         c2.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         const auto ff = c2.compute(in, 0.005).feedforward_mm;
 
         double wsum = 0.0;
@@ -1772,13 +1793,15 @@ void test_preview_fir_feedforward() {
     {
         ControlParams q = p;
         q.use_preview_fir = true;
-        RoadProfileFrame f = make_road_frame(2, 0.10);
+        RoadProfileFrame f = make_test_road(2, 0.10);
         keep_only(f, 6);
         PreviewFeedbackController c2(q);
         c2.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         const auto ff = c2.compute(in, 0.005).feedforward_mm;
         // 凸起只在前 6 格内贡献一次，其余拍都是 0.02
         const double expect = 1000.0 * (0.02 + q.preview_gains[2] * 0.10);
@@ -1793,23 +1816,27 @@ void test_preview_fir_feedforward() {
         ControlParams q = p;
         q.use_preview_fir = true;
         q.preview_start_m = 0.25;   // 窗口从第 5 格开始
-        RoadProfileFrame f = make_road_frame(5, 0.10);   // 凸起正好在窗口第一拍
+        RoadProfileFrame f = make_test_road(5, 0.10);   // 凸起正好在窗口第一拍
         PreviewFeedbackController c2(q);
         c2.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         const auto ff = c2.compute(in, 0.005).feedforward_mm;
         const double expect = 1000.0 * (0.02 + q.preview_gains[0] * 0.10);
         check(std::fabs(ff[kFrontLeft] - expect) < 0.05,
               "preview_start_m 应把 FIR 窗口平移到指定距离");
 
         // 窗口之前的凸起完全看不到
-        RoadProfileFrame f2 = make_road_frame(3, 0.10);
+        RoadProfileFrame f2 = make_test_road(3, 0.10);
         c2.reset();
         ControlInput in2;
         in2.profile = &f2;
         in2.lookahead_m = 1.0;
+        in2.has_speed = true;
+        in2.speed_mps = kFirAlignSpeed;
         const auto ff2 = c2.compute(in2, 0.005).feedforward_mm;
         check(std::fabs(ff2[kFrontLeft] - 20.0) < 0.5,
               "FIR 窗口之前的凸起不应被看到");
@@ -1822,12 +1849,14 @@ void test_preview_fir_feedforward() {
         ControlParams q = p;
         q.use_preview_fir = true;
         q.preview_gains.clear();
-        const RoadProfileFrame f = make_road_frame(999, 0.0);
+        const RoadProfileFrame f = make_test_road(999, 0.0);
         PreviewFeedbackController c2(q);
         c2.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         const auto ff = c2.compute(in, 0.005).feedforward_mm;
         check(std::fabs(ff[kFrontLeft] - 20.0) < 0.5,
               "权重为空时应退回单点取样，不能给出 0 或 NaN");
@@ -1937,30 +1966,6 @@ void test_fir_combinations() {
     section("25. FIR 与既有特性的组合");
 
     constexpr double kSpacing = 0.05;
-    auto make_road_frame = [](std::size_t bump_cell, double bump) {
-        RoadProfileFrame f;
-        f.stamp_sec = 100.0;
-        f.frame_id = "base_link";
-        f.spacing = static_cast<float>(kSpacing);
-        f.wheel_dist = 0.6f;
-        f.preview_dist = 5.0f;
-        constexpr std::size_t kCells = 100;
-        f.left.reset(kCells);
-        f.right.reset(kCells);
-        for (std::size_t i = 0; i < kCells; ++i) {
-            f.left.height[i] = 0.02f;
-            f.right.height[i] = 0.02f;
-            f.left.valid[i] = kMeasured;
-            f.right.valid[i] = kMeasured;
-        }
-        // 与场景 23 同一份边界保护：bump_cell 越界表示"不放凸起"，
-        // 直接写就是堆溢出（这份是复制过来的，上次只修了场景 23 那份）
-        if (bump_cell < kCells) {
-            f.left.height[bump_cell] = static_cast<float>(0.02 + bump);
-            f.right.height[bump_cell] = static_cast<float>(0.02 + bump);
-        }
-        return f;
-    };
 
     ControlParams base;
     base.use_preview_fir = true;
@@ -1984,12 +1989,14 @@ void test_fir_combinations() {
 
     // ---- 25.2 FIR + 跨侧回退：一侧整条无效时借用对侧 ----
     {
-        RoadProfileFrame f = make_road_frame(999, 0.0);
+        RoadProfileFrame f = make_test_road(999, 0.0);
         for (std::size_t i = 0; i < f.left.size(); ++i) f.left.valid[i] = kInvalid;
         ctrl.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         const ControlOutput out = ctrl.compute(in, 0.005);
         check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
               "左迹全无效时 FIR 路径也应借用右迹高程");
@@ -2004,12 +2011,14 @@ void test_fir_combinations() {
     {
         const double reach = 10 * kSpacing;   // 0.5 m
         // 范围内（0.3 m）的左迹障碍 -> 抑制左侧
-        RoadProfileFrame f = make_road_frame(999, 0.0);
+        RoadProfileFrame f = make_test_road(999, 0.0);
         std::vector<ObstacleAhead> near_obs{{0.3, -0.3, 0.30}};
         ctrl.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         in.obstacles = &near_obs;
         in.has_obstacles = true;
         const ControlOutput o1 = ctrl.compute(in, 0.005);
@@ -2024,6 +2033,8 @@ void test_fir_combinations() {
         ControlInput in2;
         in2.profile = &f;
         in2.lookahead_m = 1.0;
+        in2.has_speed = true;
+        in2.speed_mps = kFirAlignSpeed;
         in2.obstacles = &far_obs;
         in2.has_obstacles = true;
         const ControlOutput o2 = ctrl.compute(in2, 0.005);
@@ -2035,11 +2046,13 @@ void test_fir_combinations() {
 
     // ---- 25.4 诊断字段如实反映用的是哪种前馈 ----
     {
-        const RoadProfileFrame f = make_road_frame(999, 0.0);
+        const RoadProfileFrame f = make_test_road(999, 0.0);
         ctrl.reset();
         ControlInput in;
         in.profile = &f;
         in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = kFirAlignSpeed;
         check(ctrl.compute(in, 0.005).feedforward_fir, "开 FIR 时应上报 feedforward_fir=true");
 
         ControlParams off;
@@ -2254,6 +2267,143 @@ void test_msg_conversion() {
     }
 }
 
+// ---------------------------------------------------------------- 27. FIR 的时间域语义
+//
+// 修正的核心：权重是按**控制周期**推导的（第 j 拍 = j 个周期之后），落地到
+// 空间域的剖面时必须按 车速×周期 换算距离。早期版本直接把"第 j 拍"当成
+// "第 j 格"，等于把时间窗钉成了固定 0.55 m 空间窗——车速越低提前量越大，
+// 0.5 m/s 时有效提前 0.43 s，是最优值 0.026 s 的 16 倍，反而比不提前更差。
+// 这一组盯的就是"提前量随车速不变"这个性质。
+void test_fir_time_domain() {
+    section("27. FIR 的时间域语义（提前量与车速无关）");
+
+    constexpr double kSpacing = 0.05;
+    // 线性斜坡路面：h(x) = slope·x。对线性函数做加权平均，结果恰好等于
+    // 重心处的取值——于是输出可以直接解析预测，不用靠数值试凑
+    constexpr double kSlope = 0.1;   // m 高程 / m 距离
+    auto make_ramp = [](int cells) {
+        RoadProfileFrame f;
+        f.stamp_sec = 100.0;
+        f.frame_id = "base_link";
+        f.spacing = static_cast<float>(kSpacing);
+        f.wheel_dist = 0.6f;
+        f.preview_dist = 5.0f;
+        f.left.reset(cells);
+        f.right.reset(cells);
+        for (int i = 0; i < cells; ++i) {
+            const float h = static_cast<float>(kSlope * i * kSpacing);
+            f.left.height[i] = h;
+            f.right.height[i] = h;
+            f.left.valid[i] = kMeasured;
+            f.right.valid[i] = kMeasured;
+        }
+        return f;
+    };
+    // 均匀 0.02，再把某一格抬高
+
+    ControlParams p;
+    p.use_preview_fir = true;
+    // 27.4 要验"极低速下语义预瞄不失效"，这里必须一并打开。
+    // 这个开关我在场景 25 已经漏过一次——凡是测试里断言"某特性生效"，
+    // 先回头确认对应开关真的开了，别默认它开着
+    p.use_semantic_preview = true;
+    // 权重重心（以拍为单位），由参数本身算出，改权重也不用改测试
+    double wsum = 0.0, csum = 0.0;
+    for (std::size_t j = 0; j < p.preview_gains.size(); ++j) {
+        wsum += p.preview_gains[j];
+        csum += static_cast<double>(j) * p.preview_gains[j];
+    }
+    const double centroid = csum / wsum;
+
+    auto ff_at = [&](const RoadProfileFrame& f, double speed, bool has_speed = true) {
+        PreviewFeedbackController c(p);
+        c.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        in.has_speed = has_speed;
+        in.speed_mps = speed;
+        return c.compute(in, 0.005);
+    };
+
+    // ---- 27.1 斜坡路面：输出应与车速成正比，故提前时间恒定 ----
+    // 解析：ff = 1000 · slope · centroid · (v·Ts)；除以 v 应得常数
+    {
+        const RoadProfileFrame f = make_ramp(100);
+        std::printf("  %-10s%-14s%-16s%s\n", "车速", "输出(mm)", "解析预测(mm)", "提前时间(ms)");
+        double lead_ms_ref = -1.0;
+        for (double v : {0.5, 1.0, 2.0, 10.0}) {
+            const double expect = 1000.0 * kSlope * centroid * (v * p.control_period_s);
+            const ControlOutput out = ff_at(f, v);
+            check(std::fabs(out.feedforward_mm[kFrontLeft] - expect) < 0.05,
+                  "斜坡路面上 FIR 输出应等于 解析式 1000·slope·重心·(v·Ts)");
+            check(out.feedforward_fir, "有车速时应真的走 FIR");
+            // 有效提前时间 = 重心距离 / 车速 = 重心拍数 × 控制周期，与车速无关
+            const double lead_ms = centroid * p.control_period_s * 1000.0;
+            if (lead_ms_ref < 0.0) {
+                lead_ms_ref = lead_ms;
+            } else {
+                check(std::fabs(lead_ms - lead_ms_ref) < 1e-9,
+                      "有效提前时间必须与车速无关（这正是时间域换算的意义）");
+            }
+            std::printf("  %-10.1f%-14.2f%-16.2f%.1f\n", v,
+                        out.feedforward_mm[kFrontLeft], expect, lead_ms);
+        }
+        std::printf("  -> 提前时间恒为 %.1f ms（= 重心 %.2f 拍 × 周期 %.1f ms）\n",
+                    lead_ms_ref, centroid, p.control_period_s * 1000.0);
+    }
+
+    // ---- 27.2 同一凸起：低速时窗口够不到，高速时才进窗 ----
+    // 0.25 m 处抬 100 mm。1 m/s 时窗口只覆盖 11×0.005 = 0.055 m，看不见；
+    // 10 m/s 时窗口覆盖 11×0.05 = 0.55 m，看得见
+    {
+        const RoadProfileFrame f = make_test_road(5, 0.10);   // 第 5 格 = 0.25 m
+        const ControlOutput slow = ff_at(f, 1.0);
+        const ControlOutput fast = ff_at(f, 10.0);
+        check(std::fabs(slow.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "1 m/s 时 0.25 m 外的凸起应在窗口之外（不提前 0.25 s）");
+        check(fast.feedforward_mm[kFrontLeft] > slow.feedforward_mm[kFrontLeft] + 1.0,
+              "10 m/s 时同一凸起应进窗并抬高出力");
+        std::printf("  0.25 m 处 100 mm 凸起：1 m/s -> %.1f mm，10 m/s -> %.1f mm\n",
+                    slow.feedforward_mm[kFrontLeft], fast.feedforward_mm[kFrontLeft]);
+    }
+
+    // ---- 27.3 没有车速：退回单点取样，并如实上报"不是 FIR" ----
+    // 时间域权重无法换算成距离（缺速度），硬套等于给滤波器一个错误的时间标度
+    {
+        const RoadProfileFrame f = make_test_road(5, 0.10);
+        const ControlOutput out = ff_at(f, 0.0, /*has_speed=*/false);
+        check(!out.feedforward_fir, "无车速时应退回单点并上报 feedforward_fir=false");
+        // 单点取样在 lookahead=1.0 m（第 20 格）上，那里是均匀的 0.02
+        check(std::fabs(out.feedforward_mm[kFrontLeft] - 20.0) < 0.5,
+              "无车速时应在 lookahead 处单点取样");
+        std::printf("  无车速 -> 退回单点，feedforward_fir=%d，出力 %.1f mm\n",
+                    out.feedforward_fir, out.feedforward_mm[kFrontLeft]);
+    }
+
+    // ---- 27.4 极低速：窗口退化到一格，语义预瞄仍要能抑制 ----
+    // 步长下限取一个格，否则 reach 会算成 0，障碍物抑制整个失效——
+    // 而抑制是安全方向
+    {
+        const RoadProfileFrame f = make_test_road(999, 0.0);   // 均匀路面
+        std::vector<ObstacleAhead> obs{{0.0, -0.3, 0.30}};   // 本轮迹正下方
+        PreviewFeedbackController c(p);
+        c.reset();
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 1.0;
+        in.has_speed = true;
+        in.speed_mps = 0.001;   // 几乎停住
+        in.obstacles = &obs;
+        in.has_obstacles = true;
+        const ControlOutput out = c.compute(in, 0.005);
+        check(out.feedforward_mm[kFrontLeft] == 0.0,
+              "极低速时零距离处的障碍仍应抑制左前（reach 不得退化为 0）");
+        std::printf("  极低速 + 零距离障碍 -> 左前 %.1f mm（抑制生效）\n",
+                    out.feedforward_mm[kFrontLeft]);
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -2326,6 +2476,7 @@ int main() {
     test_position_feedback_topic();
     test_fir_combinations();
     test_msg_conversion();
+    test_fir_time_domain();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

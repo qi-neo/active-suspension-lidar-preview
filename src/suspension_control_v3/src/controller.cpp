@@ -41,8 +41,14 @@ bool track_blocked(const std::vector<ObstacleAhead>& obs, const ControlParams& p
 // 否则远端缺格会让有效增益凭空变小，前馈突然变弱，而现象只是
 // "远处没数据"，极难定位。
 // 返回 false 表示一个有效取样点都没有
+//
+// tap_step 是**相邻两拍之间的距离**，不是剖面格距。两者必须分开：
+// 权重是按控制周期推导的（时间域），落到空间域要按 车速×周期 换算，
+// 只有车速恰好等于 格距/周期 时二者才相等。早期版本把二者混用，
+// 等于把时间窗当固定空间窗，低速下提前量被放大十几倍。
 bool fir_lane(const suspension_preview_v2::LaneProfile& lane, double start_x,
-              double spacing, const std::vector<double>& gains, double& out) {
+              double tap_step, double spacing, const std::vector<double>& gains,
+              double& out) {
     if (lane.empty() || spacing <= 0.0 || gains.empty()) return false;
     double acc = 0.0;
     double wsum = 0.0;
@@ -51,7 +57,8 @@ bool fir_lane(const suspension_preview_v2::LaneProfile& lane, double start_x,
         const double w = gains[j];
         if (!(w > 0.0) || !std::isfinite(w)) continue;
         double h = 0.0;
-        if (!sample_lane(lane, start_x + static_cast<double>(j) * spacing, spacing,
+        // 取样点位置按 tap_step 推进；插值仍按剖面自身的格距 spacing
+        if (!sample_lane(lane, start_x + static_cast<double>(j) * tap_step, spacing,
                          h, dummy)) {
             continue;   // 这一拍没数据，跳过（权重和随之缩小）
         }
@@ -69,12 +76,15 @@ bool fir_lane(const suspension_preview_v2::LaneProfile& lane, double start_x,
 //   c) 后轴取样距离比前轴短一个轴距（后轮晚遇到同一特征）
 //   d) 单侧轮迹无数据时回退用对侧高程（避免左右不对称的伪横滚指令）
 // sample_position_m 输出前轴实际取样位置（含 b 的补偿），供上层上报
+// used_fir 输出本拍是否真的走了 FIR。开了开关但车速不可用时走单点，
+// 这时必须如实返回 false——上报的"用的哪种前馈"必须等于实际用的那种
 void compute_feedforward(const ControlInput& in, const ControlParams& params,
                          std::array<double, kWheelCount>& ff_mm, bool& fallback,
-                         double& sample_position_m) {
+                         double& sample_position_m, bool& used_fir) {
     ff_mm.fill(0.0);
     fallback = false;
     sample_position_m = 0.0;
+    used_fir = false;
     if (in.profile == nullptr) return;
 
     const auto& frame = *in.profile;
@@ -112,21 +122,38 @@ void compute_feedforward(const ControlInput& in, const ControlParams& params,
     bool dummy = false;   // 插值标记目前只用于诊断，这里不需要
     bool lf_ok = false, rf_ok = false, lr_ok = false, rr_ok = false;
     double reach = sample_pos;   // 前馈实际看到的最远距离 (m)，供语义预瞄用
-    if (params.use_preview_fir && !params.preview_gains.empty()) {
+    // 有车速才能把"时间域权重"换算成"空间域取样点"：第 j 拍对应
+    // j × 车速 × 控制周期 米。没有车速时无法换算（时间→距离需要速度），
+    // 这时退回单点取样——与"没有车速就用固定 lookahead_m"是同一个原则，
+    // 而不是硬套一个不知道时间标度的滤波器
+    const bool speed_ok_for_fir = in.has_speed && std::isfinite(in.speed_mps) &&
+                                  in.speed_mps > 0.0;
+    if (params.use_preview_fir && !params.preview_gains.empty() &&
+        speed_ok_for_fir) {
         const double front_start = shift + params.preview_start_m;
         const double rear_start = std::max(0.0, front_start - params.wheelbase_m);
-        lf_ok = fir_lane(frame.left, front_start, spacing, params.preview_gains, h_lf);
-        rf_ok = fir_lane(frame.right, front_start, spacing, params.preview_gains, h_rf);
-        lr_ok = fir_lane(frame.left, rear_start, spacing, params.preview_gains, h_lr);
-        rr_ok = fir_lane(frame.right, rear_start, spacing, params.preview_gains, h_rr);
+        // 时间步长 -> 距离步长。这是本次修正的核心
+        const double tap_step = in.speed_mps * params.control_period_s;
+        lf_ok = fir_lane(frame.left, front_start, tap_step, spacing,
+                         params.preview_gains, h_lf);
+        rf_ok = fir_lane(frame.right, front_start, tap_step, spacing,
+                         params.preview_gains, h_rf);
+        lr_ok = fir_lane(frame.left, rear_start, tap_step, spacing,
+                         params.preview_gains, h_lr);
+        rr_ok = fir_lane(frame.right, rear_start, tap_step, spacing,
+                         params.preview_gains, h_rr);
         // FIR 覆盖到最后一个非零权重的那一拍
         std::size_t last = 0;
         for (std::size_t j = 0; j < params.preview_gains.size(); ++j) {
             if (params.preview_gains[j] > 0.0) last = j;
         }
-        reach = front_start + static_cast<double>(last) * spacing;
+        // 语义预瞄的作用范围按 FIR 真实覆盖算。步长下限取一个剖面格：
+        // 步长再小就意味着多拍落在同一格上（退化到单点），这时若把范围算成 0，
+        // 障碍物抑制会整个失效——而抑制是安全方向，宁可多抑一点
+        reach = front_start + static_cast<double>(last) * std::max(tap_step, spacing);
         // 上报的位置取 FIR 起点：它才是"这一拍的前馈锚在哪"
         sample_position_m = front_start;
+        used_fir = true;
     } else {
         lf_ok = sample_lane(frame.left, sample_pos, spacing, h_lf, dummy);
         rf_ok = sample_lane(frame.right, sample_pos, spacing, h_rf, dummy);
@@ -290,14 +317,14 @@ ControlOutput PreviewFeedbackController::compute(const ControlInput& in, double 
     std::array<double, kWheelCount> ff_mm{};
     bool fallback = false;
     double sample_pos = 0.0;
-    compute_feedforward(in, params_, ff_mm, fallback, sample_pos);
+    bool used_fir = false;
+    compute_feedforward(in, params_, ff_mm, fallback, sample_pos, used_fir);
     out.feedforward_mm = ff_mm;
     out.feedforward_fallback = fallback;
     out.sample_position_m = sample_pos;
-    // 与 compute_feedforward 里的判定条件保持一致（那边才是真正做选择的地方），
-    // 这样上报的"用的是哪种前馈"就是实际用的那种
-    out.feedforward_fir =
-        params_.use_preview_fir && !params_.preview_gains.empty();
+    // 直接取 compute_feedforward 的结论，不在这里另算一遍条件：
+    // 那正是上一轮"开了开关但权重为空却上报 FIR"的成因。同一件事只判定一次
+    out.feedforward_fir = used_fir;
 
     // ---- 2. 姿态反馈（无导数 PD，角速度代替误差微分）----
     // 绝对式：每拍从当前姿态重算，不依赖历史
@@ -364,14 +391,14 @@ ControlOutput IncrementalLqiController::compute(const ControlInput& in, double d
     std::array<double, kWheelCount> ff_mm{};
     bool fallback = false;
     double sample_pos = 0.0;
-    compute_feedforward(in, params_, ff_mm, fallback, sample_pos);
+    bool used_fir = false;
+    compute_feedforward(in, params_, ff_mm, fallback, sample_pos, used_fir);
     out.feedforward_mm = ff_mm;
     out.feedforward_fallback = fallback;
     out.sample_position_m = sample_pos;
-    // 与 compute_feedforward 里的判定条件保持一致（那边才是真正做选择的地方），
-    // 这样上报的"用的是哪种前馈"就是实际用的那种
-    out.feedforward_fir =
-        params_.use_preview_fir && !params_.preview_gains.empty();
+    // 直接取 compute_feedforward 的结论，不在这里另算一遍条件：
+    // 那正是上一轮"开了开关但权重为空却上报 FIR"的成因。同一件事只判定一次
+    out.feedforward_fir = used_fir;
 
     // ---- 2. 姿态反馈：增量式 LQI ----
     //     u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ

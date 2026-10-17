@@ -204,6 +204,10 @@ private:
                                                          ctrl_.preview_start_m);
         ctrl_.preview_gains = declare_parameter<std::vector<double>>(
             "preview_gains", ctrl_.preview_gains);
+        // FIR 权重是按"控制周期"推导的时间域滤波器，落地到空间域剖面要按
+        // 车速×周期 换算距离。周期直接由控制频率推出，不开放单独配置——
+        // 两个来源各写一遍迟早不一致，而那等于给整条权重向量改了时间标度
+        ctrl_.control_period_s = 1.0 / std::max(1.0, control_rate_hz_);
         if (ctrl_.use_preview_fir) {
             if (ctrl_.preview_gains.empty()) {
                 RCLCPP_WARN(get_logger(),
@@ -212,10 +216,14 @@ private:
             } else {
                 double sum = 0.0;
                 for (double g : ctrl_.preview_gains) sum += g;
+                // 把"窗长随车速变化"直接算给使用者看：这是时间域滤波器的
+                // 必然结果，也最容易被人误当成"固定 0.55 m 空间窗"
+                const double span_ts = static_cast<double>(ctrl_.preview_gains.size() - 1);
                 RCLCPP_INFO(get_logger(),
                             "预瞄前馈 FIR：%zu 拍、起点 +%.3f m、直流增益 %.3f"
-                            "（应为 1.0）",
-                            ctrl_.preview_gains.size(), ctrl_.preview_start_m, sum);
+                            "（应为 1.0）；窗长 = %.1f ms 的行驶距离",
+                            ctrl_.preview_gains.size(), ctrl_.preview_start_m, sum,
+                            span_ts * ctrl_.control_period_s * 1000.0);
                 if (std::fabs(sum - 1.0) > 0.05) {
                     RCLCPP_WARN(get_logger(),
                                 "preview_gains 直流增益 %.3f 偏离 1.0，"
