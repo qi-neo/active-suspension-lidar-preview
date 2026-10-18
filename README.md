@@ -34,18 +34,17 @@ ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
 ## 系统架构
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart TB
-    subgraph S1["感知层"]
+    subgraph S1["感知层 · 硬件"]
         L["UniLiDAR<br/>点云 + IMU"]
         W["轮速传感器"]
     end
-    subgraph S2["驱动与解算层（香橙派 AI Pro）"]
-        DR["unilidar_driver<br/>自研 UDP 报文解析"]
+    subgraph S2["驱动与解算层 · 香橙派 AI Pro"]
+        DR["unilidar_driver<br/>UDP 报文解析"]
         F["多传感器融合<br/>时间戳对齐"]
         P["路面高程提取<br/>PCL"]
         A["姿态解算<br/>互补滤波"]
-        C["闭环控制<br/>预瞄前馈(车速自适应) + 姿态 PD"]
+        C["闭环控制<br/>预瞄前馈 + 姿态 PD"]
     end
     subgraph S3["执行层"]
         K["运动学解耦<br/>迟滞 PWM"]
@@ -56,24 +55,23 @@ flowchart TB
     W --> F
     F --> P
     F --> A
-    P -->|预瞄前馈 · 串口 0xAA55| C
+    P -->|预瞄前馈 · 0xAA55| C
     A -->|姿态反馈| C
     C --> K --> D
-    classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class DR,F,P,C,K inrepo
+    classDef hw stroke-dasharray: 5 4
+    class L,W,D hw
 ```
 
-蓝色节点是本仓库已实现的部分：感知层的报文解析由 `unilidar_driver` 提供，感知与解算层由
+虚线框为硬件，其余为本仓库实现的模块：感知层的报文解析由 `unilidar_driver` 提供，感知与解算层由
 `suspension_preview_v2` 提供，闭环控制与运动学解耦由 `suspension_control_v3` 提供。四路舵机的
 实物驱动对接在 `ISuspensionDriver` 之下，具体指令需按实际作动器的协议确认。
 
 ### 预瞄节点数据流
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
-flowchart LR
+flowchart TB
     A["/unilidar/cloud"] --> B["TF 变换<br/>→ base_link"]
-    B --> C["轮迹 ROI<br/>±0.1 m / 前方 5 m"]
+    B --> C["轮迹 ROI<br/>±0.1 m · 前方 5 m"]
     C --> D["5 cm 分箱<br/>格内取中位数"]
     D --> E["剖面 100 格<br/>NaN + 有效掩码"]
     E --> F["串口输出<br/>CRC16 · int16 毫米"]
@@ -149,24 +147,20 @@ raw 模式、TF 失败无兜底、无效格静默填 0）均已在 v2 修复，�
 无效格静默填 0 等问题。
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart LR
     subgraph CORE["suspension_core · 不依赖 ROS"]
-        EX["IRoadProfileExtractor"] --> PP["PreviewPipeline"] --> SK["IProfileSink"]
+        EX["IRoadProfileExtractor"]
+        PP["PreviewPipeline"]
+        SK["IProfileSink"]
         DR["ISuspensionDriver"]
     end
-    subgraph LAYER["ROS 接线层"]
-        N["road_preview_node"]
-        RS["RosTopicSink"]
-    end
-    N -->|组装| EX
-    N -->|组装| SK
+    N["road_preview_node<br/>ROS 接线层"] -.->|组装| PP
     GF["GridRoadProfileExtractor"] -->|实现| EX
     SF["SerialProfileSink"] -->|实现| SK
+    RS["RosTopicSink"] -->|实现| SK
     SD["SerialSuspensionDriver"] -->|实现| DR
-    RS -->|实现| SK
-    classDef impl fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class GF,SF,SD,RS impl
+    PP -->|组合| EX
+    PP -->|组合| SK
 ```
 
 | 接口 | 职责 | 实现 |
@@ -184,15 +178,14 @@ flowchart LR
 可脱离整车单独编译与自检。
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart LR
     BOOT["Boot"] --> CAL["Calibrating<br/>零位标定"]
     CAL --> LEV["Leveling<br/>回中找平"]
     LEV --> BAL["Balancing<br/>闭环"]
+    BAL -->|急停 / 姿态超限| EST["Emergency<br/>强制回中"]
     BAL -.->|数据异常| DEG["Degraded<br/>保持上次输出"]
-    DEG -.->|保持超时| EST["Emergency<br/>强制回中"]
+    DEG -.->|保持超时| EST
     DEG -->|数据恢复| LEV
-    BAL --> EST
 ```
 
 | 接口 | 职责 |

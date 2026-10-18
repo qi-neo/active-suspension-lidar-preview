@@ -36,14 +36,13 @@ the "disturb first, compensate later" delay at its source.
 ## System architecture
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart TB
-    subgraph S1["Perception"]
+    subgraph S1["Perception · hardware"]
         L["UniLiDAR<br/>point cloud + IMU"]
         W["Wheel speed sensor"]
     end
-    subgraph S2["Driver & processing (Orange Pi AI Pro)"]
-        DR["unilidar_driver<br/>own UDP packet parsing"]
+    subgraph S2["Driver & processing · Orange Pi AI Pro"]
+        DR["unilidar_driver<br/>UDP packet parsing"]
         F["Sensor fusion<br/>timestamp alignment"]
         P["Road height extraction<br/>PCL"]
         A["Attitude estimation<br/>complementary filter"]
@@ -58,25 +57,24 @@ flowchart TB
     W --> F
     F --> P
     F --> A
-    P -->|Preview feedforward · UART 0xAA55| C
-    A -->|Attitude feedback| C
+    P -->|feedforward · 0xAA55| C
+    A -->|attitude feedback| C
     C --> K --> D
-    classDef inrepo fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class DR,F,P,C,K inrepo
+    classDef hw stroke-dasharray: 5 4
+    class L,W,D hw
 ```
 
-Blue nodes are implemented in this repository: packet parsing comes from `unilidar_driver`, perception and
-processing from `suspension_preview_v2`,
+Dashed nodes are hardware; everything else is implemented in this repository: packet parsing comes from
+`unilidar_driver`, perception and processing from `suspension_preview_v2`,
 closed-loop control and kinematic decoupling from `suspension_control_v3`. Driving the physical servos happens
 behind `ISuspensionDriver`; the actual command set depends on the actuator protocol in use.
 
 ### Preview node data flow
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
-flowchart LR
+flowchart TB
     A["/unilidar/cloud"] --> B["TF transform<br/>→ base_link"]
-    B --> C["Wheel-track ROI<br/>±0.1 m / 5 m ahead"]
+    B --> C["Wheel-track ROI<br/>±0.1 m · 5 m ahead"]
     C --> D["5 cm binning<br/>median per cell"]
     D --> E["100-cell profile<br/>NaN + validity mask"]
     E --> F["UART output<br/>CRC16 · int16 mm"]
@@ -164,24 +162,20 @@ the v1 defects around QoS compatibility, UART raw mode, TF failure handling and 
 cells are all fixed.
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart LR
     subgraph CORE["suspension_core · ROS-independent"]
-        EX["IRoadProfileExtractor"] --> PP["PreviewPipeline"] --> SK["IProfileSink"]
+        EX["IRoadProfileExtractor"]
+        PP["PreviewPipeline"]
+        SK["IProfileSink"]
         DR["ISuspensionDriver"]
     end
-    subgraph LAYER["ROS wiring layer"]
-        N["road_preview_node"]
-        RS["RosTopicSink"]
-    end
-    N -->|assembles| EX
-    N -->|assembles| SK
+    N["road_preview_node<br/>ROS wiring layer"] -.->|assembles| PP
     GF["GridRoadProfileExtractor"] -->|implements| EX
     SF["SerialProfileSink"] -->|implements| SK
+    RS["RosTopicSink"] -->|implements| SK
     SD["SerialSuspensionDriver"] -->|implements| DR
-    RS -->|implements| SK
-    classDef impl fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    class GF,SF,SD,RS impl
+    PP -->|composes| EX
+    PP -->|composes| SK
 ```
 
 | Interface | Responsibility | Implementations |
@@ -199,15 +193,14 @@ This is what turns the profile extracted by v2 into actual actuator commands. Th
 neither ROS nor PCL, and can be compiled and self-tested without the vehicle.
 
 ```mermaid
-%%{init: {"fontFamily": "-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, Microsoft YaHei, sans-serif"}}%%
 flowchart LR
     BOOT["Boot"] --> CAL["Calibrating<br/>zero calibration"]
     CAL --> LEV["Leveling<br/>center & level"]
     LEV --> BAL["Balancing<br/>closed loop"]
+    BAL -->|e-stop / attitude limit| EST["Emergency<br/>force to neutral"]
     BAL -.->|bad data| DEG["Degraded<br/>hold last output"]
-    DEG -.->|hold timeout| EST["Emergency<br/>force to neutral"]
+    DEG -.->|hold timeout| EST
     DEG -->|data restored| LEV
-    BAL --> EST
 ```
 
 | Interface | Responsibility |
