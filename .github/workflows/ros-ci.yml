@@ -199,7 +199,11 @@ jobs:
           set -e
           apt-get update
           apt-get install -y --no-install-recommends g++ python3-pip
-          pip3 install --break-system-packages gcovr
+          # Humble 容器是 Ubuntu 22.04，自带 pip 22.0.2：它不认识 --break-system-packages
+          # （那是 pip 23 才加的，对应 PEP 668 的 externally-managed 保护）。
+          # 反过来 24.04 及以后必须加这个参数才肯装进系统 Python。两条都试一遍，
+          # 免得基础镜像一升级就挂在这行上。
+          pip3 install gcovr 2>/dev/null || pip3 install --break-system-packages gcovr
 
       - name: 插桩构建并运行四个自检
         run: |
