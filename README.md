@@ -4,7 +4,7 @@
 
 **国家级大学生创新训练计划项目** · Active Suspension with LiDAR Preview
 
-激光雷达随车速自适应预瞄路面高程（0.5–5 m），融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架——从源头绕开"先颠簸、后补偿"的滞后问题。
+激光雷达随车速自适应预瞄路面高程（0.5–5 m），融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架，抑制非结构化路面上的车身振动与姿态波动。
 
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -16,20 +16,14 @@
 
 </div>
 
-> [!NOTE]
-> **30 秒速览**
+> **要点**
 >
-> - 实车 A/B 测试：车身横滚、俯仰角波动各降约 **81%**，Z 轴加速度干扰降 **60%**
-> - 自研宇树 L1 的 UDP 报文解析与几何换算，**不链接官方静态库**，可直接顶替官方节点
-> - 控制核心**不依赖 ROS 与 PCL**，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
-> - 五个 ROS2 包在 CI 容器中完整构建，并跑通全部离线自检
+> - 实车 A/B 测试：车身横滚、俯仰角波动各降约 81%，Z 轴加速度干扰降 60%
+> - 自研宇树 L1 的 UDP 报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
+> - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> [!NOTE]
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检
-> （v3 控制 284 项、驱动解析 63 项、v2 纯函数 69 项，共 416 项）。
-
-> [!WARNING]
-> v3.1.0 起五个包才真正能在干净环境构建通过——**更早的 tag 拉下来是编不过的**，见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检（v3 控制 284 项、驱动解析 63 项、
+> v2 纯函数 69 项，共 416 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 ## 目录
 
