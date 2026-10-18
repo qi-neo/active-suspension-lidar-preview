@@ -18,7 +18,7 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 
 > **Highlights**
 >
-> - On-vehicle A/B testing: body roll and pitch fluctuation each reduced by about 81%, Z-axis acceleration disturbance down 60%
+> - On-vehicle A/B testing (three runs on independently collected road sections): on the obstacle-crossing run, pitch fluctuation down ~29% and Z-axis acceleration disturbance down ~38%; on ordinary-road runs, roll/pitch fluctuation down ~12–21% (road inputs were not identical across runs — see "Experimental results")
 > - Self-written UDP packet parser and geometry conversion for the Unitree L1 — no link against the official static library, usable as a drop-in replacement for the official node
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
@@ -54,12 +54,14 @@ the "disturb first, compensate later" delay at its source.
 ## System architecture
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart TB
     subgraph S1["Perception · hardware"]
         L["UniLiDAR<br/>point cloud + IMU"]
         W["Wheel speed sensor"]
     end
     subgraph S2["Driver & processing · Orange Pi AI Pro"]
+        direction LR
         DR["unilidar_driver<br/>UDP packet parsing"]
         F["Sensor fusion<br/>timestamp alignment"]
         P["Road height extraction<br/>PCL"]
@@ -90,6 +92,7 @@ behind `ISuspensionDriver`; the actual command set depends on the actuator proto
 ### Preview node data flow
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart TB
     A["/unilidar/cloud"] --> B["TF transform<br/>→ base_link"]
     B --> C["Wheel-track ROI<br/>±0.1 m · 5 m ahead"]
@@ -180,6 +183,7 @@ the v1 defects around QoS compatibility, UART raw mode, TF failure handling and 
 cells are all fixed.
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart LR
     subgraph CORE["suspension_core · ROS-independent"]
         EX["IRoadProfileExtractor"]
@@ -211,6 +215,7 @@ This is what turns the profile extracted by v2 into actual actuator commands. Th
 neither ROS nor PCL, and can be compiled and self-tested without the vehicle.
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart LR
     BOOT["Boot"] --> CAL["Calibrating<br/>zero calibration"]
     CAL --> LEV["Leveling<br/>center & level"]
@@ -332,25 +337,33 @@ depend on the Unitree Lidar SDK.
 
 ## Key parameters
 
-| Parameter | v1 | v2 | Note |
-|-----------|----|----|------|
-| Preview distance | `PREVIEW_DIST` macro | `preview_dist` | 5.0 m |
-| Longitudinal resolution | hard-coded 5 cm | `resolution` | cell count derived from both |
-| Track width | hard-coded ±10 cm | `lane_half_width` | 0.1 m |
-| Ground height window | hard-coded ±0.5 m | `ground_z_min/max` | verify against your frame convention |
-| Per-cell statistic | mean | `use_median` | median by default |
-| Serial port | `/dev/ttyS0` @115200 | `serial_port` / `baud_rate` | configurable up to 921600 |
-| Configuration style | macros, recompile needed | YAML + launch | applied at runtime |
+| Parameter | v2 | Note (vs v1) |
+|-----------|----|--------------|
+| Preview distance | `preview_dist` | 5.0 m; v1 used the `PREVIEW_DIST` macro |
+| Longitudinal resolution | `resolution` | cell count derived from it; v1 hard-coded 5 cm |
+| Track width | `lane_half_width` | 0.1 m; v1 hard-coded ±10 cm |
+| Ground height window | `ground_z_min/max` | verify against your frame convention; v1 hard-coded ±0.5 m |
+| Per-cell statistic | `use_median` | median by default; v1 used mean |
+| Serial port | `serial_port` / `baud_rate` | configurable up to 921600; v1 hard-coded `/dev/ttyS0` @115200 |
+| Configuration style | YAML + launch | applied at runtime; v1 used macros that required recompilation |
 
 ## Experimental results
 
-On-vehicle A/B testing, active versus passive:
+On-vehicle A/B testing, active versus passive (data taken from the raw trial-record spreadsheets; each run was collected independently on a different road section):
 
-| Metric | Passive | Active | Improvement |
-|--------|---------|--------|-------------|
-| Body roll fluctuation | −5.87° ~ +6.12° | −1.15° ~ +1.08° | **81.4%** |
-| Body pitch fluctuation | −4.95° ~ +5.20° | −0.90° ~ +0.95° | **81.7%** |
-| Z-axis acceleration disturbance | 0.85g ~ 1.15g | 0.94g ~ 1.06g | **60.0%** |
+| Run | Metric | Passive | Active | Improvement |
+|-----|--------|---------|--------|-------------|
+| 01 ordinary road | Body roll angle | −3.24° ~ +4.86° | −3.38° ~ +2.99° | +21% |
+| 01 ordinary road | Body pitch angle | −1.02° ~ +1.16° | −0.78° ~ +1.14° | +12% |
+| 01 ordinary road | Z-axis acceleration | 0.36g | 0.32g | +10% |
+| 02 | Body roll angle | −2.11° ~ +3.18° | −2.30° ~ +2.97° | +0% |
+| 02 | Body pitch angle | −2.65° ~ +1.18° | −2.43° ~ +1.75° | −9% |
+| 02 | Z-axis acceleration | 0.30g | 0.36g | −20% |
+| 03 obstacle impact | Body roll angle | −0.60° ~ +0.62° | −0.48° ~ +1.13° | −32% |
+| 03 obstacle impact | Body pitch angle | −4.10° ~ +15.5° | −3.19° ~ +10.7° | +29% |
+| 03 obstacle impact | Z-axis acceleration | 0.93g | 0.57g | +38% |
+
+Fluctuation = peak-to-peak of the attitude angles / vertical acceleration (relative to each run's own mean) over the dynamic driving segment (passive: `Mode=0` segment; active: whole run). Improvement = (passive − active) / passive. The three runs were collected independently on different road sections; for run 02 the active side is slightly higher in pitch and vertical, and for run 03 the active side is slightly larger in roll — likely because the road inputs differed between runs. Listed as-is.
 
 Core methods of the attitude controller:
 
