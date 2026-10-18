@@ -257,9 +257,14 @@ jobs:
         run: |
           set -e
           cd src/active-suspension-lidar-preview
+          # 与上面「汇总覆盖率」用同一组 filter。原来这里写的是整个包目录，把
+          # examples/*_selftest.cpp 也算了进去——测试自身的断言分支上千个，会把
+          # 分母撑大，分支覆盖从 74% 掉到 57%，artifact 与门槛两个口径互相打架。
           gcovr -r . build-cov \
-            --filter 'src/suspension_control_v3/' \
-            --filter 'src/suspension_preview_v2/' \
+            --filter 'src/suspension_control_v3/src/' \
+            --filter 'src/suspension_control_v3/include/' \
+            --filter 'src/suspension_preview_v2/src/' \
+            --filter 'src/suspension_preview_v2/include/' \
             --html-details --html-title "主动悬架 代码覆盖率" -o build-cov/coverage.html
 
       - name: 上传覆盖率明细
