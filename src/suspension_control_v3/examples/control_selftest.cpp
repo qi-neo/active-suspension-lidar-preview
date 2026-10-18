@@ -47,6 +47,7 @@
 #include "suspension_control_v3/control_loop.hpp"
 #include "suspension_control_v3/msg_convert.hpp"
 #include "suspension_control_v3/temporal_fuser.hpp"
+#include "suspension_control_v3/param_check.hpp"
 
 // 让 FIR 的"时间步长折算成距离"恰好等于剖面格距的车速：
 //   v × control_period_s = spacing  =>  v = 0.05 / 0.005 = 10 m/s
@@ -2950,6 +2951,286 @@ void test_driver_error_paths() {
 }
 
 
+// ---------------------------------------------------------------- 32. 参数统一校验
+//
+// 参数填错时系统常常"看着在跑、其实全错"：height_limit_mm 填 0，输出恒为 0，
+// 日志里却没有任何异常；controller_kind 填 2，被静默当成 LQI。这类错误事后极难查。
+//
+// 这一组有两件事必须同时成立：
+//   a) 出厂默认参数**一条问题都不该有**——否则节点一启动就被自己的校验拦下
+//   b) 每个 fatal 判据都要真的能拦住对应的错配置
+void test_param_validation() {
+    section("32. 参数统一校验");
+
+    auto run = [](const ControlParams& c, const ControlLoopParams& l,
+                  const ValidatorParams& v, const StateMachineParams& s) {
+        return suspension_control_v3::validate_params(c, l, v, s);
+    };
+    auto fatal_keys = [](const std::vector<suspension_control_v3::ParamIssue>& issues) {
+        std::vector<std::string> keys;
+        for (const auto& i : issues) {
+            if (i.fatal) keys.push_back(i.key);
+        }
+        return keys;
+    };
+    auto has_key = [](const std::vector<std::string>& keys, const std::string& k) {
+        return std::find(keys.begin(), keys.end(), k) != keys.end();
+    };
+
+    // ---- 31.1 出厂默认必须干净 ----
+    // 这条比什么都重要：默认值有问题的话，买家第一次启动就会收到一堆 ERROR
+    {
+        const auto issues = run(ControlParams{}, ControlLoopParams{}, ValidatorParams{},
+                                StateMachineParams{});
+        check(fatal_keys(issues).empty(), "出厂默认参数不应有任何 fatal 问题");
+        std::printf("  出厂默认：%zu 条提示（应为 0 条 fatal）\n", issues.size());
+        for (const auto& i : issues) {
+            std::printf("    %s %s：%s\n", i.fatal ? "[错误]" : "[提示]", i.key.c_str(),
+                        i.message.c_str());
+        }
+    }
+
+    // ---- 31.2 每一项 fatal 判据都要真的拦得住 ----
+    // 用"改一个字段、期望拦住那一个键"的方式逐个验，避免写了判据却永不触发
+    {
+        struct Case {
+            const char* key;
+            std::function<void(ControlParams&, ControlLoopParams&, ValidatorParams&,
+                               StateMachineParams&)>
+                mutate;
+        };
+        const std::vector<Case> cases{
+            {"height_limit_mm", [](ControlParams& c, ControlLoopParams&, ValidatorParams&,
+                                   StateMachineParams&) { c.height_limit_mm = 0.0; }},
+            {"rate_limit_mm_per_s",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.rate_limit_mm_per_s = 0.0;
+             }},
+            {"wheelbase_m", [](ControlParams& c, ControlLoopParams&, ValidatorParams&,
+                               StateMachineParams&) { c.wheelbase_m = -0.1; }},
+            {"min_lookahead_m / max_lookahead_m",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.min_lookahead_m = 6.0;
+                 c.max_lookahead_m = 1.0;
+             }},
+            {"attitude_filter_alpha",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.attitude_filter_alpha = 1.5;
+             }},
+            {"attitude_smooth_window",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.attitude_smooth_window = 0;
+             }},
+            {"feedforward_sign",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.feedforward_sign = 0.5;
+             }},
+            {"control_period_s",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.control_period_s = 0.0;
+             }},
+            {"controller_kind",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.controller_kind = static_cast<ControllerKind>(2);   // 越界
+             }},
+            {"preview_gains",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.use_preview_fir = true;
+                 c.preview_gains[3] = -0.01;   // 负权重
+             }},
+            {"obstacle_lateral_band_m",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.use_semantic_preview = true;
+                 c.obstacle_lateral_band_m = 0.0;
+             }},
+            {"lookahead_m", [](ControlParams&, ControlLoopParams& l, ValidatorParams&,
+                               StateMachineParams&) { l.lookahead_m = 0.0; }},
+            {"max_attitude_age_ms",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.max_attitude_age_ms = 0.0;
+             }},
+            {"max_abs_attitude_rad",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.max_abs_attitude_rad = 2.0;   // > 90°，没有物理意义
+             }},
+            {"stall_error_mm", [](ControlParams&, ControlLoopParams& l, ValidatorParams&,
+                                  StateMachineParams&) { l.stall_error_mm = 0.0; }},
+            {"fusion_frames", [](ControlParams&, ControlLoopParams& l, ValidatorParams&,
+                                 StateMachineParams&) { l.fusion_frames = 0; }},
+            {"max_age_ms", [](ControlParams&, ControlLoopParams&, ValidatorParams& v,
+                              StateMachineParams&) { v.max_age_ms = 0.0; }},
+            {"spacing_tolerance",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams& v,
+                StateMachineParams&) { v.spacing_tolerance = 1.0; }},
+            {"calibrate_samples",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.calibrate_samples = 0;
+             }},
+            {"max_abs_roll_rad",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.max_abs_roll_rad = 3.0;
+             }},
+            // ---- 以下补全剩余判据：每条都必须真的能触发，
+            // 否则"写了检查却永不生效"和没写是一回事 ----
+            {"lookahead_time_s",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.lookahead_time_s = 0.0;
+             }},
+            {"feedforward_gain",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.feedforward_gain = -1.0;
+             }},
+            {"obstacle_min_height_m",
+             [](ControlParams& c, ControlLoopParams&, ValidatorParams&, StateMachineParams&) {
+                 c.use_semantic_preview = true;
+                 c.obstacle_min_height_m = -0.01;
+             }},
+            {"position_timeout_s",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.position_timeout_s = 0.0;
+             }},
+            {"max_position_mm",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.max_position_mm = 0.0;
+             }},
+            {"speed_timeout_s",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.speed_timeout_s = 0.0;
+             }},
+            {"max_step_dt",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.max_step_dt = 0.0;
+             }},
+            {"fusion_max_age_s",
+             [](ControlParams&, ControlLoopParams& l, ValidatorParams&, StateMachineParams&) {
+                 l.fusion_max_age_s = 0.0;
+             }},
+            {"max_future_ms",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams& v, StateMachineParams&) {
+                 v.max_future_ms = -1.0;
+             }},
+            {"height_abs_limit_m",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams& v, StateMachineParams&) {
+                 v.height_abs_limit_m = 0.0;
+             }},
+            {"nominal_spacing",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams& v, StateMachineParams&) {
+                 v.nominal_spacing = 0.0;
+             }},
+            {"nominal_wheel_dist",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams& v, StateMachineParams&) {
+                 v.nominal_wheel_dist = 0.0;
+             }},
+            {"max_jump_m",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams& v, StateMachineParams&) {
+                 v.max_jump_m = 0.0;   // check_jump 默认 true
+             }},
+            {"calibrate_max_rate",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.calibrate_max_rate = 0.0;
+             }},
+            {"leveling_duration_s",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.leveling_duration_s = 0.0;
+             }},
+            {"degrade_after_unhealthy_s",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.degrade_after_unhealthy_s = 0.0;
+             }},
+            {"recover_duration_s",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.recover_duration_s = 0.0;
+             }},
+            {"degraded_hold_timeout_s",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.degraded_hold_timeout_s = 0.0;
+             }},
+            {"max_abs_pitch_rad",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.max_abs_pitch_rad = -1.0;
+             }},
+            {"link_lost_timeout_s",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.link_lost_timeout_s = 0.0;
+             }},
+            {"stall_degrade_after_s",
+             [](ControlParams&, ControlLoopParams&, ValidatorParams&, StateMachineParams& s) {
+                 s.stall_degrade_after_s = 0.0;
+             }},
+        };
+        int caught = 0;
+        for (const auto& c : cases) {
+            ControlParams cp;
+            ControlLoopParams lp;
+            ValidatorParams vp;
+            StateMachineParams sp;
+            c.mutate(cp, lp, vp, sp);
+            const auto keys = fatal_keys(run(cp, lp, vp, sp));
+            const bool hit = has_key(keys, c.key);
+            check(hit, std::string("应拦住 ") + c.key);
+            if (!hit) {
+                std::printf("    未拦住：%s（实际报出 %zu 项）\n", c.key, keys.size());
+            } else {
+                ++caught;
+            }
+        }
+        std::printf("  %d / %zu 项 fatal 判据均能拦住对应错配置\n", caught, cases.size());
+    }
+
+    // ---- 31.3 可疑但不该拦启动的，只能出提示 ----
+    {
+        ControlParams c;
+        c.controller_kind = ControllerKind::kIncrementalLqi;   // 增益留 0
+        const auto issues = run(c, ControlLoopParams{}, ValidatorParams{},
+                                StateMachineParams{});
+        check(fatal_keys(issues).empty(), "LQI 零增益不该拦启动（只在运行中提示）");
+        bool warned = false;
+        for (const auto& i : issues) {
+            if (!i.fatal && i.key == "lqi_kx1 / lqi_kx2 / lqi_ki") warned = true;
+        }
+        check(warned, "LQI 零增益应给出非致命提示");
+
+        // 填上增益后，提示应消失
+        ControlParams ok = c;
+        ok.lqi_kx1 = 617.9;
+        ok.lqi_kx2 = 51.4;
+        ok.lqi_ki = 28.86;
+        const auto after = run(ok, ControlLoopParams{}, ValidatorParams{},
+                               StateMachineParams{});
+        check(after.empty(), "填上三个增益后不应再有任何提示");
+        std::printf("  LQI 零增益 -> 提示；填上增益 -> 无提示\n");
+    }
+
+    // ---- 31.4 FIR 权重和不为 1：提示而非拦截 ----
+    {
+        ControlParams c;
+        c.use_preview_fir = true;
+        c.preview_gains.assign(5, 0.1);   // Σ = 0.5
+        const auto issues = run(c, ControlLoopParams{}, ValidatorParams{},
+                                StateMachineParams{});
+        check(fatal_keys(issues).empty(), "权重和不为 1 不该拦启动");
+        bool warned = false;
+        for (const auto& i : issues) {
+            if (!i.fatal && i.key == "preview_gains") warned = true;
+        }
+        check(warned, "权重和 0.5 应提示直流增益不为 1");
+        std::printf("  FIR 权重和 0.5 -> 提示（恒定路面会偏移 50%% 高程）\n");
+
+        // 开了 FIR 但权重为空：同样只提示（实际会退回单点取样）
+        ControlParams empty = c;
+        empty.preview_gains.clear();
+        const auto e = run(empty, ControlLoopParams{}, ValidatorParams{},
+                           StateMachineParams{});
+        check(fatal_keys(e).empty(), "权重为空不该拦启动（会自动退回单点）");
+        bool warned_empty = false;
+        for (const auto& i : e) {
+            if (!i.fatal && i.key == "preview_gains") warned_empty = true;
+        }
+        check(warned_empty, "权重为空应提示会退回单点取样");
+        std::printf("  FIR 开了但权重为空 -> 提示（实际退回单点）\n");
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -3027,6 +3308,7 @@ int main() {
     test_temporal_fuser_boundaries();
     test_submission_rejections();
     test_driver_error_paths();
+    test_param_validation();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

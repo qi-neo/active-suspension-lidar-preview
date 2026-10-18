@@ -21,11 +21,13 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "suspension_control_v3/control_loop.hpp"
 #include "suspension_control_v3/msg_convert.hpp"
+#include "suspension_control_v3/param_check.hpp"
 
 namespace {
 
@@ -38,6 +40,10 @@ class SuspensionControlNode : public rclcpp::Node {
 public:
     SuspensionControlNode() : rclcpp::Node("suspension_control_node") {
         declare_params();
+        // 参数全部读完再统一校验：节点原先有一条 LQI 零增益警告写在读取
+        // lqi_kx1/kx2/ki 之前，检查的是默认值 0，于是只要选了 LQI 就必然
+        // 误报一次。判定要放在所有值就位之后，同一件事也只判定这一次
+        check_params();
         build_loop();
 
         profile_sub_ = create_subscription<suspension_preview_v2::msg::RoadProfile>(
@@ -126,6 +132,31 @@ public:
     }
 
 private:
+    // 启动前的参数统一校验。fatal 项一律拒绝启动——带着错配置跑比不跑更危险：
+    // 现象看起来像"算法不行"，而真因埋在 YAML 里没人会想到去查
+    void check_params() {
+        const auto issues =
+            suspension_control_v3::validate_params(ctrl_, loop_params_, val_, sm_);
+        std::size_t fatal = 0;
+        for (const auto& i : issues) {
+            if (i.fatal) {
+                ++fatal;
+                RCLCPP_ERROR(get_logger(), "参数错误 [%s]：%s", i.key.c_str(),
+                             i.message.c_str());
+            } else {
+                RCLCPP_WARN(get_logger(), "参数可疑 [%s]：%s", i.key.c_str(),
+                            i.message.c_str());
+            }
+        }
+        if (fatal > 0) {
+            throw std::runtime_error(
+                "参数校验未通过（" + std::to_string(fatal) +
+                " 项致命）。按上面的日志修正 config/control_params.yaml 后重启");
+        }
+        RCLCPP_INFO(get_logger(), "参数校验通过%s",
+                    issues.empty() ? "" : "（有可疑项，见上方 WARN）");
+    }
+
     void declare_params() {
         profile_topic_ = declare_parameter<std::string>("profile_topic",
                                                        "/suspension/road_profile");
@@ -249,14 +280,6 @@ private:
         const int ctrl_kind = declare_parameter<int>(
             "controller_kind", static_cast<int>(ctrl_.controller_kind));
         ctrl_.controller_kind = static_cast<ControllerKind>(ctrl_kind);
-        if (ctrl_.controller_kind == ControllerKind::kIncrementalLqi &&
-            ctrl_.lqi_kx1 == 0.0 && ctrl_.lqi_kx2 == 0.0 && ctrl_.lqi_ki == 0.0) {
-            RCLCPP_WARN(get_logger(),
-                        "controller_kind=1（增量式 LQI）但三个 LQI 增益全是 0，"
-                        "控制器将退化为只前馈、不做姿态闭环。请先用 "
-                        "tools/lqr_gain_design.py 算出增益并填入 lqi_kx1/kx2/ki");
-        }
-
         // LQI 增益。PD 模式下这三个参数被忽略
         ctrl_.lqi_kx1 = declare_parameter<double>("lqi_kx1", ctrl_.lqi_kx1);
         ctrl_.lqi_kx2 = declare_parameter<double>("lqi_kx2", ctrl_.lqi_kx2);

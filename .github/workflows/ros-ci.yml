@@ -160,6 +160,7 @@ jobs:
             src/suspension_control_v3/src/safety_state_machine.cpp \
             src/suspension_control_v3/src/control_loop.cpp \
             src/suspension_control_v3/src/temporal_fuser.cpp \
+            src/suspension_control_v3/src/param_check.cpp \
             -o /tmp/asan_control
           /tmp/asan_control
 
@@ -230,6 +231,7 @@ jobs:
             src/suspension_control_v3/src/safety_state_machine.cpp \
             src/suspension_control_v3/src/control_loop.cpp \
             src/suspension_control_v3/src/temporal_fuser.cpp \
+            src/suspension_control_v3/src/param_check.cpp \
             -o build-cov/control_selftest
           ./build-cov/control_selftest > /dev/null
           # v2：四个纯函数自检，与 PCL 无关

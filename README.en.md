@@ -23,13 +23,13 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes three offline self-tests (v3 control: 346 checks, driver parsing: 63
-> checks, v2 pure functions: 69 checks — 478 in total). **Tags before v3.1.0 do
+> executes four offline self-test groups (v3 control: 395 checks, driver parsing: 63
+> checks, v2 pure functions: 69 checks, level calibration: 69 checks — 596 in total). **Tags before v3.1.0 do
 > not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
-> complete and runnable (346 checks).
+> complete and runnable (395 checks).
 
 ## Overview
 
@@ -263,7 +263,7 @@ The effective speed, sample distance and frame age are written into `ControlStat
 every tick (`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`),
 so "how far ahead did the feedforward actually look" is visible during integration.
 
-346 offline self-test checks, requiring neither ROS nor hardware:
+395 offline self-test checks, requiring neither ROS nor hardware:
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -323,7 +323,7 @@ All three C++ packages ship offline checks that confirm the pipeline without any
 ```bash
 ros2 run unilidar_driver decoder_selftest         # packet parsing, 63 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
-ros2 run suspension_control_v3 control_selftest    # control and safety logic, 346 checks
+ros2 run suspension_control_v3 control_selftest    # control and safety logic, 395 checks
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
