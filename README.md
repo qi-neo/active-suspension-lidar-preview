@@ -16,12 +16,41 @@
 
 </div>
 
+> [!NOTE]
+> **30 秒速览**
+>
+> - 实车 A/B 测试：车身横滚、俯仰角波动各降约 **81%**，Z 轴加速度干扰降 **60%**
+> - 自研宇树 L1 的 UDP 报文解析与几何换算，**不链接官方静态库**，可直接顶替官方节点
+> - 控制核心**不依赖 ROS 与 PCL**，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
+> - 五个 ROS2 包在 CI 容器中完整构建，并跑通全部离线自检
+
+> [!NOTE]
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检
 > （v3 控制 284 项、驱动解析 63 项、v2 纯函数 69 项，共 416 项）。
-> v3.1.0 起五个包才真正能在干净环境构建通过——
-> **更早的 tag 拉下来是编不过的**，见 [CHANGELOG](CHANGELOG.md)。
 
-## 项目简介
+> [!WARNING]
+> v3.1.0 起五个包才真正能在干净环境构建通过——**更早的 tag 拉下来是编不过的**，见 [CHANGELOG](CHANGELOG.md)。
+
+## 目录
+
+1. [项目简介](#1-项目简介)
+2. [系统架构](#2-系统架构)
+3. [仓库结构](#3-仓库结构)
+4. [模块说明](#4-模块说明)
+    - [unilidar_driver](#unilidar_driver--宇树-l1-激光雷达驱动)
+    - [suspension_preview](#suspension_preview--初版预瞄节点历史版本)
+    - [suspension_preview_v2](#suspension_preview_v2--接口化版本)
+    - [suspension_control_v3](#suspension_control_v3--闭环控制与安全状态机)
+    - [car_balancer](#car_balancer--早期姿态平衡包)
+5. [快速开始](#5-快速开始)
+6. [关键参数](#6-关键参数)
+7. [实测结果](#7-实测结果)
+8. [下行带宽](#8-下行带宽)
+9. [常见问题](#9-常见问题)
+10. [许可证](#10-许可证)
+11. [English Abstract](#11-english-abstract)
+
+## 1. 项目简介
 
 一套基于激光雷达路面预瞄的主动悬架系统。以 ROS2 为框架、香橙派 AI Pro 为车载计算平台，通过激光雷达提前感知
 车前路面高程，融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架，在非结构化路面上抑制车身振动与姿态波动。
@@ -39,7 +68,7 @@
 | 整车样机 | 400 × 300 × 200 mm | 3–8 km/h 稳定行驶 |
 | 验证平台 | 传送带式单轮台架 | 模拟不同车速与路面 |
 
-## 系统架构
+## 2. 系统架构
 
 ```mermaid
 flowchart TB
@@ -89,7 +118,7 @@ flowchart TB
 控制节点以 200 Hz（5 ms）周期运行。状态机在 `suspension_control_v3` 中实现，除论文给出的
 `CALIBRATING → LEVELING → BALANCING` 外，还包含数据异常时的降级与急停处理。
 
-## 仓库结构
+## 3. 仓库结构
 
 ```
 active-suspension-lidar-preview/
@@ -104,7 +133,7 @@ active-suspension-lidar-preview/
     └── review/                      v1 代码审查报告、v2 升级说明
 ```
 
-## 模块说明
+## 4. 模块说明
 
 ### unilidar_driver — 宇树 L1 激光雷达驱动
 
@@ -122,6 +151,7 @@ active-suspension-lidar-preview/
 `SensorDataQoS`（BEST_EFFORT）订阅，两者不兼容会表现为「明明在发却收不到」。
 本包统一按 `SensorDataQoS` 发布。
 
+> [!IMPORTANT]
 > **本包已独立成仓**：[qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver)。
 > 雷达驱动是可复用资产，与主动悬架没有必然关系，故单独维护。本仓库内保留一份副本，
 > 便于单独 clone 本仓库时直接 `colcon build`；**改动请以独立仓库为准，再同步回来**。
@@ -133,6 +163,7 @@ active-suspension-lidar-preview/
 
 ### suspension_preview — 初版预瞄节点（历史版本）
 
+> [!NOTE]
 > 已被 `suspension_preview_v2` 取代，保留用于复现论文里描述的初版行为。
 > 新用途请用 v2。
 
@@ -252,7 +283,7 @@ ros2 run car_balancer test_imu_node
 两个入口都无法运行，现已修复。另一条 `balancer_node` 指向的模块未随包提供，已移除该入口。
 问题记录见 `docs/review/01-code-review-v1.md`。
 
-## 快速开始
+## 5. 快速开始
 
 ```bash
 # 1. 工作空间准备：把本仓库放到 src/ 下
@@ -293,7 +324,7 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，284
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
 雷达驱动包 `unilidar_driver` 额外需要 `tf2`、`tf2_ros`，**不依赖** Unitree Lidar SDK。
 
-## 关键参数
+## 6. 关键参数
 
 | 参数 | v1 | v2 | 说明 |
 |------|----|----|------|
@@ -305,7 +336,7 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，284
 | 串口 | `/dev/ttyS0` @115200 | `serial_port` / `baud_rate` | 可配到 921600 |
 | 参数方式 | 宏定义，需重编译 | YAML + launch | 运行时生效 |
 
-## 实测结果
+## 7. 实测结果
 
 实车 A/B 测试（主动对比被动）：
 
@@ -324,7 +355,7 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，284
 
 论文原文为 PDF（已脱敏），文字版见 `docs/paper/`。
 
-## 下行带宽
+## 8. 下行带宽
 
 每帧发送左右两条轮迹，各 100 点：
 
@@ -335,7 +366,7 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，284
 
 v1 在 115200 bps 下的上限与雷达 10–20 Hz 的输出正好对冲，这是 v2 改用 int16 与提高波特率选项的原因。
 
-## 常见问题
+## 9. 常见问题
 
 **收不到点云，节点启动后没有输出**
 订阅端 QoS 与发布端不匹配。雷达通常以 `BEST_EFFORT` 发布，订阅端必须用 `SensorDataQoS`；
@@ -366,13 +397,13 @@ v1 使用默认 QoS（`RELIABLE`），是收不到数据的常见原因。反过
 v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 与雷达坐标系之间的变换是否已发布，
 必要时放宽 `tf_timeout_ms`。
 
-## 许可证
+## 10. 许可证
 
 [MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
 
 版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
-## English Abstract
+## 11. English Abstract
 
 **Active Suspension with LiDAR Preview** — a National College Student Innovation Training Program.
 
