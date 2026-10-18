@@ -100,12 +100,15 @@ jobs:
             ros2 run suspension_preview_v2 "$t"
           done
 
-      - name: v2 点云解析链路离线示例
+      # 这段以前带 || true，等于"解析链路回归不阻塞 CI"。根因是 demo 只把
+      # 协议往返的结果写进退出码，解析精度只打印——现在它自己也门住精度了，
+      # 所以这里不再容忍失败
+      - name: v2 点云解析链路（合成点云 vs 真值）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
-          ros2 run suspension_preview_v2 offline_demo || true
+          ros2 run suspension_preview_v2 offline_demo
 
   # 内存与未定义行为检查。与 build 分开而不是加一个 step：插桩要改编译 flag，
   # 与上面的常规构建产物混在一起会互相污染。
@@ -170,3 +173,88 @@ jobs:
               -o "/tmp/asan_${name}"
             "/tmp/asan_${name}"
           done
+
+  # 覆盖率。单独 job：插桩要改编译 flag，且 -O0 + --coverage 与 sanitizer 不共存。
+  #
+  # 目的是**用数据找没被测到的代码**，而不是刷高数字。本地实测当前水位：
+  #   attitude_filter / road_trend / obstacle_detect  100%
+  #   controller 96.7  input_validator 94.9  safety_state_machine 94.9
+  #   protocol 96.4   control_loop 95.7   temporal_fuser 90.9（最低）
+  # --fail-under-line 80 只兜"大面积没测"这种 catastrophic 情况：门限高了会逼着
+  # 人写没意义的断言，而且新模块刚进来时必然踩线。要提水位看 HTML 明细，
+  # 不要靠抬门限。
+  coverage:
+    name: 覆盖率（找出没被测到的代码）
+    runs-on: ubuntu-latest
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          path: src/active-suspension-lidar-preview
+
+      - name: 安装工具
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends g++ python3-pip
+          pip3 install --break-system-packages gcovr
+
+      - name: 插桩构建并运行四个自检
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          mkdir -p build-cov
+          # v3：整个控制与安全内核（一条命令编完六个源文件）
+          g++ -std=c++17 -O0 --coverage \
+            -I src/suspension_control_v3/include -I src/suspension_preview_v2/include \
+            src/suspension_control_v3/examples/control_selftest.cpp \
+            src/suspension_control_v3/src/input_validator.cpp \
+            src/suspension_control_v3/src/controller.cpp \
+            src/suspension_control_v3/src/attitude_filter.cpp \
+            src/suspension_control_v3/src/safety_state_machine.cpp \
+            src/suspension_control_v3/src/control_loop.cpp \
+            src/suspension_control_v3/src/temporal_fuser.cpp \
+            -o build-cov/control_selftest
+          ./build-cov/control_selftest > /dev/null
+          # v2：三个纯函数自检，与 PCL 无关
+          for pair in \
+            "trend_selftest:road_trend.cpp" \
+            "obstacle_selftest:obstacle_detect.cpp" \
+            "protocol_selftest:protocol.cpp"; do
+            name="${pair%%:*}"
+            src="${pair##*:}"
+            g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
+              "src/suspension_preview_v2/examples/${name}.cpp" \
+              "src/suspension_preview_v2/src/${src}" -o "build-cov/${name}"
+            "./build-cov/${name}" > /dev/null
+          done
+
+      - name: 汇总覆盖率
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          # --filter 只统计项目自己的代码：系统头文件的覆盖率（动辄 28%）没有意义
+          gcovr -r . build-cov \
+            --filter 'src/suspension_control_v3/src/' \
+            --filter 'src/suspension_control_v3/include/' \
+            --filter 'src/suspension_preview_v2/src/' \
+            --filter 'src/suspension_preview_v2/include/' \
+            --txt --print-summary --fail-under-line 80
+
+      - name: 生成 HTML 明细
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          gcovr -r . build-cov \
+            --filter 'src/suspension_control_v3/' \
+            --filter 'src/suspension_preview_v2/' \
+            --html-details --html-title "主动悬架 代码覆盖率" -o build-cov/coverage.html
+
+      - name: 上传覆盖率明细
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: src/active-suspension-lidar-preview/build-cov/coverage.html
+          if-no-files-found: error

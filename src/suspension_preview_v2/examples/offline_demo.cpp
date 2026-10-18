@@ -75,10 +75,32 @@ int main() {
         ++n_valid;
     }
 
-    std::printf("[demo] 格数=%zu 有效=%d 质量=%u%%\n", frame.left.size(), n_valid,
+    const double mean_err = (n_valid > 0 ? sum_err / n_valid : 0.0);
+    const std::size_t total = frame.left.size();
+    const double valid_ratio = (total > 0) ? static_cast<double>(n_valid) /
+                                                 static_cast<double>(total)
+                                           : 0.0;
+    std::printf("[demo] 格数=%zu 有效=%d 质量=%u%%\n", total, n_valid,
                 frame.quality());
     std::printf("[demo] 左轮迹高程误差: 均值 %.2f mm / 最大 %.2f mm\n",
-                (n_valid > 0 ? sum_err / n_valid : 0.0) * 1000.0, max_err * 1000.0);
+                mean_err * 1000.0, max_err * 1000.0);
+
+    // 这些数字此前只打印、不进退出码——于是"解析回归"根本门不住，
+    // CI 里也就只能靠 || true 把整个 demo 当成不阻塞的装饰。
+    // 这里设的是**粗回归**门限：噪声 4 mm、凸起 80 mm，正确实现的均值误差
+    // 应远小于 30 mm；超过它意味着索引错位、开窗失效这类结构性故障。
+    // 阈值故意留得很松，免得把正常的趋势窗行为误判成失败
+    bool parse_ok = true;
+    if (n_valid == 0 || valid_ratio < 0.5) {
+        std::printf("[demo] 失败：有效格占比 %.0f%% 过低，解析链路没产出可用剖面\n",
+                    valid_ratio * 100.0);
+        parse_ok = false;
+    } else if (mean_err > 0.030) {
+        std::printf("[demo] 失败：均值误差 %.1f mm 超过 30 mm 门限\n",
+                    mean_err * 1000.0);
+        parse_ok = false;
+    }
+    if (!parse_ok) return 1;
     std::printf("[demo] 抽样 (x, 提取值, 真值) [mm]:\n");
     for (int i = 0; i <= 100; i += 25) {
         const auto k = static_cast<std::size_t>(i);
