@@ -27,6 +27,9 @@ float32 profile_age_ms    # 所使用剖面的帧龄 (ms)
 float32 sample_position_m # 前轴前馈锚点 (m)：单点模式 = lookahead + 车速×帧龄；
                           # FIR 模式 = FIR 起点（= 帧龄补偿后位置 + preview_start_m）
 bool    feedforward_fir   # 本拍前馈走的是 FIR（true）还是单点比例（false）
+bool    lqi_windup_clamped # 修正量被"剩余行程权威"钳住：前馈已吃掉大部分行程，
+                           # 姿态修正只能在小范围工作。台架上频繁置位就该减小
+                           # feedforward_gain 或增大行程，而不是继续加积分增益
 
 uint32 fused_frames          # 本拍参与融合的帧数（1 = 未融合）
 uint32 low_confidence_cells  # 跨帧离散度过大被判无效的格数（左右合计）

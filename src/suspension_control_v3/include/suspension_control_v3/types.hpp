@@ -106,6 +106,10 @@ struct ControlOutput {
     // 本拍前馈走的是 FIR 还是单点比例。诊断用：单看 sample_position_m
     // 分不出它是"lookahead + 帧龄"还是"FIR 起点"，两者量级差一个数量级
     bool feedforward_fir{false};
+    // 本拍修正量被"剩余行程权威"钳住。置位说明前馈已经吃掉大部分行程，
+    // 姿态修正只能在小范围内工作——台架上看到它频繁置位，就该减小
+    // feedforward_gain 或增大行程，而不是继续加积分增益
+    bool lqi_windup_clamped{false};
     double roll_correction_mm{0.0};
     double pitch_correction_mm{0.0};
     bool saturated{false};   // 是否触发过限幅

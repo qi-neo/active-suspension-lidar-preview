@@ -444,11 +444,31 @@ ControlOutput IncrementalLqiController::compute(const ControlInput& in, double d
         has_prev_attitude_ = true;
     }
 
-    // 修正量本身也要限幅：增量式会累加，若不加约束，长时间单方向偏差
-    // 能把累计值推到任意大。上限与高度限幅取同一个值，语义上是
-    // "修正量也是一种行程"
-    u_roll = std::clamp(u_roll, -params_.height_limit_mm, params_.height_limit_mm);
-    u_pitch = std::clamp(u_pitch, -params_.height_limit_mm, params_.height_limit_mm);
+    // 修正量的上界取"这一拍还剩多少行程权威"，而不是固定的高度限幅。
+    //
+    // 固定限幅能防无限累积，但防不了**权威耗尽**：修正量长期钉在 ±40 mm 后，
+    // 前馈再来个 35 mm 的凸起，raw 直接顶到限幅——控制器对任何新扰动都没有
+    // 余量了，表现是"被一个陈旧偏移锁死"。
+    //
+    // 剩余权威 = 高度限幅 - 本拍最大前馈。前馈吃得越多，修正量能用的越少。
+    // 好处是**自恢复**：凸起过去、ff 回落后，上界自动放宽；若凸起到来时修正量
+    // 还钉在 40，会被立刻拉回到 5——不需要等误差反向才解锁。
+    //
+    // 取 max|ff| 而不是逐轮判是偏保守的（左右前馈可能反向），但保守方向正确：
+    // 宁可少给点修正量，也不要把轮子锁在限幅上
+    double ff_peak = 0.0;
+    for (int i = 0; i < kWheelCount; ++i) {
+        ff_peak = std::max(ff_peak, std::fabs(ff_mm[static_cast<std::size_t>(i)]));
+    }
+    const double authority = std::max(0.0, params_.height_limit_mm - ff_peak);
+    if (u_roll > authority || u_roll < -authority) {
+        u_roll = std::clamp(u_roll, -authority, authority);
+        out.lqi_windup_clamped = true;
+    }
+    if (u_pitch > authority || u_pitch < -authority) {
+        u_pitch = std::clamp(u_pitch, -authority, authority);
+        out.lqi_windup_clamped = true;
+    }
 
     last_roll_correction_ = u_roll;
     last_pitch_correction_ = u_pitch;

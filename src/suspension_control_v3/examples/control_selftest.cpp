@@ -2404,6 +2404,103 @@ void test_fir_time_domain() {
     }
 }
 
+// ---------------------------------------------------------------- 28. LQI 抗 windup（剩余行程权威）
+//
+// 修正量原本钳在固定的 ±行程上。那能防无限累积，但防不了**权威耗尽**：
+// 修正量长期钉在 ±40 mm 后，前馈再来个 35 mm 的凸起，raw 直接顶到限幅——
+// 控制器对任何新扰动都没有余量，表现为"被一个陈旧偏移锁死"。
+//
+// 改成上界跟随"这一拍还剩多少行程权威"：权威 = 行程上限 - 本拍最大前馈。
+// 关键好处是**自恢复**：凸起到来、前馈吃掉行程时，钉在高位的修正量会被立刻
+// 拉回来，不必等误差反向才解锁。
+void test_lqi_windup_authority() {
+    section("28. LQI 抗 windup（剩余行程权威）");
+
+    ControlParams p;
+    // 必须自己填增益：三个 LQI 增益默认都是 0（未整定时故意退化成"只前馈不闭环"），
+    // 否则修正量恒为 0，这一组就什么都没有了。取值来自 lqr_gain_design.py
+    p.lqi_kx1 = 617.9;
+    p.lqi_kx2 = 51.4;
+    p.lqi_ki = 28.86;
+    // 单点取样、给定 lookahead，这样前馈量可以精确控制
+    const RoadProfileFrame flat = make_test_road(999, 0.0);        // 全格 0.02 -> ff=20
+    const RoadProfileFrame peak = make_test_road(5, 0.015);        // 第5格 0.035 -> ff=35
+
+    auto make_in = [](const RoadProfileFrame& f) {
+        ControlInput in;
+        in.profile = &f;
+        in.lookahead_m = 0.25;   // 第 5 格
+        in.has_attitude = true;
+        in.roll_rad = 0.05;      // 持续单方向误差，必然把修正量推向上界
+        return in;
+    };
+
+    // ---- 28.1 无前馈占用时与旧行为一致：钉在 ±行程 ----
+    {
+        IncrementalLqiController c(p);
+        ControlInput flat_in = make_in(flat);   // ff = 20 mm，权威 = 20
+        ControlOutput out;
+        for (int i = 0; i < 80; ++i) out = c.compute(flat_in, 0.005);
+        check(std::fabs(out.roll_correction_mm) <= 20.0 + 1e-6,
+              "前馈 20 mm 时修正量应钳在剩余权威 ±20 mm 内");
+        std::printf("  前馈 20 mm -> 权威 ±20 mm，实测修正量 %.1f mm\n",
+                    out.roll_correction_mm);
+    }
+
+    // ---- 28.2 前馈吃掉行程越多，权威越小 ----
+    {
+        IncrementalLqiController c(p);
+        ControlInput peak_in = make_in(peak);   // ff = 35 mm，权威 = 5
+        ControlOutput out;
+        bool saw_flag = false;
+        for (int i = 0; i < 80; ++i) {
+            out = c.compute(peak_in, 0.005);
+            saw_flag = saw_flag || out.lqi_windup_clamped;
+        }
+        check(saw_flag, "修正量被剩余权威钳住时应置诊断位");
+        check(std::fabs(out.roll_correction_mm) <= 5.0 + 1e-6,
+              "前馈 35 mm 时修正量应钳在 ±5 mm 内");
+        check(!out.saturated, "按剩余权威钳位后，输出不应再被行程限幅锁死");
+        std::printf("  前馈 35 mm -> 权威 ±5 mm，实测 %.1f mm，saturated=%d\n",
+                    out.roll_correction_mm, out.saturated);
+    }
+
+    // ---- 28.3 自恢复：凸起来到时把高位修正量拉回来 ----
+    // 这是与"固定限幅"的本质区别——后者要等误差反向才解锁
+    {
+        IncrementalLqiController c(p);
+        ControlInput flat_in = make_in(flat);
+        ControlOutput out;
+        for (int i = 0; i < 80; ++i) out = c.compute(flat_in, 0.005);
+        const double pegged = out.roll_correction_mm;
+        check(std::fabs(pegged) > 15.0, "先确认修正量已被推到接近 ±20");
+        // 凸起出现：前馈从 20 涨到 35，权威从 20 收窄到 5
+        ControlInput peak_in = make_in(peak);
+        out = c.compute(peak_in, 0.005);
+        check(std::fabs(out.roll_correction_mm) < std::fabs(pegged),
+              "前馈变大时修正量应被立即拉回，而不是继续钉在高位");
+        std::printf("  凸起到来：修正量 %.1f -> %.1f mm（权威收窄，无需等误差反向）\n",
+                    pegged, out.roll_correction_mm);
+    }
+
+    // ---- 28.4 凸起过去后权威自动放宽 ----
+    {
+        IncrementalLqiController c(p);
+        ControlInput peak_in = make_in(peak);
+        ControlOutput out;
+        for (int i = 0; i < 80; ++i) out = c.compute(peak_in, 0.005);
+        const double squeezed = out.roll_correction_mm;
+        check(std::fabs(squeezed) <= 5.0 + 1e-6, "先确认被压到 ±5 mm");
+
+        ControlInput flat_in = make_in(flat);   // 前馈回落到 20，权威放宽到 20
+        for (int i = 0; i < 80; ++i) out = c.compute(flat_in, 0.005);
+        check(std::fabs(out.roll_correction_mm) > std::fabs(squeezed) + 1.0,
+              "前馈回落后权威应自动放宽，修正量能重新长回去");
+        std::printf("  凸起过去：修正量 %.1f -> %.1f mm（权威放宽）\n", squeezed,
+                    out.roll_correction_mm);
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -2477,6 +2574,7 @@ int main() {
     test_fir_combinations();
     test_msg_conversion();
     test_fir_time_domain();
+    test_lqi_windup_authority();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");
