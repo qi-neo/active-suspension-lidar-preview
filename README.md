@@ -22,8 +22,8 @@
 > - 自研宇树 L1 的 UDP 报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检（v3 控制 284 项、驱动解析 63 项、
-> v2 纯函数 69 项，共 416 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检（v3 控制 346 项、驱动解析 63 项、
+> v2 纯函数 69 项，共 478 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 ## 目录
 
@@ -145,7 +145,6 @@ active-suspension-lidar-preview/
 `SensorDataQoS`（BEST_EFFORT）订阅，两者不兼容会表现为「明明在发却收不到」。
 本包统一按 `SensorDataQoS` 发布。
 
-> [!IMPORTANT]
 > **本包已独立成仓**：[qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver)。
 > 雷达驱动是可复用资产，与主动悬架没有必然关系，故单独维护。本仓库内保留一份副本，
 > 便于单独 clone 本仓库时直接 `colcon build`；**改动请以独立仓库为准，再同步回来**。
@@ -157,7 +156,6 @@ active-suspension-lidar-preview/
 
 ### suspension_preview — 初版预瞄节点（历史版本）
 
-> [!NOTE]
 > 已被 `suspension_preview_v2` 取代，保留用于复现论文里描述的初版行为。
 > 新用途请用 v2。
 
@@ -256,7 +254,7 @@ flowchart LR
 （`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
 联调时能直接看到"前馈到底按多远取了样"。
 
-离线自检 284 项，不需要 ROS 与硬件：
+离线自检 346 项，不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -312,7 +310,7 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```bash
 ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，284 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，346 项检查
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
