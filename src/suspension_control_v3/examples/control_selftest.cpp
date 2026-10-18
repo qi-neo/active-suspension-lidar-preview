@@ -147,11 +147,14 @@ public:
         const std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) override {
         last_cmd_ = mm;
         ++cmd_calls_;
-        return connected_;
+        // 发送失败模拟：总线丢包/校验失败。与"未连接"是两回事——
+        // connected_ 仍为 true，说明链路在，只是这一帧没出去
+        return connected_ && !send_fail_;
     }
     bool emergency_stop() override {
         ++estop_calls_;
-        return connected_;
+        // 急停失败模拟：最该成功的动作失败了，必须计入 driver_errors
+        return connected_ && !estop_fail_;
     }
     const std::string& last_error() const override { return err_; }
 
@@ -160,6 +163,14 @@ public:
     bool get_position(
         std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) const override {
         if (!feedback_) return false;
+        // 读失败模拟：驱动支持位置反馈，但这一次没读回来（串口丢帧、
+        // 校验失败）。与"不支持反馈"是两回事——后者永远不判堵转，
+        // 前者是"本来能看、这一下没看到"，必须也不能据此降级
+        if (read_fail_) return false;
+        // 读失败模拟：驱动支持位置反馈，但这一次没读回来（串口丢帧、
+        // 校验失败）。与"不支持反馈"是两回事——后者永远不判堵转，
+        // 前者是"本来能看、这一下没看到"，必须也不能据此降级
+        if (read_fail_) return false;
         // 简化模型：实际位置持续按各轮的跟随比例跟踪"最后一次下发的指令"。
         // 之所以不用"收到指令时才更新"，是因为下发有去重——指令不变就不重发，
         // 那样卡死轮的位置永远不更新，反而检不出偏差。真实作动器是持续上报
@@ -172,6 +183,9 @@ public:
     }
 
     bool connected_{false};
+    bool read_fail_{false};    // 见 get_position 里的说明
+    bool send_fail_{false};    // set_target_height 返回 false（链路在但帧没出去）
+    bool estop_fail_{false};   // emergency_stop 返回 false
     suspension_preview_v2::SuspensionMode mode_{suspension_preview_v2::SuspensionMode::Passive};
     std::array<int, suspension_preview_v2::kSuspensionWheelCount> last_cmd_{};
     // 各轮跟随比例，1.0 = 完全跟随。置 0 即模拟该轮卡死
@@ -2731,6 +2745,214 @@ void test_submission_rejections() {
     }
 }
 
+
+// ---------------------------------------------------------------- 31. 驱动错误路径与诊断字符串
+//
+// 上一轮覆盖率把剩余缺口全指出来了：四个文件各剩几条未覆盖行，且集中在
+// 驱动交互的错误路径（读失败/发送失败/急停失败）和诊断字符串上。这些恰恰是
+// 最该测的：错误路径的行为决定了"出故障时系统是优雅降级还是误报警"。
+// 为此给 MockDriver 加了三种失败注入。
+void test_driver_error_paths() {
+    section("31. 驱动错误路径与诊断字符串");
+    constexpr double kOffset = 0.02;   // 恒定 20 mm 路面 -> 前馈指令 20 mm
+    constexpr double kBase = 0.0;      // 无起伏
+
+    // ---- 31.1 位置读失败：不据此降级 ----
+    // 驱动支持反馈但这一拍没读回来，与"不支持反馈"是两回事：
+    // 后者永远不判堵转；前者是"本来能看、这下没看到"，同样不能据此降级
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.advance(1.5, kBase, 0.0, 0.0, kOffset);   // 先进闭环
+        fx.driver->follow_ratio_[0] = 0.0;            // 再让左前卡死
+        fx.advance(0.4, kBase, 0.0, 0.0, kOffset);   // 累积到超过阈值
+        check((fx.loop.status().faults & kFaultActuatorStall) != 0,
+              "读得到位置时应能检出左前堵转（先立基线）");
+
+        fx.driver->read_fail_ = true;
+        fx.advance(0.6, kBase, 0.0, 0.0, kOffset);
+        check(fx.loop.status().position_age_ms < 0.0, "读失败时龄应为负");
+        check((fx.loop.status().faults & kFaultActuatorStall) == 0,
+              "读失败不应继续报堵转（一次丢帧就降级太脆）");
+        std::printf("  位置读失败 -> age<0，堵转位清除\n");
+    }
+
+    // ---- 31.2 发送失败：计入 driver_errors ----
+    {
+        LoopFixture fx(true, false);
+        fx.driver->send_fail_ = true;
+        fx.advance(1.5, kBase, 0.0, 0.0, kOffset);   // 进闭环后才会真正下发
+        check(fx.loop.status().driver_errors > 0, "发送失败应计入 driver_errors");
+        check(fx.loop.status().commands_sent == 0, "失败帧不应计入 commands_sent");
+        std::printf("  发送失败 -> driver_errors=%zu，commands_sent=%zu\n",
+                    static_cast<std::size_t>(fx.loop.status().driver_errors),
+                    static_cast<std::size_t>(fx.loop.status().commands_sent));
+    }
+
+    // ---- 31.3 急停失败：最该成功的动作失败了，必须显式计数 ----
+    {
+        LoopFixture fx(true, false);
+        fx.driver->feedback_ = true;
+        fx.driver->estop_fail_ = true;
+        for (int i = 0; i < 4; ++i) fx.driver->follow_ratio_[i] = 0.0;   // 四轮全卡死
+        fx.advance(1.5, kBase, 0.0, 0.0, kOffset);      // 进闭环并累计堵转
+        fx.advance(6.0, kBase, 0.0, 0.0, kOffset);      // 降级保持超时 -> Emergency
+        check(fx.loop.status().state == ControlState::kEmergency,
+              "四轮全卡死且不复原应进入 Emergency");
+        check(fx.loop.status().driver_errors > 0, "急停失败应计入 driver_errors");
+        check(fx.loop.status().estop_commands_sent == 0,
+              "急停失败不应计入 estop_commands_sent");
+        std::printf("  急停失败 -> driver_errors=%zu\n",
+                    static_cast<std::size_t>(fx.loop.status().driver_errors));
+    }
+
+    // ---- 31.4 状态机：estop_requested 立即锁存 ----
+    {
+        SafetyStateMachine sm(StateMachineParams{});
+        SafetyInputs req;
+        req.estop_requested = true;
+        const StateMachineOutput out = sm.tick(req, 0.005);
+        check((out.faults & kFaultEmergencyStop) != 0, "请求急停应立即置故障位");
+        check(out.state == ControlState::kEmergency, "并应进入 Emergency");
+
+        // 锁存：撤掉请求也不消失（急停须人工复位，不能自己悄悄恢复）
+        SafetyInputs clear;
+        const StateMachineOutput out2 = sm.tick(clear, 0.005);
+        check((out2.faults & kFaultEmergencyStop) != 0, "急停故障位应锁存");
+        check(out2.state == ControlState::kEmergency, "Emergency 也应保持");
+        std::printf("  estop_requested -> 位置位并锁存，撤请求不消失\n");
+    }
+
+    // ---- 31.5 状态机：Leveling 阶段直接降级 ----
+    // 既有用例只覆盖了 Balancing -> Degraded，Leveling 那条分支没走到
+    {
+        SafetyInputs in;
+        in.profile_valid = true;
+        in.profile_fresh = true;
+        in.profile_quality = 100;
+        in.attitude_valid = true;
+        StateMachineParams lp;
+        lp.leveling_duration_s = 10.0;   // 设长，便于停在 Leveling
+        SafetyStateMachine sm(lp);
+        StateMachineOutput lv;
+        for (int i = 0; i < 200; ++i) {   // 1 s < 10 s，应停在 Leveling
+            lv = sm.tick(in, 0.005);
+        }
+        check(lv.state == ControlState::kLeveling,
+              "leveling_duration 设长后应停在 Leveling（否则测不到那条分支）");
+
+        SafetyInputs bad = in;
+        bad.profile_valid = false;
+        bad.profile_fresh = false;
+        bad.attitude_valid = false;
+        // 坏输入必须持续超过 degrade_after_unhealthy_s（默认 0.15 s）才降级，
+        // 喂一两拍不够——这是防抖设计，不是缺陷
+        StateMachineOutput deg;
+        for (int i = 0; i < 60; ++i) {   // 60 × 5 ms = 0.3 s > 0.15 s
+            deg = sm.tick(bad, 0.005);
+        }
+        check(deg.state == ControlState::kDegraded,
+              "Leveling 期间输入持续变坏应直接降级");
+        std::printf("  Leveling 持续坏输入 0.3 s -> Degraded\n");
+    }
+
+    // ---- 31.6 诊断字符串：公开 API，节点靠它打日志 ----
+    {
+        check(std::string(to_string(RejectReason::kNone)) == "通过",
+              "kNone 的字符串应为通过");
+        check(std::string(to_string(RejectReason::kStampBackwards)) == "时间戳倒退",
+              "kStampBackwards 的字符串应为时间戳倒退");
+        check(std::string(to_string(static_cast<RejectReason>(250))).size() > 0,
+              "未知枚举也应返回非空串（不能返回 nullptr 让 %s 崩）");
+        for (ControlState st : {ControlState::kBoot, ControlState::kCalibrating,
+                                ControlState::kLeveling, ControlState::kBalancing,
+                                ControlState::kDegraded, ControlState::kEmergency}) {
+            const char* s = to_string(st);
+            check(s != nullptr && std::strlen(s) > 0, "每个状态都应有非空字符串");
+        }
+        const char* unknown = to_string(static_cast<ControlState>(250));
+        check(unknown != nullptr && std::strlen(unknown) > 0,
+              "未知状态也应返回非空串");
+        std::printf("  诊断字符串：kNone/倒退/六状态/未知值 均非空且符合预期\n");
+    }
+
+    // ---- 31.8 多级姿态滤波链：PD 控制器走这条支路 ----
+    // use_attitude_filter_chain 为真时，filter_attitude 直接把输入交给链,
+    // 不再叠加一阶低通（两级串起来相位滞后翻倍）。此前没有用例开这个开关
+    {
+        ControlParams q;
+        q.use_attitude_filter_chain = true;
+        PreviewFeedbackController c(q);
+        RoadProfileFrame none;   // 空剖面：只管滤波，不管前馈
+        ControlInput in;
+        in.profile = &none;
+        in.has_attitude = true;
+        in.roll_rad = 0.05;
+        in.pitch_rad = 0.02;
+        in.roll_rate = 0.0;
+        in.pitch_rate = 0.0;
+        ControlOutput out;
+        for (int i = 0; i < 50; ++i) out = c.compute(in, 0.005);
+        check(std::isfinite(out.roll_correction_mm),
+              "滤波链路径下横滚修正量应有限");
+        // 链有首拍初始化与滑窗，收敛后应接近无滤波时的比例关系
+        check(std::fabs(out.roll_correction_mm) > 0.0,
+              "有姿态误差就应产生非零修正量");
+        std::printf("  多级滤波链 -> roll 修正 %.1f mm\n", out.roll_correction_mm);
+    }
+
+    // ---- 31.9 LQI 的 pitch 方向 windup ----
+    // 场景 28 只造了 roll 方向的饱和，pitch 那条钳位分支没走到
+    {
+        ControlParams q;
+        q.lqi_kx1 = 617.9;
+        q.lqi_kx2 = 51.4;
+        q.lqi_ki = 28.86;
+        IncrementalLqiController c(q);
+        ControlInput in;
+        in.has_attitude = true;
+        in.roll_rad = 0.0;
+        in.pitch_rad = 0.05;   // 只有俯仰误差
+        in.roll_rate = 0.0;
+        in.pitch_rate = 0.0;
+        ControlOutput out;
+        bool saw_flag = false;
+        for (int i = 0; i < 80; ++i) {
+            out = c.compute(in, 0.005);
+            saw_flag = saw_flag || out.lqi_windup_clamped;
+        }
+        check(saw_flag, "pitch 方向饱和也应置 windup 诊断位");
+        check(std::fabs(out.pitch_correction_mm) <= q.height_limit_mm + 1e-6,
+              "pitch 修正量也不得越过行程");
+        std::printf("  pitch 饱和 -> 诊断位置位，修正量 %.1f mm\n",
+                    out.pitch_correction_mm);
+    }
+
+    // ---- 31.7 校验器：时间戳倒退被拒 ----
+    {
+        LoopFixture fx;
+        const auto good = make_frame(fx.t, 0.0, kOffset);
+        const auto r1 = fx.loop.submit_profile(good, fx.t);
+        check(r1.ok, "第一帧应被接受（先立基线）");
+        // 更早的时间戳：说明发布方的时钟有问题，不能用
+        const auto older = make_frame(fx.t - 0.001, 0.0, kOffset);
+        const auto r2 = fx.loop.submit_profile(older, fx.t + 0.005);
+        check(!r2.ok, "时间戳倒退应被拒绝");
+        check(r2.reason == RejectReason::kStampBackwards, "拒绝原因应为时间戳倒退");
+
+        // 另一个方向：远远超前的时钟。同样是坏数据（时钟没同步的典型症状），
+        // 但它走的是校验器里另一条分支——"倒退"覆盖不到它
+        const auto future = make_frame(fx.t + 1.0, 0.0, kOffset);   // 提前 1 s
+        const auto r3 = fx.loop.submit_profile(future, fx.t + 0.010);
+        check(!r3.ok, "远远来自未来的时间戳应被拒绝");
+        check(r3.reason == RejectReason::kStampBackwards,
+              "超前过多也归为时间戳类拒绝");
+        std::printf("  时间戳倒退 / 超前 1 s -> 均拒绝，原因=%s\n",
+                    to_string(r2.reason));
+    }
+}
+
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -2807,6 +3029,7 @@ int main() {
     test_lqi_windup_authority();
     test_temporal_fuser_boundaries();
     test_submission_rejections();
+    test_driver_error_paths();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");
