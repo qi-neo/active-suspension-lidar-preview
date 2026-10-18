@@ -9,9 +9,9 @@ ROS2 · C++ · PCL · Embedded · Multi-sensor fusion
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes three offline self-tests (v3 control: 142 checks, driver parsing: 63
-> checks, v2 point-cloud pipeline). Starting from **v3.1.0** the packages build
-> cleanly — **earlier tags do not build**. See [CHANGELOG](CHANGELOG.md).
+> executes three offline self-tests (v3 control: 284 checks, driver parsing: 63
+> checks, v2 pure functions: 69 checks — 416 in total). Starting from **v3.1.0**
+> the packages build cleanly — **earlier tags do not build**. See [CHANGELOG](CHANGELOG.md).
 
 ## Overview
 
@@ -309,7 +309,7 @@ All three C++ packages ship offline checks that confirm the pipeline without any
 ```bash
 ros2 run unilidar_driver decoder_selftest         # packet parsing, 63 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
-ros2 run suspension_control_v3 control_selftest    # control and safety logic, 142 checks
+ros2 run suspension_control_v3 control_selftest    # control and safety logic, 284 checks
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
