@@ -32,14 +32,14 @@
 
 1. [项目简介](#1-项目简介)
 2. [系统架构](#2-系统架构)
-3. [仓库结构](#3-仓库结构)
-4. [模块说明](#4-模块说明)
+3. [快速开始](#3-快速开始)
+4. [仓库结构](#4-仓库结构)
+5. [模块说明](#5-模块说明)
     - [unilidar_driver](#unilidar_driver--宇树-l1-激光雷达驱动)
     - [suspension_preview](#suspension_preview--初版预瞄节点历史版本)
     - [suspension_preview_v2](#suspension_preview_v2--接口化版本)
     - [suspension_control_v3](#suspension_control_v3--闭环控制与安全状态机)
     - [car_balancer](#car_balancer--早期姿态平衡包)
-5. [快速开始](#5-快速开始)
 6. [关键参数](#6-关键参数)
 7. [实测结果](#7-实测结果)
 8. [下行带宽](#8-下行带宽)
@@ -71,12 +71,14 @@
 ## 2. 系统架构
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart TB
     subgraph S1["感知层 · 硬件"]
         L["UniLiDAR<br/>点云 + IMU"]
         W["轮速传感器"]
     end
     subgraph S2["驱动与解算层 · 香橙派 AI Pro"]
+        direction LR
         DR["unilidar_driver<br/>UDP 报文解析"]
         F["多传感器融合<br/>时间戳对齐"]
         P["路面高程提取<br/>PCL"]
@@ -106,6 +108,7 @@ flowchart TB
 ### 预瞄节点数据流
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart TB
     A["/unilidar/cloud"] --> B["TF 变换<br/>→ base_link"]
     B --> C["轮迹 ROI<br/>±0.1 m · 前方 5 m"]
@@ -118,7 +121,49 @@ flowchart TB
 控制节点以 200 Hz（5 ms）周期运行。状态机在 `suspension_control_v3` 中实现，除论文给出的
 `CALIBRATING → LEVELING → BALANCING` 外，还包含数据异常时的降级与急停处理。
 
-## 3. 仓库结构
+## 3. 快速开始
+
+```bash
+# 1. 工作空间准备：把本仓库放到 src/ 下
+mkdir -p ~/ws/src && cd ~/ws/src
+git clone https://github.com/qi-neo/active-suspension-lidar-preview
+# 如果还想用官方节点做对照，再 clone 官方 SDK（本仓库的驱动不依赖它）
+# git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# 雷达驱动另有独立仓库（含驱动编写思路文档），二者内容一致，按需选用：
+# git clone https://github.com/qi-neo/unilidar-driver
+
+# 2. 编译
+cd ~/ws
+colcon build --packages-select unilidar_driver suspension_preview suspension_preview_v2 suspension_control_v3
+source install/setup.bash
+
+# 3. 接真实雷达：先跑探针确认能收到、真实包长是多少（详见驱动包 README）
+ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex
+
+# 4. 跑驱动，顶替官方节点
+ros2 launch unilidar_driver unilidar_driver.launch.py
+
+# 5. 运行 v2 预瞄（先只发话题，不接硬件）
+ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
+ros2 topic echo /suspension/road_profile --once
+
+# 6. 运行 v3 闭环控制（不接硬件时只计算不下发）
+ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
+```
+
+四个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
+
+```bash
+ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
+ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
+ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，395 项检查
+```
+
+依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
+雷达驱动包 `unilidar_driver` 额外需要 `tf2`、`tf2_ros`，**不依赖** Unitree Lidar SDK。
+
+## 4. 仓库结构
 
 ```
 active-suspension-lidar-preview/
@@ -133,7 +178,7 @@ active-suspension-lidar-preview/
     └── review/                      v1 代码审查报告、v2 升级说明
 ```
 
-## 4. 模块说明
+## 5. 模块说明
 
 ### unilidar_driver — 宇树 L1 激光雷达驱动
 
@@ -184,6 +229,7 @@ raw 模式、TF 失败无兜底、无效格静默填 0）均已在 v2 修复，�
 无效格静默填 0 等问题。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart LR
     subgraph CORE["suspension_core · 不依赖 ROS"]
         EX["IRoadProfileExtractor"]
@@ -215,6 +261,7 @@ flowchart LR
 可脱离整车单独编译与自检。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart LR
     BOOT["Boot"] --> CAL["Calibrating<br/>零位标定"]
     CAL --> LEV["Leveling<br/>回中找平"]
@@ -284,59 +331,17 @@ ros2 run car_balancer test_imu_node
 两个入口都无法运行，现已修复。另一条 `balancer_node` 指向的模块未随包提供，已移除该入口。
 问题记录见 `docs/review/01-code-review-v1.md`。
 
-## 5. 快速开始
-
-```bash
-# 1. 工作空间准备：把本仓库放到 src/ 下
-mkdir -p ~/ws/src && cd ~/ws/src
-git clone https://github.com/qi-neo/active-suspension-lidar-preview
-# 如果还想用官方节点做对照，再 clone 官方 SDK（本仓库的驱动不依赖它）
-# git clone https://github.com/unitreerobotics/unitree_lidar_sdk
-# 雷达驱动另有独立仓库（含驱动编写思路文档），二者内容一致，按需选用：
-# git clone https://github.com/qi-neo/unilidar-driver
-
-# 2. 编译
-cd ~/ws
-colcon build --packages-select unilidar_driver suspension_preview suspension_preview_v2 suspension_control_v3
-source install/setup.bash
-
-# 3. 接真实雷达：先跑探针确认能收到、真实包长是多少（详见驱动包 README）
-ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex
-
-# 4. 跑驱动，顶替官方节点
-ros2 launch unilidar_driver unilidar_driver.launch.py
-
-# 5. 运行 v2 预瞄（先只发话题，不接硬件）
-ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
-ros2 topic echo /suspension/road_profile --once
-
-# 6. 运行 v3 闭环控制（不接硬件时只计算不下发）
-ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
-```
-
-四个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
-
-```bash
-ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
-ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
-ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，395 项检查
-```
-
-依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
-雷达驱动包 `unilidar_driver` 额外需要 `tf2`、`tf2_ros`，**不依赖** Unitree Lidar SDK。
-
 ## 6. 关键参数
 
-| 参数 | v1 | v2 | 说明 |
-|------|----|----|------|
-| 预瞄距离 | `PREVIEW_DIST` 宏 | `preview_dist` | 5.0 m |
-| 纵向分辨率 | 写死 5 cm | `resolution` | 格数由二者推导 |
-| 轮迹宽度 | 写死 ±10 cm | `lane_half_width` | 0.1 m |
-| 地面高程窗口 | 写死 ±0.5 m | `ground_z_min/max` | 需按坐标系定义核对 |
-| 格内统计量 | 均值 | `use_median` | 默认中位数 |
-| 串口 | `/dev/ttyS0` @115200 | `serial_port` / `baud_rate` | 可配到 921600 |
-| 参数方式 | 宏定义，需重编译 | YAML + launch | 运行时生效 |
+| 参数 | v2 | 说明（v1 对比） |
+|------|----|------|
+| 预瞄距离 | `preview_dist` | 5.0 m；v1 为 `PREVIEW_DIST` 宏 |
+| 纵向分辨率 | `resolution` | 格数由分辨率推导；v1 写死 5 cm |
+| 轮迹宽度 | `lane_half_width` | 0.1 m；v1 写死 ±10 cm |
+| 地面高程窗口 | `ground_z_min/max` | 需按坐标系定义核对；v1 写死 ±0.5 m |
+| 格内统计量 | `use_median` | 默认中位数；v1 为均值 |
+| 串口 | `serial_port` / `baud_rate` | 可配到 921600；v1 写死 `/dev/ttyS0` @115200 |
+| 参数方式 | YAML + launch | 运行时生效；v1 为宏定义需重编译 |
 
 ## 7. 实测结果
 
