@@ -12,7 +12,7 @@
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
 [![平台](https://img.shields.io/badge/%E8%BD%A6%E8%BD%BD%E5%B9%B3%E5%8F%B0-%E9%A6%99%E6%A9%99%E6%B4%BE%20AI%20Pro-orange)](#硬件平台)
 
-[English](README.en.md) | 简体中文 | **[五分钟上手](QUICKSTART.md)**
+[English](README.en.md) | 简体中文
 
 </div>
 
@@ -24,9 +24,6 @@
 
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检（v3 控制 346 项、驱动解析 63 项、
 > v2 纯函数 69 项，共 478 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
-
-> **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
-> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（346 项检查）。
 
 ## 目录
 
@@ -237,7 +234,8 @@ flowchart LR
 - **单周期时长封顶**：定时抖动不会把累计时长判据一次性推过阈值造成误动作
 - **硬件急停**：进入急停时同时调用驱动器的 `emergency_stop()`，而不只是下发零位指令
 
-前馈取样距离上的四处算法细节（v3.2.0 起）：
+<details>
+<summary>前馈取样距离上的四处算法细节（v3.2.0 起，点击展开）</summary>
 
 - **距离随车速自适应**：取样距离 = clamp(车速 × 响应时域, 0.5 m, 5 m)，响应时域取作动器
   走满行程耗时的 2.5 倍（默认 40 mm / 300 mm/s × 2.5 ≈ 0.33 s）。固定距离在低速时
@@ -252,6 +250,8 @@ flowchart LR
 - **括号格插值与跨侧回退**：取样在相邻格间线性插值，避免 5 cm 量化形成台阶式
   行程指令；单侧轮迹无有效数据时借对侧高程，避免左右不对称的伪横滚指令
   （该情况在 `ControlStatus.feedforward_fallback` 置位，可观测）
+
+</details>
 
 生效的车速、取样距离、帧龄每拍写进 `ControlStatus`
 （`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
@@ -363,34 +363,62 @@ v1 在 115200 bps 下的上限与雷达 10–20 Hz 的输出正好对冲，这�
 
 ## 9. 常见问题
 
-**收不到点云，节点启动后没有输出**
+<details>
+<summary>收不到点云，节点启动后没有输出</summary>
+
 订阅端 QoS 与发布端不匹配。雷达通常以 `BEST_EFFORT` 发布，订阅端必须用 `SensorDataQoS`；
 v1 使用默认 QoS（`RELIABLE`），是收不到数据的常见原因。反过来也成立：`unilidar_driver`
 统一按 `SensorDataQoS` 发布，就是为了与 v3 控制节点的订阅端对齐。
 
-**点云与 IMU 都收不到，但探针显示雷达在发包**
+</details>
+
+<details>
+<summary>点云与 IMU 都收不到，但探针显示雷达在发包</summary>
+
 先跑 `ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex` 核对本机 IP、端口
 与雷达的目标地址是否对应；再看探针汇总里「整包长度分布」是否与驱动预期一致。
 
-**IMU 姿态看起来是错的**
+</details>
+
+<details>
+<summary>IMU 姿态看起来是错的</summary>
+
 大概率是四元数分量顺序。官方未定死 `quaternion[4]` 的排列，官方 ROS2 包内部两种顺序都用过。
 把雷达静止水平放置，正确的顺序下 `w` 接近 ±1、其余接近 0；判定方法见驱动包 README。
 
-**串口打开失败**
+</details>
+
+<details>
+<summary>串口打开失败</summary>
+
 设备权限问题。把当前用户加入 `dialout` 组后重新登录：`sudo usermod -aG dialout $USER`，
 不要用 `chmod 777`。
 
-**下发的高程数据在下游解析出错**
+</details>
+
+<details>
+<summary>下发的高程数据在下游解析出错</summary>
+
 先确认波特率与帧格式。v2 与 v1 的帧格式不兼容（v1 是 float32 加 8 位累加和，v2 是 int16 毫米加 CRC16），
 下游解析代码需要同步更新。
 
-**剖面里出现 NaN 或 0x7FFF**
+</details>
+
+<details>
+<summary>剖面里出现 NaN 或 0x7FFF</summary>
+
 说明该格被判定为无效：点数不足、格内高低差超过 `max_cell_spread`（疑似障碍物），或落在
 `ground_z_min/max` 窗口之外。需要时打开 `interpolate_gaps` 做线性插值。
 
-**TF 报错或一直不发数据**
+</details>
+
+<details>
+<summary>TF 报错或一直不发数据</summary>
+
 v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 与雷达坐标系之间的变换是否已发布，
 必要时放宽 `tf_timeout_ms`。
+
+</details>
 
 ## 10. 许可证
 
@@ -399,6 +427,9 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 11. English Abstract
+
+<details>
+<summary>点击展开英文摘要</summary>
 
 **Active Suspension with LiDAR Preview** — a National College Student Innovation Training Program.
 
@@ -411,3 +442,5 @@ them over UART to the actuator controller. `suspension_preview_v2` refactors the
 logic into reusable interfaces backed by a ROS-independent core library, adds a CRC16/int16 serial protocol, and
 publishes the profile as a ROS topic with rviz visualization. See `docs/paper/` for the full paper and
 `docs/review/` for the code review and upgrade notes.
+
+</details>
