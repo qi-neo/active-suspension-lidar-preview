@@ -15,10 +15,12 @@
 
 ## 1. 五分钟跑起来（不需要 ROS、不需要硬件）
 
-控制内核**不依赖 ROS、不依赖 PCL**，一条 `g++` 命令就能编出来跑：
+控制内核**不依赖 ROS、不依赖 PCL**，一条 `g++` 命令就能编出来跑。
+**下面每个代码块的起始目录都写在注释里**——这些命令用的路径是相对的，换目录就会
+找不到文件：
 
 ```bash
-cd src/suspension_control_v3
+cd src/suspension_control_v3          # 仓库根 → 本包
 g++ -std=c++17 -O2 \
   -I include -I ../suspension_preview_v2/include \
   examples/control_selftest.cpp \
@@ -26,30 +28,40 @@ g++ -std=c++17 -O2 \
   src/safety_state_machine.cpp src/control_loop.cpp src/temporal_fuser.cpp \
   -o /tmp/control_selftest
 
-/tmp/control_selftest        # 约 5 秒，输出 346 项检查结果
+/tmp/control_selftest   # 编译器约 4 s；运行 0.01 s，输出 346 项检查结果
 ```
 
 看到 `检查项 346，失败 0 -> 全部通过` 就说明代码是完整的、逻辑是通的。
 这一条同时验证了：输入校验、安全状态机、两种控制律、预瞄前馈（单点与 FIR）、
 多帧融合、姿态滤波链、位置反馈与堵转判定、急停与降级路径。
 
-另外两个包也各有离线自检（同样不需要 ROS）：
+v2 的三个纯函数自检（同样不需要 ROS；**先回到仓库根目录**）：
 
 ```bash
-# 雷达报文解析（v2 的纯函数部分，69 项）
-g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
-  src/suspension_preview_v2/examples/protocol_selftest.cpp \
-  src/suspension_preview_v2/src/protocol.cpp -o /tmp/proto && /tmp/proto
+cd "$(git rev-parse --show-toplevel)"   # 回到仓库根
 
-# 路面趋势与障碍物检测（29 + 12 项）
+# 路面趋势拟合（29 项）
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/trend_selftest.cpp \
   src/suspension_preview_v2/src/road_trend.cpp -o /tmp/trend && /tmp/trend
+
+# 障碍物检测（12 项）
+g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
+  src/suspension_preview_v2/examples/obstacle_selftest.cpp \
+  src/suspension_preview_v2/src/obstacle_detect.cpp -o /tmp/obst && /tmp/obst
+
+# 串口协议编解码（28 项）
+g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
+  src/suspension_preview_v2/examples/protocol_selftest.cpp \
+  src/suspension_preview_v2/src/protocol.cpp -o /tmp/proto && /tmp/proto
 ```
+
+三个加起来 69 项，与 v3 的 346 项合计 **415 项**。
 
 ### 想跑内存与未定义行为检查
 
 ```bash
+cd src/suspension_control_v3          # 同样要在本包目录下
 g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
   -I include -I ../suspension_preview_v2/include \
   examples/control_selftest.cpp \

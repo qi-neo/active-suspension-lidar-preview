@@ -25,7 +25,7 @@
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检（v3 控制 346 项、驱动解析 63 项、
 > v2 纯函数 69 项，共 478 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
-> **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、五秒钟，
+> **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
 > 不需要 ROS 和硬件就能确认这套代码是完整可跑的（346 项检查）。
 
 ## 目录
