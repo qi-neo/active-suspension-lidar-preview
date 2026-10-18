@@ -12,7 +12,7 @@
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
 [![平台](https://img.shields.io/badge/%E8%BD%A6%E8%BD%BD%E5%B9%B3%E5%8F%B0-%E9%A6%99%E6%A9%99%E6%B4%BE%20AI%20Pro-orange)](#硬件平台)
 
-[English](README.en.md) | 简体中文
+[English](README.en.md) | 简体中文 | **[五分钟上手](QUICKSTART.md)**
 
 </div>
 
@@ -24,6 +24,9 @@
 
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检（v3 控制 346 项、驱动解析 63 项、
 > v2 纯函数 69 项，共 478 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+
+> **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
+> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（346 项检查）。
 
 ## 目录
 
