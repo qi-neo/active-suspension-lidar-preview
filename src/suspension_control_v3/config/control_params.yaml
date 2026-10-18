@@ -9,6 +9,9 @@ suspension_control_node:
     # 控制环与状态上报频率
     control_rate_hz: 200.0
     status_rate_hz: 20.0
+    # 单拍时长上限 (s)。定时抖动时不让累计时长一次跳过阈值，否则降级、
+    # 链路超时这些"按持续时间"的判据会提前误触发
+    max_step_dt: 0.05
 
     # 作动器。enable_driver 为 false 时只算不下发，便于纯软件联调
     enable_driver: true
@@ -77,6 +80,14 @@ suspension_control_node:
     # 时间长度恒为 11 拍（200 Hz 下 55 ms）。周期由 control_rate_hz 推出，
     # 不要另外配——两处写死迟早不一致，等于改了时间标度
 
+    # ---- 多帧融合（跨帧按位置对齐后逐格取中位数）----
+    # 单帧剖面会因点云稀疏在个别格上抖动，融合几帧能压掉这类单帧异常；
+    # 融合只在有车速时成立（无车速无法对齐位置，会自动直通最新帧）
+    fusion_frames: 3                # 参与融合的帧数（含最新帧）；1 = 关闭融合
+    fusion_max_age_s: 0.3           # 参与融合的帧的最大帧龄 (s)
+    fusion_max_dispersion_m: 0.03   # 同位置各帧读数 max-min 超此值判低置信、该格置无效
+                                    # （宁可让前馈少用一格，也不拿互相矛盾的数据下指令）
+
     # ---- 增量式 LQI 增益（controller_kind=1 时生效，PD 模式下忽略）----
     # 控制律：u[k] = u[k-1] + kx1·Δθ + kx2·Δω + ki·θ
     # 积分作用来自 ki·θ 每拍累加，能压掉 PD 压不掉的常值横坡残留。
@@ -101,6 +112,8 @@ suspension_control_node:
     leveling_duration_s: 1.0        # 找平持续时间
     degrade_after_unhealthy_s: 0.15 # 连续不可信多久后降级
     recover_duration_s: 0.5         # 恢复正常多久后回闭环
+    degraded_hold_timeout_s: 5.0    # 降级后保持多久仍未恢复则转急停回中
+                                    # （不让作动器一直停在旧行程上）
     max_abs_roll_deg: 20.0          # 姿态安全阈值
     max_abs_pitch_deg: 20.0
     link_lost_timeout_s: 0.5        # 作动器链路中断多久后急停

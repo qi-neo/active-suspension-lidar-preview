@@ -40,6 +40,11 @@
   例：`height_limit_mm = 0` 会让输出恒为 0（作动器一动不动但日志正常）、
   `controller_kind = 2` 会被静默当成 LQI、`min_lookahead_m > max_lookahead_m`
   会让 `std::clamp` 的前提被破坏
+- **参数与 YAML 一致性检查**（`tools/check_ros_params.py`，进 CI）：ROS2 的
+  YAML 键名是纯字符串匹配，键写错或改名没同步都会让参数**静默失效**。脚本把
+  "YAML 有但节点不读"和"节点读但 YAML 没写"两个方向都拦下。首次运行即抓到
+  5 个参数（融合窗口三项、降级超时、单拍时长上限）节点一直在读却不在 YAML 里，
+  用户无从发现——已补进配置
 - **QUICKSTART.md**：面向刚拿到代码的人，一条 `g++` 命令、不需要 ROS 与硬件
   就能确认代码完整可跑
 - v2：用重力向量建虚拟水平面，雷达竖直安装时也能取到真实高程

@@ -42,6 +42,13 @@ jobs:
         working-directory: src/active-suspension-lidar-preview
         run: python3 tools/check_deps.py
 
+      # ROS2 里 YAML 键名是纯字符串匹配：键写错、或改了参数名没同步 YAML，
+      # 结果都是参数被静默忽略——节点照常启动、跑起来却用着默认值。
+      # 这个检查零耗时，放在构建之前，漂移在 5 分钟的编译前就暴露
+      - name: 参数声明与 YAML 键一一对应
+        working-directory: src/active-suspension-lidar-preview
+        run: python3 src/suspension_control_v3/tools/check_ros_params.py
+
       - name: 安装构建与依赖工具
         run: |
           set -e
@@ -74,7 +81,7 @@ jobs:
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（346 项）
+      - name: v3 控制与安全逻辑自检（395 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh

@@ -246,7 +246,25 @@ virtual bool get_position(std::array<int, 4>& height_mm) const;
 `SerialSuspensionDriver` 本身仍返回 false（串口协议里还没有位置上报帧，需要 MCU 侧
 先定义）；要走串口就在桥接节点里收 MCU 的位置帧、再发到话题上即可。
 
-### 5.5 预瞄前馈优化（`tools/lqr_gain_design.py` 第七节）
+### 5.5 参数与 YAML 的一致性检查（`tools/check_ros_params.py`）
+
+ROS2 里 YAML 的键名是**纯字符串匹配**：键写错一个字母，或者代码里改了参数名而
+YAML 没跟着改，结果都是**参数被静默忽略**——节点照常启动、照常跑，只是那个值
+从来没生效过。反过来，节点读了某参数但 YAML 里没写，用户翻遍配置文件也找不到它。
+
+这个脚本把两个方向都拦下（CI 里零耗时，跑在 colcon 之前）：
+
+```bash
+python3 src/suspension_control_v3/tools/check_ros_params.py
+# 节点声明参数 67 个；YAML 键 67 个
+# 参数与 YAML 一一对应。
+```
+
+它最初抓到的真问题：`fusion_frames` / `fusion_max_age_s` /
+`fusion_max_dispersion_m` / `degraded_hold_timeout_s` / `max_step_dt`
+这五个参数节点一直在读，但 YAML 里没有——用户根本不知道有这些可调项。
+
+### 5.6 预瞄前馈优化（`tools/lqr_gain_design.py` 第七节）
 
 前馈一直是"比例映射 + 拍脑袋增益 1.0"：`u_ff = -g·z_r(取样点)`，取多远由
 `lookahead_time_s` 定，`g` 恒为 1.0。第七节把这两件事一起放进优化：
