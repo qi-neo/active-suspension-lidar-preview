@@ -19,6 +19,7 @@
 // 没有车速信息时无法对齐位置，此时退化为直通最新帧（行为与此前一致）。
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <deque>

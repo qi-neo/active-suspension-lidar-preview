@@ -8,6 +8,7 @@
 // 抽成不依赖 ROS 的头文件后，控制自检可以直接覆盖它们。
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>

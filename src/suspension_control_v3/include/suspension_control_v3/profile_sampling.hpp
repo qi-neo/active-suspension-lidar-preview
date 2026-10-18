@@ -4,6 +4,7 @@
 // 和控制器采样的方式不同，融合就白做了。
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 #include "suspension_preview_v2/types.hpp"

@@ -1,6 +1,7 @@
 // 核心库离线示例：合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，
 // 再做一次协议编解码往返校验。不需要 ROS 与硬件，可当冒烟测试用。
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
