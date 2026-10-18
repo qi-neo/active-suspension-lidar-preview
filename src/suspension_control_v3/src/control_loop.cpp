@@ -109,10 +109,15 @@ void SuspensionControlLoop::submit_obstacles(std::vector<ObstacleAhead> obstacle
 
 void SuspensionControlLoop::submit_actuator_position(
     std::array<int, kWheelCount> height_mm, double now_sec) {
+    // 合理性检查。这里原先是"非有限值直接忽略"，但入参是 std::array<int>，
+    // int 不可能装 NaN——那条检查永远不成立，是死代码（覆盖率报告抓出来的）。
+    // 换成真正可达、也真正有意义的判据：位置超过 max_position_mm 只能说明
+    // 上报链路出了问题，不能拿它进堵转判据——一个恒定的巨大偏差会让控制器
+    // 立刻判定堵转并降级
+    const double bound = params_.max_position_mm;
     for (int i = 0; i < kWheelCount; ++i) {
-        // 非有限值直接忽略：一个坏点进了堵转判据会让偏差长期不为零，
-        // 表现是无缘无故降级，且很难查到是位置上报的问题
-        if (!std::isfinite(static_cast<double>(height_mm[static_cast<std::size_t>(i)]))) {
+        if (std::fabs(static_cast<double>(height_mm[static_cast<std::size_t>(i)])) >
+            bound) {
             return;
         }
     }

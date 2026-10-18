@@ -45,6 +45,7 @@
 #include "suspension_control_v3/attitude_filter.hpp"
 #include "suspension_control_v3/control_loop.hpp"
 #include "suspension_control_v3/msg_convert.hpp"
+#include "suspension_control_v3/temporal_fuser.hpp"
 
 // 让 FIR 的"时间步长折算成距离"恰好等于剖面格距的车速：
 //   v × control_period_s = spacing  =>  v = 0.05 / 0.005 = 10 m/s
@@ -2501,6 +2502,235 @@ void test_lqi_windup_authority() {
     }
 }
 
+// ---------------------------------------------------------------- 29. 融合器边界路径
+//
+// 覆盖率报告指出 temporal_fuser.cpp 只有 90.9%，缺的四处全是边界：格数不一致的
+// 旧帧、超出 kMaxFrames 的窗口裁剪、spacing 非法的直通、以及每格只有一帧有数据
+// 时的直取。这四条都是"多帧才走得通"的路径，而既有用例只覆盖了理想情况。
+void test_temporal_fuser_boundaries() {
+    section("29. 融合器边界路径");
+
+    auto make_frame = [](std::size_t cells, double stamp, double h) {
+        suspension_preview_v2::RoadProfileFrame f;
+        f.stamp_sec = stamp;
+        f.spacing = 0.05f;
+        f.wheel_dist = 0.6f;
+        f.preview_dist = 1.0f;
+        f.left.reset(cells);
+        f.right.reset(cells);
+        for (std::size_t i = 0; i < cells; ++i) {
+            f.left.height[i] = static_cast<float>(h);
+            f.right.height[i] = static_cast<float>(h);
+            f.left.valid[i] = kMeasured;
+            f.right.valid[i] = kMeasured;
+        }
+        return f;
+    };
+
+    // ---- 29.1 格数与最新帧不一致的旧帧被跳过 ----
+    // 对不齐就没法按位置融合，不能用
+    {
+        TemporalProfileFuser f;
+        f.push(make_frame(20, 1.00, 0.04));   // 旧帧 20 格
+        f.push(make_frame(30, 1.01, 0.06));   // 最新帧 30 格
+        suspension_preview_v2::RoadProfileFrame out;
+        // 必须给车速：无车速时位置无法对齐，fuse() 会直接直通最新帧，
+        // 那样这一组断言会被直通路径"蒙对"，根本没测到格数过滤
+        const bool ok = f.fuse(1.02, /*has_speed=*/true, 2.0, out);
+        check(ok, "缓冲非空时应融合成功");
+        check(out.left.size() == 30, "输出格数应等于最新帧");
+        check(f.last_used_frames() == 1, "格数不一致的旧帧应被跳过，只用最新帧");
+        std::printf("  20 格 + 30 格 -> 用 %zu 帧，输出 %zu 格\n",
+                    f.last_used_frames(), out.left.size());
+    }
+
+    // ---- 29.2 可用帧超过 kMaxFrames：丢最旧、保最新 ----
+    // params().frames 可被外部改大（不经构造函数的 clamp），此时靠每格定长
+    // 的取样数组兜底：宁少勿越界
+    {
+        TemporalProfileFuser f;
+        f.params().frames = 100;   // 故意绕过 clamp
+        // 10 帧，高度按 2 mm 递增。**步长必须小于离散度阈值 30 mm**：
+        // 高差再大就会触发低置信判据、整格置无效，那就测不到中位数了
+        for (int i = 0; i < 10; ++i) {
+            f.push(make_frame(20, 1.00 + 0.01 * i, 0.100 + 0.002 * i));
+        }
+        suspension_preview_v2::RoadProfileFrame out;
+        const bool ok = f.fuse(1.20, /*has_speed=*/true, 2.0, out);
+        check(ok, "应融合成功");
+        check(f.last_used_frames() == TemporalProfileFuser::kMaxFrames,
+              "可用帧应被截到 kMaxFrames");
+        // 丢最旧 2 帧后剩 0.104..0.118 共 8 帧，
+        // 中位数 = 第 4、5 小的平均 = (0.110+0.112)/2 = 0.111 m
+        // 若 10 帧全用则是 (0.108+0.110)/2 = 0.109 m——两者可区分
+        check(std::fabs(out.left.height[0] - 0.111f) < 1e-4,
+              "应丢弃最旧的 2 帧（中位数 111 mm 而非 109 mm）");
+        std::printf("  10 帧可用 -> 截到 %zu 帧，融合值 %.1f mm（丢最旧）\n",
+                    f.last_used_frames(), out.left.height[0] * 1000.0);
+    }
+
+    // ---- 29.3 spacing 非法：直通，交给上游校验 ----
+    {
+        TemporalProfileFuser f;
+        f.push(make_frame(20, 1.00, 0.05));       // 正常旧帧
+        auto newest_bad = make_frame(20, 1.02, 0.07);
+        newest_bad.spacing = 0.0f;                // 最新帧几何非法
+        f.push(newest_bad);
+        suspension_preview_v2::RoadProfileFrame out;
+        const bool ok = f.fuse(1.03, /*has_speed=*/true, 2.0, out);
+        check(ok, "spacing 非法也应返回 true（直通，不当作失败）");
+        check(f.last_used_frames() == 1, "spacing 非法应记作只用 1 帧");
+        check(std::fabs(out.left.height[0] - 0.07f) < 1e-5,
+              "直通时应原样输出最新帧高程");
+        check(out.spacing == 0.0f, "直通时不应擅自修改几何参数");
+        std::printf("  spacing=0 -> 直通，高程 %.1f mm 原样输出\n",
+                    out.left.height[0] * 1000.0);
+    }
+
+    // ---- 29.4 每格只有一帧有数据：直取该值并标 kFused ----
+    {
+        TemporalProfileFuser f;
+        auto a = make_frame(20, 1.00, 0.04);
+        auto b = make_frame(20, 1.01, 0.06);
+        // b 全判无效：每格只有 a 一个样本，走 n==1 的直取分支
+        for (std::size_t i = 0; i < b.left.size(); ++i) {
+            b.left.valid[i] = kInvalid;
+            b.right.valid[i] = kInvalid;
+        }
+        f.push(a);
+        f.push(b);
+        suspension_preview_v2::RoadProfileFrame out;
+        const bool ok = f.fuse(1.02, /*has_speed=*/true, 2.0, out);
+        check(ok, "应融合成功");
+        check(std::fabs(out.left.height[0] - 0.04f) < 1e-5,
+              "只有一帧有数据时应直取该值（不是两帧平均）");
+        check(out.left.valid[0] == suspension_preview_v2::kFused,
+              "单样本结果也应标记为 kFused");
+        std::printf("  一帧有效一帧无效 -> 直取 %.1f mm，标记 kFused\n",
+                    out.left.height[0] * 1000.0);
+    }
+}
+
+// ---------------------------------------------------------------- 30. 姿态/位置提交的拒绝路径
+//
+// 覆盖率 96% 但分支只有 73%，差的几乎全在这些"拒绝"分支里：主路径测得很足，
+// 坏数据怎么被拒基本没碰。而这些恰恰是最该测的——拒错一个方向就是误降级。
+void test_submission_rejections() {
+    section("30. 姿态/位置提交的拒绝路径");
+
+    // ---- 30.1 valid=false ----
+    {
+        LoopFixture fx;
+        Attitude a;
+        a.valid = false;
+        a.stamp_sec = fx.t;
+        const bool ok = fx.loop.submit_attitude(a, fx.t);
+        check(!ok, "valid=false 应被拒绝");
+        check(fx.loop.status().attitude_rejected == 1, "拒绝计数应 +1");
+        check(!fx.loop.status().attitude_accepted, "拒绝后不应标记为已接受");
+        std::printf("  valid=false -> 拒绝，rejected=%zu\n",
+                    static_cast<std::size_t>(fx.loop.status().attitude_rejected));
+    }
+
+    // ---- 30.2 非有限的姿态量 ----
+    {
+        LoopFixture fx;
+        Attitude a;
+        a.valid = true;
+        a.stamp_sec = fx.t;
+        a.roll_rad = std::numeric_limits<double>::quiet_NaN();
+        a.pitch_rad = 0.0;
+        a.roll_rate = 0.0;
+        a.pitch_rate = 0.0;
+        check(!fx.loop.submit_attitude(a, fx.t), "roll 为 NaN 应被拒绝");
+
+        Attitude b = a;
+        b.roll_rad = 0.0;
+        b.pitch_rate = std::numeric_limits<double>::infinity();
+        check(!fx.loop.submit_attitude(b, fx.t), "pitch_rate 为 inf 应被拒绝");
+        check(fx.loop.status().attitude_rejected == 2, "两次拒绝计数都该记上");
+        std::printf("  NaN / inf -> 均拒绝，rejected=%zu\n",
+                    static_cast<std::size_t>(fx.loop.status().attitude_rejected));
+    }
+
+    // ---- 30.3 超过物理上限的姿态 ----
+    {
+        LoopFixture fx;
+        Attitude a;
+        a.valid = true;
+        a.stamp_sec = fx.t;
+        a.roll_rad = 0.0;
+        a.pitch_rad = 0.0;
+        a.roll_rate = 0.0;
+        a.pitch_rate = 0.0;
+        const ControlLoopParams lp;   // 读默认值，顺便把它们固定成断言基准
+        a.roll_rad = lp.max_abs_attitude_rad + 0.01;
+        check(!fx.loop.submit_attitude(a, fx.t), "超过物理上限应被拒绝");
+        // 刚好等于上限不算超（边界取闭区间）
+        a.roll_rad = lp.max_abs_attitude_rad;
+        check(fx.loop.submit_attitude(a, fx.t), "刚好等于上限应被接受");
+        std::printf("  上限 %.1f rad：超过拒绝、等于接受\n", lp.max_abs_attitude_rad);
+    }
+
+    // ---- 30.4 帧龄超限与"来自未来" ----
+    {
+        LoopFixture fx;
+        Attitude a;
+        a.valid = true;
+        a.roll_rad = 0.0;
+        a.pitch_rad = 0.0;
+        a.roll_rate = 0.0;
+        a.pitch_rate = 0.0;
+        const ControlLoopParams lp;   // 读默认值，顺便把它们固定成断言基准
+        // 过期：stamp 在 now 之前很远
+        a.stamp_sec = fx.t - (lp.max_attitude_age_ms * 1e-3) - 0.001;
+        check(!fx.loop.submit_attitude(a, fx.t), "姿态过期应被拒绝");
+        // 来自未来：时间戳超前太多同样是坏数据（时钟没同步的典型症状）
+        a.stamp_sec = fx.t + (lp.max_attitude_age_ms * 1e-3) + 0.001;
+        check(!fx.loop.submit_attitude(a, fx.t), "时间戳超前过多也应被拒绝");
+        // 边界内应接受
+        a.stamp_sec = fx.t - (lp.max_attitude_age_ms * 1e-3) + 0.0005;
+        check(fx.loop.submit_attitude(a, fx.t), "有效期内的姿态应被接受");
+        std::printf("  帧龄上限 %.0f ms：过期/超前都拒，边界内接受\n",
+                    lp.max_attitude_age_ms);
+    }
+
+    // ---- 30.5 位置上报的合理性检查 ----
+    // 原先这里查的是"非有限值"，但入参是 std::array<int>——int 装不下 NaN，
+    // 那条检查永远不成立（覆盖率抓出来的死代码）。换成真正可达的判据：
+    // 位置离谱到超出行程一个量级，只能说明上报链路出了问题
+    {
+        LoopFixture fx(true, false);
+        const double bound = ControlLoopParams{}.max_position_mm;   // 400 mm
+
+        // 先立基线：合理值 + 跑一拍，确认"有反馈"这条路是活的。
+        // 顺序反了会让下面那条"被忽略"的断言被"本来就没反馈"蒙对
+        const std::array<int, kWheelCount> ok_pos{20, 20, 20, 20};
+        fx.loop.submit_actuator_position(ok_pos, fx.t);
+        // status 只在 step() 里刷新，光 submit 不查
+        fx.loop.step(fx.t, 0.005);
+        check(fx.loop.status().has_position_feedback, "合理的位置值应被接受");
+        check(fx.loop.status().position_from_topic, "且应识别出来自话题上报");
+        const double err_before = fx.loop.status().max_position_error_mm;
+
+        // 再喂离谱值：整包忽略。注意"忽略"的含义是**不采用这一包**，
+        // 而不是作废所有位置数据——上一个好值仍在 position_timeout_s 内，
+        // 继续用它才是对的。所以该断言的是"垃圾没进来"，不是"反馈消失"
+        const std::array<int, kWheelCount> insane{99999, 20, 20, 20};
+        fx.loop.submit_actuator_position(insane, fx.t);
+        fx.loop.step(fx.t, 0.005);
+        check(fx.loop.status().has_position_feedback, "忽略坏包后仍应有反馈（用好值）");
+        check(fx.loop.status().actual_mm[0] == 20,
+              "离谱值不得进入堵转判据：左前实际位置应仍是上一包的 20 mm");
+        // 与坏包到来之前完全一致。注意不能写成"偏差小于 stall 阈值"：
+        // 本夹具没喂剖面、指令为 0，偏差本来就有 20 mm，那是夹具造成的，
+        // 与坏包无关。要问的是"坏包有没有改变什么"，答案必须是没有
+        check(std::fabs(fx.loop.status().max_position_error_mm - err_before) < 1e-9,
+              "坏包不得改变偏差：既不能把 99999 放进来，也不能把好值作废");
+        std::printf("  位置 > %.0f mm 整包忽略、否则接受（阈值 = 行程×10）\n", bound);
+    }
+}
+
 void test_emergency_output_path() {
     section("14. 急停与回中下发");
     LoopFixture fx(/*attach_driver=*/true, /*require_driver=*/false);
@@ -2575,6 +2805,8 @@ int main() {
     test_msg_conversion();
     test_fir_time_domain();
     test_lqi_windup_authority();
+    test_temporal_fuser_boundaries();
+    test_submission_rejections();
     test_emergency_output_path();
 
     std::printf("\n----------------------------------------\n");

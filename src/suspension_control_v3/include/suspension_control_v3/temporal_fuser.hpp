@@ -67,6 +67,11 @@ public:
     std::size_t last_low_confidence_cells() const { return last_low_confidence_; }
     double last_mean_dispersion_mm() const { return last_mean_dispersion_mm_; }
 
+    // 融合上限：再多帧的边际收益抵不上成本，也限制每格的取样数组大小。
+    // 公开而不是 private：调用方需要知道"配再大的 frames 也只有这么多帧真被
+    // 用上"，否则 diagnose 时会误以为参数生效了
+    static constexpr std::size_t kMaxFrames = 8;
+
 private:
     struct Entry {
         double stamp_sec{0.0};
@@ -76,9 +81,6 @@ private:
     void clamp_params() {
         params_.frames = std::clamp<std::size_t>(params_.frames, 1, kMaxFrames);
     }
-
-    // 融合上限：再多帧的边际收益抵不上成本，也限制每格的取样数组大小
-    static constexpr std::size_t kMaxFrames = 8;
 
     Params params_;
     std::deque<Entry> buf_;
