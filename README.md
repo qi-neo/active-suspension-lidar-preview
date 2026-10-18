@@ -1,12 +1,20 @@
+<div align="center">
+
 # 基于激光雷达路面预瞄的主动悬架系统
 
-国家级大学生创新训练计划项目 · Active Suspension with LiDAR Preview
+**国家级大学生创新训练计划项目** · Active Suspension with LiDAR Preview
 
-ROS2 · C++ · PCL · 嵌入式 · 多传感器融合
+激光雷达随车速自适应预瞄路面高程（0.5–5 m），融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架——从源头绕开"先颠簸、后补偿"的滞后问题。
+
+[![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
+[![平台](https://img.shields.io/badge/%E8%BD%A6%E8%BD%BD%E5%B9%B3%E5%8F%B0-%E9%A6%99%E6%A9%99%E6%B4%BE%20AI%20Pro-orange)](#硬件平台)
 
 [English](README.en.md) | 简体中文
 
-[![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+</div>
 
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑三个离线自检
 > （v3 控制 284 项、驱动解析 63 项、v2 纯函数 69 项，共 416 项）。

@@ -336,10 +336,6 @@ private:
         // 更不能因为有最后一帧就继续判堵转
         loop_params_.position_timeout_s =
             declare_parameter<double>("position_timeout_s", loop_params_.position_timeout_s);
-        // 位置合理性上限。超过就忽略这一包：离谱值只能说明上报链路出问题，
-        // 而一个恒定的巨大偏差会让控制器立刻误判堵转并降级
-        loop_params_.max_position_mm =
-            declare_parameter<double>("max_position_mm", loop_params_.max_position_mm);
         actuator_position_topic_ = declare_parameter<std::string>(
             "actuator_position_topic", "/suspension/actuator_position");
         // 封顶值不能低于名义控制周期：否则每一拍都被钳制，累计时间推进慢于真实时间，

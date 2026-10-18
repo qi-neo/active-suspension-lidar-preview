@@ -112,5 +112,4 @@ suspension_control_node:
     # 位置来源可以是驱动轮询，也可以是外部桥接节点往话题上上报（两者互补，
     # 话题新鲜时优先）。过期后按无反馈处理
     position_timeout_s: 0.2         # 位置上报的最大有效期
-    max_position_mm: 400.0         # 位置合理性上限，超过则忽略该包（行程的十倍量级）
     actuator_position_topic: "/suspension/actuator_position"   # Int32MultiArray，四轮 mm
