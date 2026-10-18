@@ -240,12 +240,18 @@ jobs:
           set -e
           cd src/active-suspension-lidar-preview
           # --filter 只统计项目自己的代码：系统头文件的覆盖率（动辄 28%）没有意义
+          #
+          # 门槛按实测值留出余量：行 95.9%、分支 74.0%，取 80 / 70。
+          # 行覆盖单看会被"新增的大段直线代码"稀释，分支覆盖才能反映异常路径有没有
+          # 被测到——校验器的九类拒绝、状态机的降级跳转，全在分支上。
           gcovr -r . build-cov \
             --filter 'src/suspension_control_v3/src/' \
             --filter 'src/suspension_control_v3/include/' \
             --filter 'src/suspension_preview_v2/src/' \
             --filter 'src/suspension_preview_v2/include/' \
-            --txt --print-summary --fail-under-line 80
+            --txt --print-summary \
+            --fail-under-line 80 \
+            --fail-under-branch 70
 
       - name: 生成 HTML 明细
         run: |
