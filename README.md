@@ -55,6 +55,9 @@
 与常见的反馈式悬架不同，本方案把路面信息提前拿到手（取样距离随车速在 0.5–5 m 间自适应），
 从源头绕开了"先颠簸、后补偿"的滞后问题。
 
+<p align="center"><img src="docs/figures/vehicle.jpg" width="620" alt="整车样机实拍"></p>
+<p align="center"><sub>整车样机实拍：四轮独立数字舵机，香橙派 AI Pro 车载计算，400 × 300 × 200 mm</sub></p>
+
 ### 硬件平台
 
 | 部件 | 型号 / 规格 | 用途 |
@@ -344,6 +347,15 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，346
 | 车身横滚角波动 | −5.87° ~ +6.12° | −1.15° ~ +1.08° | **81.4%** |
 | 车身俯仰角波动 | −4.95° ~ +5.20° | −0.90° ~ +0.95° | **81.7%** |
 | Z 轴加速度干扰 | 0.85g ~ 1.15g | 0.94g ~ 1.06g | **60.0%** |
+
+<p align="center"><img src="docs/figures/attitude_compare.png" width="660" alt="被动与主动悬架横滚角、俯仰角曲线对比"></p>
+<p align="center"><sub>图 1　常规路面工况（01）：横滚角与俯仰角，250 Hz 原始数据去均值、36 ms 滑动平均</sub></p>
+
+<p align="center"><img src="docs/figures/obstacle_pitch.png" width="660" alt="越障工况俯仰角响应对比"></p>
+<p align="center"><sub>图 2　越障工况（03）：俯仰角响应，主动悬架峰值明显收窄</sub></p>
+
+<p align="center"><img src="docs/figures/paper_exp1_compare.png" width="520" alt="论文图 1：实验 1 被动与主动悬架性能指标对比"></p>
+<p align="center"><sub>图 3　项目论文图 1（实验 1）：被动与主动悬架性能指标对比</sub></p>
 
 姿态控制器的核心方法：
 
