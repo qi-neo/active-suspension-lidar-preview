@@ -2,6 +2,7 @@
 // 算法与输出都在 suspension_core 里（不依赖 ROS），本文件只做 ROS 侧的接线。
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <pcl/common/transforms.h>
@@ -14,18 +15,23 @@
 
 #include <Eigen/Geometry>
 
+#include <geometry_msgs/msg/transform_stamped.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
 
+#include "suspension_preview_v2/level_calibration.hpp"
 #include "suspension_preview_v2/pipeline.hpp"
 #include "suspension_preview_v2/ros_topic_sink.hpp"
 #include "suspension_preview_v2/serial_profile_sink.hpp"
 #include "suspension_preview_v2/msg/road_obstacles.hpp"
 
 using suspension_preview_v2::ExtractorParams;
+using suspension_preview_v2::GravityAccumulator;
+using suspension_preview_v2::LevelRotation;
 using suspension_preview_v2::PreviewPipeline;
 using suspension_preview_v2::RosTopicSink;
 using suspension_preview_v2::SerialProfileSink;
@@ -67,6 +73,25 @@ public:
         sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
             cloud_topic_, rclcpp::SensorDataQoS(),
             std::bind(&RoadPreviewNode::cloud_callback, this, std::placeholders::_1));
+
+        if (level_calib_enable_) {
+            imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+                imu_topic_, rclcpp::SensorDataQoS(),
+                std::bind(&RoadPreviewNode::imu_callback, this, std::placeholders::_1));
+            calib_start_ = now();
+            calib_timer_ = create_wall_timer(
+                std::chrono::duration<double>(0.2),
+                std::bind(&RoadPreviewNode::check_calibration, this));
+            RCLCPP_INFO(get_logger(),
+                        "虚拟水平面标定中：累积 %s 的加速度计读数，%.1f s 后定案"
+                        "（要求样本≥%d、三轴抖动≤%.3f m/s^2、车身倾角≤%.0f°）",
+                        imu_topic_.c_str(), level_calib_duration_s_,
+                        level_calib_min_samples_, level_calib_max_std_,
+                        level_calib_max_tilt_deg_);
+        } else {
+            RCLCPP_INFO(get_logger(),
+                        "level_calib_enable=false：假定车体 z 已竖直，点云不做校正");
+        }
 
         diag_timer_ = create_wall_timer(
             std::chrono::duration<double>(diag_period_s_),
@@ -145,6 +170,20 @@ private:
         tf_timeout_ms_ = declare_parameter<int>("tf_timeout_ms", 30);
         publish_marker_ = declare_parameter<bool>("publish_marker", true);
         diag_period_s_ = declare_parameter<double>("diag_period_s", 5.0);
+
+        // 虚拟水平面标定。雷达竖直安装时，车体 z 与真实竖直差几十度，点云的 z
+        // 就不是"离地高度"而是沿车身某根轴的分量；左右轮迹也不在真实轮迹上。
+        // 启动时用静止的加速度计读数做一次施密特正交化，把水平定义出来。
+        // 标定失败自动退回单位阵，行为与不标定完全一致，不会因为标不出而下发错数据
+        level_calib_enable_ = declare_parameter<bool>("level_calib_enable", true);
+        imu_topic_ = declare_parameter<std::string>("imu_topic", "/unilidar/imu");
+        level_calib_duration_s_ =
+            declare_parameter<double>("level_calib_duration_s", 3.0);
+        level_calib_min_samples_ =
+            declare_parameter<int>("level_calib_min_samples", 60);
+        level_calib_max_std_ = declare_parameter<double>("level_calib_max_std", 0.05);
+        level_calib_max_tilt_deg_ =
+            declare_parameter<double>("level_calib_max_tilt_deg", 60.0);
     }
 
     ExtractorParams make_extractor_params() const {
@@ -206,9 +245,109 @@ private:
         m(1, 3) = static_cast<float>(t.y);
         m(2, 3) = static_cast<float>(t.z);
 
+        // 虚拟水平面：把标定出的旋转并到 TF 之前。
+        // 标定失败时 level_.valid 为假，r 是单位阵，这一步等价于什么都不做
+        if (level_.valid) {
+            Eigen::Matrix4f lr = Eigen::Matrix4f::Identity();
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    lr(r, c) = static_cast<float>(level_.r[r * 3 + c]);
+                }
+            }
+            m = lr * m;
+        }
+
         auto out = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
         pcl::transformPointCloud(*raw, *out, m);
         return out;
+    }
+
+    // 标定期间累积加速度计读数。加速度计装在雷达上，必须先旋到车体系再累积：
+    // 否则"竖直"是相对雷达说的，雷达一竖装就完全不是那么回事
+    void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
+        if (calib_done_) return;
+
+        geometry_msgs::msg::TransformStamped tf_msg;
+        try {
+            tf_msg = tf_buffer_->lookupTransform(
+                target_frame_, msg->header.frame_id, rclcpp::Time(msg->header.stamp),
+                rclcpp::Duration::from_nanoseconds(
+                    static_cast<int64_t>(tf_timeout_ms_) * 1000000LL));
+        } catch (const std::exception&) {
+            // 标定窗口内拿不到 TF 的帧直接跳过：它既不是"静止"的证据，也不是坏样本
+            return;
+        }
+
+        const auto& q = tf_msg.transform.rotation;
+        Eigen::Quaternionf quat(static_cast<float>(q.w), static_cast<float>(q.x),
+                                static_cast<float>(q.y), static_cast<float>(q.z));
+        quat.normalize();
+        // 只取旋转：加速度是向量，叠加平移没有意义
+        const Eigen::Vector3f a(static_cast<float>(msg->linear_acceleration.x),
+                                static_cast<float>(msg->linear_acceleration.y),
+                                static_cast<float>(msg->linear_acceleration.z));
+        const Eigen::Vector3f at = quat * a;
+        accel_.add(at.x(), at.y(), at.z());
+    }
+
+    void check_calibration() {
+        if (calib_done_) {
+            calib_timer_->cancel();
+            return;
+        }
+        if ((now() - calib_start_).seconds() < level_calib_duration_s_) return;
+        calib_done_ = true;
+        calib_timer_->cancel();
+        finish_calibration();
+    }
+
+    // 定案：静止判据 -> 取竖直方向 -> 施密特正交化。
+    // 任何一步失败都保持单位阵，也就是"不做校正"——宁可维持原行为，也不拿一个
+    // 不可信的水平面去算高度，那样错得更隐蔽
+    void finish_calibration() {
+        if (!accel_.stable(static_cast<std::size_t>(level_calib_min_samples_),
+                           level_calib_max_std_)) {
+            RCLCPP_WARN(get_logger(),
+                        "虚拟水平面标定失败：%zu 个样本、三轴抖动 %.3f m/s^2 未达静止要求"
+                        "（需 >=%d 个样本且抖动 <=%.3f）。点云不做校正",
+                        accel_.count(), accel_.max_std(), level_calib_min_samples_,
+                        level_calib_max_std_);
+            return;
+        }
+
+        double mean[3] = {0.0, 0.0, 0.0};
+        double gnorm = 0.0;
+        if (!accel_.mean(mean) || !accel_.mean_norm(gnorm)) {
+            RCLCPP_WARN(get_logger(), "虚拟水平面标定失败：均值不可用，点云不做校正");
+            return;
+        }
+
+        double up[3] = {0.0, 0.0, 1.0};
+        if (!suspension_preview_v2::accel_to_up(mean, level_calib_max_tilt_deg_, up)) {
+            RCLCPP_WARN(get_logger(),
+                        "虚拟水平面标定失败：车身倾角超过 %.0f 度，此时竖直方向的正负"
+                        "无法唯一确定（可能倒置，或标定时有人在推车）。点云不做校正",
+                        level_calib_max_tilt_deg_);
+            return;
+        }
+
+        // 车头方向取车体 +x，只用来定水平面内的朝向，即"哪边是前"
+        const double forward[3] = {1.0, 0.0, 0.0};
+        if (!suspension_preview_v2::build_level_rotation(up, forward, 0.5, 0.1, level_)) {
+            RCLCPP_WARN(get_logger(),
+                        "虚拟水平面标定失败：车头方向与重力近乎平行，水平面内朝向不可定。"
+                        "点云不做校正");
+            return;
+        }
+
+        // build_level_rotation 只吃方向，它按输入向量的模长记录 gravity_mps2；
+        // 这里传的是单位向量，所以补上累积器测到的真实模长，日志才反映台架实测值
+        level_.gravity_mps2 = gnorm;
+
+        RCLCPP_INFO(get_logger(),
+                    "虚拟水平面已建立：车身倾角 %.1f 度、重力 %.2f m/s^2、%zu 个样本。"
+                    "点云将先旋正再提取高程",
+                    level_.tilt_deg, level_.gravity_mps2, accel_.count());
     }
 
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
@@ -291,14 +430,28 @@ private:
     bool publish_marker_{true};
     double diag_period_s_{5.0};
 
+    // 虚拟水平面标定
+    bool level_calib_enable_{true};
+    std::string imu_topic_;
+    double level_calib_duration_s_{3.0};
+    int level_calib_min_samples_{60};
+    double level_calib_max_std_{0.05};
+    double level_calib_max_tilt_deg_{60.0};
+    bool calib_done_{false};
+    rclcpp::Time calib_start_;
+    GravityAccumulator accel_;
+    LevelRotation level_;
+
     // 组件
     std::unique_ptr<PreviewPipeline> pipeline_;
     std::shared_ptr<SerialProfileSink> serial_sink_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Publisher<suspension_preview_v2::msg::RoadObstacles>::SharedPtr obstacles_pub_;
     rclcpp::TimerBase::SharedPtr diag_timer_;
+    rclcpp::TimerBase::SharedPtr calib_timer_;
 
     std::size_t frames_{0};
     std::size_t tf_fail_{0};

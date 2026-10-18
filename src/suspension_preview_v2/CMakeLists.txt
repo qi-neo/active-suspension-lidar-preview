@@ -34,11 +34,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 #   types / protocol / serial_port / extractor / sinks / driver / pipeline
 #   road_trend（局部地面趋势，无 PCL，单独自检）
 #   obstacle_detect（非地面障碍物检测，无 PCL，单独自检）
+#   level_calibration（重力向量建虚拟水平面，无 PCL，单独自检）
 add_library(suspension_core STATIC
   src/protocol.cpp
   src/serial_port.cpp
   src/road_trend.cpp
   src/obstacle_detect.cpp
+  src/level_calibration.cpp
   src/road_profile_extractor.cpp
   src/profile_sink.cpp
   src/serial_profile_sink.cpp
@@ -93,9 +95,15 @@ add_executable(protocol_selftest
 target_include_directories(protocol_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# 虚拟水平面标定的纯函数自检（施密特正交化 / 正交性与手性 / 退化输入）
+add_executable(level_selftest
+  examples/level_selftest.cpp src/level_calibration.cpp)
+target_include_directories(level_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # 安装
 install(TARGETS road_preview_node suspension_driver_node offline_demo
-  trend_selftest obstacle_selftest protocol_selftest
+  trend_selftest obstacle_selftest protocol_selftest level_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 # suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，

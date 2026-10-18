@@ -100,6 +100,15 @@ jobs:
             ros2 run suspension_preview_v2 "$t"
           done
 
+      # 雷达是竖直安装的，车体 z 与真实竖直差几十度。这一步用重力向量做施密特
+      # 正交化，把"水平"真正定义出来——点云的 z 从此是离地高度，不是车身某根轴
+      - name: 虚拟水平面标定自检（69 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run suspension_preview_v2 level_selftest
+
       # 这段以前带 || true，等于"解析链路回归不阻塞 CI"。根因是 demo 只把
       # 协议往返的结果写进退出码，解析精度只打印——现在它自己也门住精度了，
       # 所以这里不再容忍失败
@@ -154,7 +163,7 @@ jobs:
             -o /tmp/asan_control
           /tmp/asan_control
 
-      # v2 三个纯函数自检同样过一遍。它们与 PCL 无关，只需 v2 的 include 目录
+      # v2 四个纯函数自检同样过一遍。它们与 PCL 无关，只需 v2 的 include 目录
       - name: v2 纯函数自检（ASan + UBSan）
         run: |
           set -e
@@ -162,7 +171,8 @@ jobs:
           for pair in \
             "trend_selftest:road_trend.cpp" \
             "obstacle_selftest:obstacle_detect.cpp" \
-            "protocol_selftest:protocol.cpp"; do
+            "protocol_selftest:protocol.cpp" \
+            "level_selftest:level_calibration.cpp"; do
             name="${pair%%:*}"
             src="${pair##*:}"
             echo "--- $name ---"
@@ -222,11 +232,12 @@ jobs:
             src/suspension_control_v3/src/temporal_fuser.cpp \
             -o build-cov/control_selftest
           ./build-cov/control_selftest > /dev/null
-          # v2：三个纯函数自检，与 PCL 无关
+          # v2：四个纯函数自检，与 PCL 无关
           for pair in \
             "trend_selftest:road_trend.cpp" \
             "obstacle_selftest:obstacle_detect.cpp" \
-            "protocol_selftest:protocol.cpp"; do
+            "protocol_selftest:protocol.cpp" \
+            "level_selftest:level_calibration.cpp"; do
             name="${pair%%:*}"
             src="${pair##*:}"
             g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
