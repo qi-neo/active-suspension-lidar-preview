@@ -12,6 +12,10 @@ __pycache__/
 # Editor / OS
 .DS_Store
 *.swp
+*~
+*.bak
+*.orig
+.#*
 .idea/
 .vscode/
 

@@ -1,17 +1,35 @@
+<div align="center">
+
 # Active Suspension with LiDAR Road Preview
 
-National College Student Innovation and Entrepreneurship Training Program
+**National College Student Innovation and Entrepreneurship Training Program** · 基于激光雷达路面预瞄的主动悬架系统
 
-ROS2 · C++ · PCL · Embedded · Multi-sensor fusion
-
-[简体中文](README.md) | English
+Reads the road surface 0.5–5 m ahead with a LiDAR, speed-adaptive, fuses IMU attitude feedback, and drives four independent digital servos per wheel in real time to suppress body vibration and attitude fluctuation on unstructured terrain.
 
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
+[![Platform](https://img.shields.io/badge/Onboard-Orange%20Pi%20AI%20Pro-orange)](#hardware)
+
+English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
+
+</div>
+
+> **Highlights**
+>
+> - On-vehicle A/B testing: body roll and pitch fluctuation each reduced by about 81%, Z-axis acceleration disturbance down 60%
+> - Self-written UDP packet parser and geometry conversion for the Unitree L1 — no link against the official static library, usable as a drop-in replacement for the official node
+> - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes three offline self-tests (v3 control: 284 checks, driver parsing: 63
-> checks, v2 pure functions: 69 checks — 416 in total). Starting from **v3.1.0**
-> the packages build cleanly — **earlier tags do not build**. See [CHANGELOG](CHANGELOG.md).
+> executes three offline self-tests (v3 control: 346 checks, driver parsing: 63
+> checks, v2 pure functions: 69 checks — 478 in total). **Tags before v3.1.0 do
+> not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+
+> **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
+> command, a few seconds, no ROS and no hardware needed to confirm the code is
+> complete and runnable (346 checks).
 
 ## Overview
 
@@ -245,7 +263,7 @@ The effective speed, sample distance and frame age are written into `ControlStat
 every tick (`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`),
 so "how far ahead did the feedforward actually look" is visible during integration.
 
-142 offline self-test checks, requiring neither ROS nor hardware:
+346 offline self-test checks, requiring neither ROS nor hardware:
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -277,6 +295,9 @@ git clone https://github.com/qi-neo/active-suspension-lidar-preview
 # To compare against the official node, also clone the official SDK
 # (the in-repo driver does not depend on it)
 # git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# The driver also has a standalone repository (with a write-up of the driver design);
+# the contents are identical, use whichever suits you:
+# git clone https://github.com/qi-neo/unilidar-driver
 
 # 2. Build
 cd ~/ws
@@ -302,7 +323,7 @@ All three C++ packages ship offline checks that confirm the pipeline without any
 ```bash
 ros2 run unilidar_driver decoder_selftest         # packet parsing, 63 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
-ros2 run suspension_control_v3 control_selftest    # control and safety logic, 284 checks
+ros2 run suspension_control_v3 control_selftest    # control and safety logic, 346 checks
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
