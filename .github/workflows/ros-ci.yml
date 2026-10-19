@@ -94,7 +94,7 @@ jobs:
           . install/setup.sh
           ros2 run suspension_control_v3 control_selftest
 
-      - name: 驱动报文解析自检（91 项）
+      - name: 驱动报文解析自检（135 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
