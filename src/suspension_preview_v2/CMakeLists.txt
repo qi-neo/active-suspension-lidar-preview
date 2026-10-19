@@ -146,7 +146,16 @@ install(TARGETS road_preview_node suspension_driver_node offline_demo
 #   Package 'suspension_preview_v2' exports the library 'suspension_core'
 #   which couldn't be found
 # 静态库只需要 ARCHIVE，另外两项是为将来改成动态库留的。
-install(TARGETS suspension_core suspension_extractor
+# 核心库以"导出目标"安装：下游 v3 通过 find_package 拿到 imported target，
+# 库路径、头文件、依赖都由目标自带，不需要下游拼路径或靠 -l 搜库。
+# （suspension_extractor 依赖 PCL，只给本包内部使用，不导出。）
+install(TARGETS suspension_core
+  EXPORT suspension_core_targets
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include)
+install(TARGETS suspension_extractor
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
@@ -159,7 +168,7 @@ install(DIRECTORY include/
   DESTINATION include)
 
 ament_export_include_directories(include)
-ament_export_libraries(suspension_core)
+ament_export_targets(suspension_core_targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()
