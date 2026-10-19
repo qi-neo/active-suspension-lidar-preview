@@ -36,6 +36,7 @@ add_library(suspension_control_core STATIC
   src/control_loop.cpp
   src/temporal_fuser.cpp
   src/param_check.cpp
+  src/command_sink.cpp
 )
 set_target_properties(suspension_control_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(suspension_control_core PUBLIC
