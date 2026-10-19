@@ -62,7 +62,20 @@ target_link_libraries(suspension_control_node suspension_control_core)
 # 正常消费 v2 导出的 imported target：头文件目录与库路径由目标自带。
 # 此前用 get_filename_component 上溯目录 + find_library 硬找路径，
 # 只在本 workspace 成立，安装到 /opt/ros 或别的 workspace 就会断。
-target_link_libraries(suspension_control_node suspension_core)
+# 导入目标名可能是 `suspension_core` 或带命名空间的 `<pkg>::suspension_core`
+# （取决于 ament/CMake 版本）。两种都探测；都没有就 configure 阶段直接报错，
+# 否则 CMake 会把裸名字当成库名放进链接行，变成 `-lsuspension_core`
+# 到链接期才失败（CI 已实测过这个坑）。
+if(TARGET suspension_core)
+  set(_v2_core_target suspension_core)
+elseif(TARGET suspension_preview_v2::suspension_core)
+  set(_v2_core_target suspension_preview_v2::suspension_core)
+else()
+  message(FATAL_ERROR
+    "v2 的 suspension_core 导出目标不可见（既不是 suspension_core，"
+    "也不是 suspension_preview_v2::suspension_core）")
+endif()
+target_link_libraries(suspension_control_node ${_v2_core_target})
 ament_target_dependencies(suspension_control_node
   rclcpp std_msgs sensor_msgs nav_msgs
 )
