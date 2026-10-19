@@ -54,7 +54,7 @@ the "disturb first, compensate later" delay at its source.
 ## System architecture
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart TB
     subgraph S1["Perception · hardware"]
         L["UniLiDAR<br/>point cloud + IMU"]
@@ -92,7 +92,7 @@ behind `ISuspensionDriver`; the actual command set depends on the actuator proto
 ### Preview node data flow
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart TB
     A["/unilidar/cloud"] --> B["TF transform<br/>→ base_link"]
     B --> C["Wheel-track ROI<br/>±0.1 m · 5 m ahead"]
@@ -183,7 +183,7 @@ the v1 defects around QoS compatibility, UART raw mode, TF failure handling and 
 cells are all fixed.
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart LR
     subgraph CORE["suspension_core · ROS-independent"]
         EX["IRoadProfileExtractor"]
@@ -215,7 +215,7 @@ This is what turns the profile extracted by v2 into actual actuator commands. Th
 neither ROS nor PCL, and can be compiled and self-tested without the vehicle.
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart LR
     BOOT["Boot"] --> CAL["Calibrating<br/>zero calibration"]
     CAL --> LEV["Leveling<br/>center & level"]
