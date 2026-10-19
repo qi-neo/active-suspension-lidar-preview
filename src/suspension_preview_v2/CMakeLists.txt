@@ -21,10 +21,6 @@ find_package(rosidl_default_generators REQUIRED)
 
 # 显式依赖 PCL，不靠 pcl_ros 的传递依赖
 find_package(PCL REQUIRED COMPONENTS common filters)
-# PCL 头文件本身 include Eigen（pcl/point_cloud.h -> Eigen/StdVector），
-# 而 Eigen 的 include 路径是随 PCL 的导入目标传的。静态库不链 PCL 目标之后，
-# 必须自己把 Eigen 头路径加进来，否则编译 PCL 头直接 fatal error。
-find_package(Eigen3 REQUIRED)
 
 # 自定义消息
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -59,18 +55,7 @@ target_include_directories(suspension_core PUBLIC
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
-if(DEFINED EIGEN3_INCLUDE_DIR)
-  target_include_directories(suspension_core PUBLIC ${EIGEN3_INCLUDE_DIR})
-elseif(TARGET Eigen3::Eigen)
-  target_include_directories(suspension_core PUBLIC
-    $<TARGET_PROPERTY:Eigen3::Eigen,INTERFACE_INCLUDE_DIRECTORIES>)
-endif()
-# 注意：静态库不需要在这里链接 PCL。
-# 链接 PCL 只是为了让最终可执行文件带上库；而写在这里会被记进
-# INTERFACE_LINK_LIBRARIES，并随 install(EXPORT) 传给下游——下游（v3）不
-# find_package(PCL)，于是 CMake 报 "links to target QHULL::QHULL ... not found"
-# 之类的一长串错误。PCL 由用到它的可执行文件（preview/demo）自己链接。
-# （include 目录仍然保留 PUBLIC：extractor 的头文件需要 PCL 头。）
+target_link_libraries(suspension_core ${PCL_LIBRARIES})
 
 # 节点 1：路面预瞄
 add_executable(road_preview_node
@@ -144,18 +129,16 @@ install(TARGETS road_preview_node suspension_driver_node offline_demo
   trend_selftest obstacle_selftest protocol_selftest level_selftest param_selftest
   DESTINATION lib/${PROJECT_NAME})
 
-# suspension_core 用"导出目标"的方式安装：
-#   - 下游（v3）通过 find_package 拿到 imported target `suspension_core`，
-#     头文件目录、库路径、依赖都由目标自带，不需要下游自己拼路径；
-#   - 之前用 ament_export_libraries + 下游 get_filename_component/find_library
-#     去"上溯目录找库"，只在同一个 workspace 里成立，包一旦装到 /opt/ros
-#     或别的 workspace 就必然失效。
+# suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，
+# 而 v3 通过 find_package(suspension_preview_v2) 依赖它。只导出不安装的话，
+# 下游包 configure 阶段会报
+#   Package 'suspension_preview_v2' exports the library 'suspension_core'
+#   which couldn't be found
+# 静态库只需要 ARCHIVE，另外两项是为将来改成动态库留的。
 install(TARGETS suspension_core
-  EXPORT suspension_core_targets
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
-  INCLUDES DESTINATION include)
+  RUNTIME DESTINATION bin)
 
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
@@ -165,7 +148,7 @@ install(DIRECTORY include/
   DESTINATION include)
 
 ament_export_include_directories(include)
-ament_export_targets(suspension_core_targets HAS_LIBRARY_TARGET)
+ament_export_libraries(suspension_core)
 ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()

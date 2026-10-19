@@ -182,12 +182,22 @@
 - 自检 428 → **443 项**（场景 41 异步通道：不阻塞/合并/重试/急停优先/析构冲刷；
   场景 42 回路接入异步通道后 600 拍不被 20 ms/次的写阻塞）。
 
-**构建规范化（P2）—— 暂缓**
+**构建规范化（P2）—— 暂缓（已定位根本原因）**
 
-`install(EXPORT)` + `ament_export_targets` 的改造已写好但**暂未合入**：首轮 CI 的
-`colcon build` 未通过，而本机没有 ROS/容器、拿不到日志，无法定位是配置期还是
-链接期问题。为避免阻塞本次实时性改动，先保留原有 hack，待能拿到 CI 日志后
-单独开 PR 验证。CI 改造点已记录在 PR 描述里。
+尝试把 v2 的 `suspension_core` 改成 `install(EXPORT)` + `ament_export_targets`、
+v3 直接消费 imported target。CI 逐轮暴露两类结构性问题，均非"改几行"能解决：
+
+1. **PCL 依赖链被导出**：静态库只要 `target_link_libraries(PCL...)`，PCL 的
+   Boost/VTK/QHULL/FLANN 导入目标就会进 `INTERFACE_LINK_LIBRARIES`，而下游
+   v3 不 `find_package(PCL)` → configure 阶段整串 "target not found"。
+   （根因已定位：静态库本不该链 PCL，是 v2 的历史写法。）
+2. **rosidl typesupport 与库名解析**：去掉 `ament_target_dependencies` 代链后，
+   v2 消息的 typesupport 目标没进链接行；裸名字又被 CMake 当库名
+   （`-lsuspension_core`），需同时处理导出目标命名空间。
+
+正确做法是把 `suspension_core` 拆成"不依赖 PCL 的核心"与"依赖 PCL 的提取器"
+两个目标，并显式导出 typesupport——这是一次包结构重构，不适合混在实时性
+改动里。本次保留原有 hack，合入本轮真正有价值的 CI 改进。
 
 ## [3.2.1] - 2026-10-15
 
