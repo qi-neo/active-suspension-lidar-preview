@@ -103,6 +103,18 @@ source install/setup.bash
 预瞄分支还没接，但数据已经能订阅、能在 rviz 里看、能喂给未来的决策。门槛（`obstacle_min_height_m`）
 过低会把噪声当障碍（空路频发告警），默认值 0.08 m 是在"漏检矮障碍"与"误检噪声"之间的折中。
 
+## 库的分层（为什么切成两个）
+
+| 目标 | 内容 | 依赖 |
+|------|------|------|
+| `suspension_core` | `protocol` / `serial_port` / `suspension_driver` / `road_trend` / `obstacle_detect` / `level_calibration` / `param_check` / `profile_sink` / `serial_profile_sink` | 不依赖 ROS、不依赖 PCL |
+| `suspension_extractor` | `road_profile_extractor` / `pipeline` | 依赖 PCL（接口输入就是 `pcl::PointCloud`） |
+
+这样拆的直接收益：`suspension_control_v3` 只需要 `suspension_core`，不必被 PCL 的
+传递依赖拖住（静态库一旦链接 PCL，导出时会把 QHULL/VTK/Boost 等导入目标一路
+带给下游，下游不 `find_package(PCL)` 就在 configure 阶段报一长串 target not found）。
+**新增算法时请先判断它属于哪一层**：只做数学/协议/串口的放 core，碰点云的放 extractor。
+
 ## 静态 TF（开箱可运行的必要条件）
 
 预瞄节点要把点云变换到车体坐标系 `target_frame`（默认 `base_link`），而本仓库里
