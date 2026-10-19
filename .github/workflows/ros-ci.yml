@@ -7,6 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 容器 job 的默认 shell 是 sh（dash），不支持 `set -o pipefail`。
+# 本工作流的步骤里用了 pipefail（配合 tee 保留失败码），必须显式用 bash。
+defaults:
+  run:
+    shell: bash
+
+# 失败时要把日志贴回 PR，需要写 issue comment 权限
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
 # 同一分支上新的推送取消正在跑的旧任务，省额度
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,18 +52,20 @@ jobs:
       # 比等 colcon 报错早得多，也不额外花时间。
       - name: CMakeLists 与 package.xml 对齐
         working-directory: src/active-suspension-lidar-preview
-        run: python3 tools/check_deps.py
+        run: python3 tools/check_deps.py 2>&1 | tee /tmp/check_deps.log
 
       # ROS2 里 YAML 键名是纯字符串匹配：键写错、或改了参数名没同步 YAML，
       # 结果都是参数被静默忽略——节点照常启动、跑起来却用着默认值。
       # 这个检查零耗时，放在构建之前，漂移在 5 分钟的编译前就暴露
       - name: 参数声明与 YAML 键一一对应
         working-directory: src/active-suspension-lidar-preview
-        run: python3 src/suspension_control_v3/tools/check_ros_params.py
+        run: python3 src/suspension_control_v3/tools/check_ros_params.py 2>&1 | tee /tmp/check_params.log
 
       - name: 安装构建与依赖工具
         run: |
-          set -e
+          set -eo pipefail
+          {
+          echo "== apt-get update =="
           apt-get update
           apt-get install -y --no-install-recommends \
             python3-colcon-common-extensions \
@@ -59,31 +73,36 @@ jobs:
             python3-pip
           rosdep init || true
           rosdep update
+          } 2>&1 | tee /tmp/apt.log
 
       - name: rosdep 安装依赖
         run: |
-          set -e
+          set -eo pipefail
+          {
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           rosdep install --from-paths src --ignore-src -r -y --skip-keys libpcl-all-dev
           # libpcl-all-dev 在部分平台没有对应 rosdep 条目，单独装
           apt-get install -y --no-install-recommends libpcl-dev || true
+          } 2>&1 | tee /tmp/rosdep.log
 
       - name: colcon build
         run: |
-          set -e
+          set -eo pipefail
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          # tee 到文件：失败时由下面的步骤把日志贴回 PR（本机没有 ROS/容器时，
+          # Actions 日志需要认证才能看，这是唯一不依赖本地环境的定位手段）
           colcon build \
             --packages-select suspension_preview suspension_preview_v2 \
                              suspension_control_v3 unilidar_driver car_balancer \
             --cmake-args -Wall -Wextra -Wpedantic \
-            --event-handlers console_cohesion+
+            --event-handlers console_cohesion+ 2>&1 | tee /tmp/colcon.log
           # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
           # test-result 只是把"没有测试结果"打印出来而已。现在 v3 与 v2 都注册了
           # CTest，这里真的跑一遍并且不容忍失败
           colcon test --packages-select suspension_control_v3 suspension_preview_v2 \
             --event-handlers console_direct+ \
-            --return-code-on-test-failure
-          colcon test-result --verbose
+            --return-code-on-test-failure 2>&1 | tee /tmp/test.log
+          colcon test-result --verbose | tee -a /tmp/test.log
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
@@ -131,6 +150,48 @@ jobs:
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run suspension_preview_v2 offline_demo
+
+      # 构建/测试失败时，把日志作为 PR 评论回传。
+      # 动机：开发机没有 ROS/Docker，Actions 日志要认证才能看——这是唯一
+      # 不依赖本地环境的失败定位手段（以后任何 CI 回归都能自查）。
+  # 失败后回传日志：必须是独立 job（needs build）。在 build 自己的步骤里回传时
+  # 它还没结束，拿不到完整日志；这里 job 已结束，可以下载到全部输出。
+  # 动机：开发机没有 ROS/Docker，Actions 网页日志要认证，跑挂了只能看"红"。
+  report-failure:
+    name: 回传失败日志
+    needs: [build]
+    if: failure() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载 build 日志并评论到 PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          API="https://api.github.com"
+          JOBS=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+            "$API/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")
+          JOB_ID=$(echo "$JOBS" | jq -r '.jobs[] | select(.name | contains("colcon build")) | .id' | head -1)
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "找不到 build job"; exit 0
+          fi
+          echo "job id = $JOB_ID"
+          # 先取 302 的 Location，再匿名下载（避免把 token 带给存储域名）
+          LOC=$(curl -sS -o /dev/null -w '%{redirect_url}' \
+            -H "Authorization: Bearer $GH_TOKEN" "$API/repos/$REPO/actions/jobs/$JOB_ID/logs")
+          if [ -z "$LOC" ]; then echo "拿不到日志地址"; exit 0; fi
+          curl -sSL "$LOC" -o /tmp/joblog.txt
+          echo "log bytes: $(wc -c < /tmp/joblog.txt)"
+          tail -300 /tmp/joblog.txt > /tmp/tail.txt
+          jq -Rs '{body: ("## CI 失败日志（自动回传）\n\n完整日志尾部 300 行：\n```\n" + . + "\n```")}' \
+            /tmp/tail.txt > /tmp/body.json
+          curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+            "$API/repos/$REPO/issues/$PR/comments" -d @/tmp/body.json
+          echo "comment posted"
 
   # 内存与未定义行为检查。与 build 分开而不是加一个 step：插桩要改编译 flag，
   # 与上面的常规构建产物混在一起会互相污染。
