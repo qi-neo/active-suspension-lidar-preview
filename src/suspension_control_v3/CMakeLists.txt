@@ -8,6 +8,12 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 让 ctest/colcon test 真正执行离线自检。
+# 之前本包没有注册任何测试，CI 里那句 `colcon test-result` 是空转的装饰
+if(BUILD_TESTING)
+  enable_testing()
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -114,5 +120,10 @@ install(DIRECTORY include/
 ament_export_include_directories(include)
 ament_export_libraries(suspension_control_core)
 ament_export_dependencies(rosidl_default_runtime)
+
+if(BUILD_TESTING)
+  # 离线自检本身就是完整测试：失败时返回非 0，ctest 据此判定
+  add_test(NAME control_selftest COMMAND control_selftest)
+endif()
 
 ament_package()
