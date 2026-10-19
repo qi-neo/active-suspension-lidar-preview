@@ -164,6 +164,31 @@
   `colcon test-result` 不再带 `|| true`。
 - 自检 410 → 428 项（场景 37~40）。
 
+### 实时性主线：把串口写移出 200 Hz 控制线程
+
+- **新增命令通道层**（`ICommandSink`：`command_sink.hpp/.cpp`）。控制线程
+  `submit()` 非阻塞投递"最新目标"，后台线程负责真正写驱动器；写失败按固定
+  间隔重试，**急停走优先路径插队**（已送达后不重复）。通道析构前会 `flush`
+  最后一帧，避免退出时把作动器停在半路。
+- **合并语义**：下行只剩几十 Hz 时，中间指令本来就没有执行意义，直接覆盖；
+  `command_coalesced` 上报被覆盖条数——这个数持续增长说明下行带宽不够。
+- **同步通道保留**：不注入通道时自动套 `DirectCommandSink`，行为与旧版完全一致
+  （既有 428 项断言零改动通过）；节点显式换成异步通道。
+- **控制周期超时计数**：原始 `dt` 超过 1.5 倍标称周期即计一次 `dt_overruns`。
+  这是"控制线程有没有被阻塞"的直接证据——旧实现把阻塞串口写放在这条线程里，
+  而软件上的 200 Hz 并不能保证物理上每 5 ms 算一次。
+- `ControlStatus` 新增 `command_coalesced` / `command_retries` /
+  `command_last_sent_age_ms` / `command_sink_async` / `dt_overruns`。
+- 自检 428 → **443 项**（场景 41 异步通道：不阻塞/合并/重试/急停优先/析构冲刷；
+  场景 42 回路接入异步通道后 600 拍不被 20 ms/次的写阻塞）。
+
+**构建规范化（P2）**
+
+- `suspension_preview_v2` 改用 `install(... EXPORT ...)` + `ament_export_targets`；
+  v3 删掉 `get_filename_component` 上溯目录与 `find_library` 硬找路径的 hack，
+  直接链接 imported target `suspension_core`。旧写法只在本 workspace 成立，
+  包安装到 `/opt/ros` 或别的 workspace 必然失效。
+
 ## [3.2.1] - 2026-10-15
 
 对应 `suspension_control_v3` 的 3.2.x。主线是前馈取样从"固定距离单点取样"

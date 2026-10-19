@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "suspension_control_v3/command_sink.hpp"
 #include "suspension_control_v3/controller.hpp"
 #include "suspension_control_v3/input_validator.hpp"
 #include "suspension_control_v3/safety_state_machine.hpp"
@@ -87,6 +88,17 @@ struct ControlLoopStatus {
     // 但一直没往状态里传：联调时只能看到"作动器跟不上"，看不到原因
     bool controller_saturated{false};
     bool controller_rate_limited{false};
+
+    // ---- 下行通道诊断 ----
+    // 被覆盖（合并）的命令数、写失败重试次数、距上次成功写入的时长。
+    // 异步通道下这三项是判断"串口是不是堵了"的唯一依据
+    std::size_t command_coalesced{0};
+    std::size_t command_retries{0};
+    double command_last_sent_age_ms{-1.0};
+    bool command_sink_async{false};
+    // 控制周期超时次数：原始 dt 超过 1.5 倍标称周期的拍数。
+    // 这个值持续增长说明控制线程被阻塞过（例如旧的同步串口写）
+    std::size_t dt_overruns{0};
 
     ControlOutput output;
     std::array<int, kWheelCount> commanded_mm{0, 0, 0, 0};  // 实际下发的值
@@ -183,8 +195,13 @@ public:
                           const StateMachineParams& sm_params,
                           const ControlParams& control_params);
 
-    // 注入作动器驱动；传 nullptr 表示只计算不下发
+    // 注入作动器驱动；传 nullptr 表示只计算不下发。
+    // 未显式设置命令通道时，会自动套一个同步通道（行为与旧版一致）
     void set_driver(std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver);
+
+    // 注入命令通道。节点应传异步通道，把串口写从 200 Hz 控制线程里挪走；
+    // 不调用则保持同步写入（离线自检与纯软件联调走这条路径）
+    void set_command_sink(std::shared_ptr<ICommandSink> sink);
 
     ValidationResult submit_profile(const suspension_preview_v2::RoadProfileFrame& frame,
                                     double now_sec) override;
@@ -235,6 +252,13 @@ private:
     // 用接口而不是具体类型，是为了让 PD 与 LQI 可以互换而不动这一层
     std::unique_ptr<IController> controller_;
     std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver_;
+    // 下行命令通道：同步（默认）或异步（节点使用）
+    std::shared_ptr<ICommandSink> sink_;
+    // 同步通道下用于判断"这一条是否写成功"的 sent 计数水位
+    std::uint64_t last_sink_sent_{0};
+    // 通道失败计数水位：把新增的写失败并入 driver_errors（保持旧语义：
+    // driver_errors 仍然是"驱动器层面出过多少次错"，不因引入异步通道而改变）
+    std::uint64_t last_sink_failed_{0};
 
     // 多帧融合器与融合输出帧。fused_ 是成员而不是每拍局部量：
     // 200 Hz 下每拍重新分配两个 100 格的 vector 没有意义

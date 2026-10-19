@@ -35,6 +35,12 @@ void SuspensionControlLoop::set_driver(
     std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver) {
     driver_ = std::move(driver);
     mode_pushed_ = false;
+    // 没显式注入通道时退化成同步写：与旧版行为完全一致
+    if (!sink_) sink_ = make_direct_command_sink(driver_);
+}
+
+void SuspensionControlLoop::set_command_sink(std::shared_ptr<ICommandSink> sink) {
+    sink_ = std::move(sink);
 }
 
 ValidationResult SuspensionControlLoop::submit_profile(
@@ -217,27 +223,41 @@ void SuspensionControlLoop::apply_command(
     // 作动器永远收不到这条指令，除了 driver_errors 看不出任何异常。
     if (!force && next == last_command_) return;
 
-    if (!params_.enable_driver || !driver_) {
+    if (!params_.enable_driver || !sink_) {
         // 纯软件/未接驱动器：没有"送达"概念，直接记账
         last_command_ = next;
         return;
     }
 
-    std::array<int, suspension_preview_v2::kSuspensionWheelCount> cmd{};
-    for (int i = 0; i < kWheelCount; ++i) {
-        cmd[static_cast<std::size_t>(i)] = next[static_cast<std::size_t>(i)];
+    sink_->submit(next);
+
+    if (sink_->is_async()) {
+        // 异步通道：去重基准是"已投递"。真正写入与失败重试在后台线程，
+        // 送达情况通过 status_.command_* 与 command_last_sent_age_ms 观察
+        last_command_ = next;
+        if (force) sink_->flush(0.05);  // 状态跃迁：确认关键指令真的出去了
+        return;
     }
-    if (driver_->set_target_height(cmd)) {
-        last_command_ = next;  // 只有真的写成功才认为已下发
-        ++status_.commands_sent;
-    } else {
-        // 不更新 last_command_：下一拍还会重试同一条指令
-        ++status_.driver_errors;
+
+    // 同步通道：以 sent 计数增量判断这一条是否写成功。
+    // 失败时不更新 last_command_，下一拍自动重试（P0 修复的语义）
+    const CommandSinkStats st = sink_->stats();
+    if (st.sent > last_sink_sent_) {
+        last_sink_sent_ = st.sent;
+        last_command_ = next;
     }
 }
 
 const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) {
     ++status_.ticks;
+
+    // 原始 dt 超过 1.5 倍标称周期 → 记一次控制周期超时。
+    // 这个计数是"控制线程有没有被阻塞"的直接证据：串口写、日志、调度抖动
+    // 都会在这里留下痕迹（旧实现正是把阻塞串口写放在这条线程里）
+    {
+        const double expected_dt = controller_->params().control_period_s;
+        if (expected_dt > 0.0 && dt > 1.5 * expected_dt) ++status_.dt_overruns;
+    }
 
     // ---- 姿态过期判定：必须按"当前时刻"每拍重算 ----
     // 不能只在 submit_attitude() 里算：IMU 断流后该函数不再被调用，age 会永远
@@ -330,6 +350,24 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     // 堵转：指令与实际位置持续偏离。无位置反馈时恒为 false，状态机整段跳过
     in.actuator_stalled = stalled_now_;
 
+    // 下行通道统计：异步实现里的 sent/failed/coalesced 是判断链路健康度的依据
+    if (sink_) {
+        const CommandSinkStats ss = sink_->stats();
+        status_.commands_sent = static_cast<std::size_t>(ss.sent);
+        status_.command_coalesced = static_cast<std::size_t>(ss.coalesced);
+        status_.command_retries = static_cast<std::size_t>(ss.failed);
+        // 保留 driver_errors 的既有语义：写失败也计入（旧测试与运维看板都在用它）
+        const std::uint64_t failed_now = static_cast<std::uint64_t>(ss.failed);
+        if (failed_now > last_sink_failed_) {
+            status_.driver_errors +=
+                static_cast<std::size_t>(failed_now - last_sink_failed_);
+            last_sink_failed_ = failed_now;
+        }
+        status_.command_last_sent_age_ms = ss.last_sent_age_ms;
+        status_.command_sink_async = sink_->is_async();
+        status_.estop_commands_sent = static_cast<std::size_t>(ss.estop_sent);
+    }
+
     const StateMachineOutput sm = state_machine_->tick(in, step_dt);
 
     // 状态跃迁要在覆盖 status_ 之前捕获：回中/急停进入时要强制下发一次，
@@ -361,15 +399,13 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     // 成功后不再重复（符合"一次触发即保持"），失败则按 10 Hz 重试直到成功。
     if (sm.state == ControlState::kEmergency) {
         const bool retry_due = (now_sec - last_estop_attempt_sec_) >= 0.1;
-        if (!estop_sent_ok_ && retry_due) {
-            last_estop_attempt_sec_ = now_sec;
-            if (params_.enable_driver && driver_) {
-                if (driver_->emergency_stop()) {
-                    estop_sent_ok_ = true;
-                    ++status_.estop_commands_sent;
-                } else {
-                    ++status_.driver_errors;
-                }
+        if (!estop_sent_ok_ && params_.enable_driver && sink_) {
+            // 通道可能在上两次轮询之间已经送达，先同步一次状态
+            if (sink_->emergency_stop_delivered()) {
+                estop_sent_ok_ = true;
+            } else if (retry_due) {
+                last_estop_attempt_sec_ = now_sec;
+                sink_->request_emergency_stop();
             }
         }
     } else {

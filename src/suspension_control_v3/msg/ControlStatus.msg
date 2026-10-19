@@ -58,3 +58,10 @@ uint32 attitude_rejected
 uint32 commands_sent
 uint32 driver_errors
 uint32 estop_commands_sent   # 下发给驱动器的硬件急停次数
+
+# ---- 下行通道诊断（异步命令通道）----
+uint32 command_coalesced     # 还没发出就被新值覆盖的命令数（下行带宽不足的信号）
+uint32 command_retries       # 写串口失败次数（通道内部自动重试）
+float32 command_last_sent_age_ms  # 距上次成功写入的时长 (ms)，<0 表示尚未成功过
+bool   command_sink_async    # true = 串口写已移出控制线程（异步通道）
+uint32 dt_overruns           # 控制周期超时次数（原始 dt > 1.5 倍标称周期）

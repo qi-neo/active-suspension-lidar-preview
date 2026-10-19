@@ -37,7 +37,11 @@
 //  38. 下发失败重试 / 39. 找平就绪判据 / 40. 限幅与速率限制上报
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <memory>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -3522,6 +3526,145 @@ void test_saturation_reported_in_status() {
     }
 }
 
+
+// ---------------------------------------------------------------- 场景 41
+// 探针驱动器：能制造"写串口很慢/一直失败"，用来验证异步通道的非阻塞与重试
+class AsyncProbeDriver : public suspension_preview_v2::ISuspensionDriver {
+public:
+    bool connect() override {
+        connected_ = true;
+        return true;
+    }
+    void disconnect() override { connected_ = false; }
+    bool is_connected() const override { return connected_; }
+    bool set_mode(suspension_preview_v2::SuspensionMode) override { return true; }
+    bool set_target_height(int, int) override { return true; }
+    bool set_target_height(
+        const std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) override {
+        ++calls;
+        const int delay = block_ms.load();
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        if (fail.load()) return false;
+        for (int i = 0; i < 4; ++i) last[static_cast<std::size_t>(i)] = mm[static_cast<std::size_t>(i)];
+        ++ok_calls;
+        return true;
+    }
+    bool emergency_stop() override {
+        ++estop_calls;
+        if (estop_fail.load()) return false;
+        estop_ok = true;
+        return true;
+    }
+    const std::string& last_error() const override { return err_; }
+
+    std::atomic<int> calls{0};
+    std::atomic<int> ok_calls{0};
+    std::atomic<int> estop_calls{0};
+    std::atomic<int> block_ms{0};     // >0：每次写阻塞这么久
+    std::atomic<bool> fail{false};    // true：写失败
+    std::atomic<bool> estop_fail{false};
+    std::atomic<bool> connected_{false};
+    std::atomic<bool> estop_ok{false};
+    std::array<int, 4> last{{0, 0, 0, 0}};
+
+private:
+    std::string err_;
+};
+
+void test_async_command_sink() {
+    section("41. 异步命令通道：不阻塞 / 合并 / 重试 / 急停优先");
+    auto drv = std::make_shared<AsyncProbeDriver>();
+    drv->connect();
+
+    {
+        auto sink = make_async_command_sink(drv, 0.005);
+
+        // 1) 驱动卡 200 ms，submit 必须立刻返回（控制线程不能被串口拖住）
+        drv->block_ms = 200;
+        const auto t0 = std::chrono::steady_clock::now();
+        sink->submit({1, 2, 3, 4});
+        const double submit_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - t0)
+                                     .count();
+        check(submit_ms < 50.0, "驱动阻塞时 submit 不应阻塞控制线程");
+
+        // 2) 阻塞期间连续投递：中间值应被合并，最终只写最新值
+        for (int i = 5; i <= 10; ++i) sink->submit({i, i, i, i});
+        drv->block_ms = 0;
+        check(sink->flush(3.0), "flush 应等到队列清空");
+        check(sink->stats().sent >= 1, "最终应至少成功写入一次");
+        check(sink->stats().coalesced >= 1, "阻塞期间的中间值应被合并覆盖");
+        check(drv->last[0] == 10, "最终写入的应是最后一次投递的值");
+
+        // 3) 写失败要重试，恢复后把最新值写进去
+        drv->fail = true;
+        const std::uint64_t failed_before = sink->stats().failed;
+        sink->submit({20, 20, 20, 20});
+        for (int i = 0; i < 400 && sink->stats().failed == failed_before; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        check(sink->stats().failed > failed_before, "写失败应计入 failed");
+        drv->fail = false;
+        check(sink->flush(3.0), "链路恢复后 flush 应等到写入成功");
+        check(drv->last[0] == 20, "重试后应写入最新值");
+
+        // 4) 急停走优先路径，最终必须送达
+        drv->block_ms = 60;
+        sink->request_emergency_stop();
+        check(sink->flush(3.0), "急停请求应被处理");
+        check(sink->emergency_stop_delivered(), "急停应送达");
+        check(drv->estop_calls >= 1, "驱动器应真的收到急停");
+        drv->block_ms = 0;
+    }
+
+    // 5) 通道析构前应把最后一帧冲刷出去（否则进程退出会把作动器停在半路）
+    {
+        auto drv2 = std::make_shared<AsyncProbeDriver>();
+        drv2->connect();
+        {
+            auto sink2 = make_async_command_sink(drv2, 0.005);
+            sink2->submit({7, 7, 7, 7});
+        }
+        check(drv2->ok_calls >= 1, "通道析构前应把最后一帧冲刷出去");
+    }
+}
+
+// ---------------------------------------------------------------- 场景 42
+// 控制回路接异步通道后，串口慢不再拖住 200 Hz 节拍
+void test_loop_nonblocking_downlink() {
+    section("42. 控制回路不再被串口写阻塞");
+    auto drv = std::make_shared<AsyncProbeDriver>();
+    drv->connect();
+
+    ControlLoopParams lp;
+    lp.enable_driver = true;
+    lp.require_driver = false;
+    SuspensionControlLoop loop(lp, ValidatorParams{}, StateMachineParams{}, ControlParams{});
+    loop.set_driver(drv);
+    loop.set_command_sink(make_async_command_sink(drv, 0.005));
+
+    drv->block_ms = 20;  // 每次写阻塞 20 ms（远大于 5 ms 控制周期）
+    const auto wall0 = std::chrono::steady_clock::now();
+    double t = 0.0;
+    for (int i = 0; i < 600; ++i) {  // 3 s 仿真：走到 BALANCING 并持续下发
+        loop.submit_profile(make_frame(t), t);
+        Attitude a;
+        a.valid = true;
+        a.stamp_sec = t;
+        loop.submit_attitude(a, t);
+        loop.step(t, 0.005);
+        t += 0.005;
+    }
+    const double wall_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0)
+            .count();
+    check(wall_ms < 1000.0, "异步通道下 600 拍不应被 20 ms/次的串口写拖住");
+    check(loop.status().command_sink_async, "状态应标记为异步通道");
+    check(loop.status().command_last_sent_age_ms >= 0.0, "通道应有成功写入记录");
+    std::printf("  600 拍耗时 %.1f ms（驱动每次写阻塞 20 ms），已发 %zu 条\n", wall_ms,
+                loop.status().commands_sent);
+}
+
 int main() {
     std::printf("suspension_control_v3 离线自检\n");
     std::printf("（控制环 200 Hz，剖面 10 Hz，无 ROS / 无硬件）\n");
@@ -3566,6 +3709,8 @@ int main() {
     test_command_retry_on_send_failure();
     test_leveling_readiness();
     test_saturation_reported_in_status();
+    test_async_command_sink();
+    test_loop_nonblocking_downlink();
 
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d -> %s\n", g_checks, g_failed,
