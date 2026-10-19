@@ -62,6 +62,21 @@ target_link_libraries(suspension_control_node suspension_control_core)
 target_include_directories(suspension_control_node PRIVATE
   ${suspension_preview_v2_INCLUDE_DIRS})
 
+# v2 核心库以导出目标形式提供。名字可能是 `suspension_core` 或
+# `suspension_preview_v2::suspension_core`（取决于 ament/CMake 版本），
+# 两种都探测；都没有就 configure 阶段 FATAL，避免 CMake 把它当库名变成
+# `-lsuspension_core`（CI 上踩过这个坑）。
+if(TARGET suspension_core)
+  set(_v2_core_target suspension_core)
+elseif(TARGET suspension_preview_v2::suspension_core)
+  set(_v2_core_target suspension_preview_v2::suspension_core)
+else()
+  message(FATAL_ERROR
+    "找不到 v2 的 suspension_core 导入目标（既非 suspension_core，"
+    "也非 suspension_preview_v2::suspension_core）")
+endif()
+target_link_libraries(suspension_control_node ${_v2_core_target})
+
 # 链接与头文件都由 ament_target_dependencies(suspension_preview_v2) 提供。
 # 此前用 get_filename_component 上溯目录 + find_library 硬找路径，
 # 只在本 workspace 成立（包安装到别处必断）；核心库拆出 PCL 之后，
