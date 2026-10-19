@@ -44,6 +44,11 @@ target_include_directories(suspension_control_core PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(suspension_control_core suspension_preview_v2)
+# 显式补 v2 的 include 变量：容器里实测 ament_target_dependencies 没有把它
+# 传给本包的库目标（编译 input_validator.cpp 时找不到 suspension_preview_v2/types.hpp）。
+# 这是标准变量（由 v2 的 ament_export_include_directories 提供），不是路径上溯。
+target_include_directories(suspension_control_core PUBLIC
+  ${suspension_preview_v2_INCLUDE_DIRS})
 
 
 # 离线自检：不依赖 ROS 运行时，可直接执行
@@ -53,6 +58,9 @@ target_link_libraries(control_selftest suspension_control_core)
 # ROS 节点
 add_executable(suspension_control_node src/suspension_control_node.cpp)
 target_link_libraries(suspension_control_node suspension_control_core)
+
+target_include_directories(suspension_control_node PRIVATE
+  ${suspension_preview_v2_INCLUDE_DIRS})
 
 # 链接与头文件都由 ament_target_dependencies(suspension_preview_v2) 提供。
 # 此前用 get_filename_component 上溯目录 + find_library 硬找路径，
