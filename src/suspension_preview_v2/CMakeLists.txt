@@ -55,7 +55,12 @@ target_include_directories(suspension_core PUBLIC
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
-target_link_libraries(suspension_core ${PCL_LIBRARIES})
+# 注意：静态库不需要在这里链接 PCL。
+# 链接 PCL 只是为了让最终可执行文件带上库；而写在这里会被记进
+# INTERFACE_LINK_LIBRARIES，并随 install(EXPORT) 传给下游——下游（v3）不
+# find_package(PCL)，于是 CMake 报 "links to target QHULL::QHULL ... not found"
+# 之类的一长串错误。PCL 由用到它的可执行文件（preview/demo）自己链接。
+# （include 目录仍然保留 PUBLIC：extractor 的头文件需要 PCL 头。）
 
 # 节点 1：路面预瞄
 add_executable(road_preview_node
