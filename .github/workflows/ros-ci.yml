@@ -7,6 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 失败时要把日志贴回 PR，需要写 issue comment 权限
+permissions:
+  contents: read
+  pull-requests: write
+
 # 同一分支上新的推送取消正在跑的旧任务，省额度
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -70,20 +75,22 @@ jobs:
 
       - name: colcon build
         run: |
-          set -e
+          set -eo pipefail
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          # tee 到文件：失败时由下面的步骤把日志贴回 PR（本机没有 ROS/容器时，
+          # Actions 日志需要认证才能看，这是唯一不依赖本地环境的定位手段）
           colcon build \
             --packages-select suspension_preview suspension_preview_v2 \
                              suspension_control_v3 unilidar_driver car_balancer \
             --cmake-args -Wall -Wextra -Wpedantic \
-            --event-handlers console_cohesion+
+            --event-handlers console_cohesion+ 2>&1 | tee /tmp/colcon.log
           # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
           # test-result 只是把"没有测试结果"打印出来而已。现在 v3 与 v2 都注册了
           # CTest，这里真的跑一遍并且不容忍失败
           colcon test --packages-select suspension_control_v3 suspension_preview_v2 \
             --event-handlers console_direct+ \
-            --return-code-on-test-failure
-          colcon test-result --verbose
+            --return-code-on-test-failure 2>&1 | tee /tmp/test.log
+          colcon test-result --verbose | tee -a /tmp/test.log
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
@@ -131,6 +138,53 @@ jobs:
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run suspension_preview_v2 offline_demo
+
+      # 构建/测试失败时，把日志作为 PR 评论回传。
+      # 动机：开发机没有 ROS/Docker，Actions 日志要认证才能看——这是唯一
+      # 不依赖本地环境的失败定位手段（以后任何 CI 回归都能自查）。
+      - name: 失败日志回传到 PR
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          {
+            echo "## CI 失败日志（自动回传）"
+            echo
+            echo "### colcon build（尾部 200 行）"
+            echo '```'
+            tail -200 /tmp/colcon.log 2>/dev/null
+            echo '```'
+            echo "### colcon test（尾部 120 行）"
+            echo '```'
+            tail -120 /tmp/test.log 2>/dev/null
+            echo '```'
+          } > /tmp/ci-log.md
+          if [ -n "$PR_NUMBER" ]; then
+            # 用 printf 生成脚本：YAML 的 block scalar 里放不了顶格的 heredoc
+            printf '%s\n' \
+              "import json, os, urllib.request" \
+              "body = open('/tmp/ci-log.md', encoding='utf-8', errors='replace').read()" \
+              "repo = os.environ['REPO']" \
+              "pr = os.environ['PR_NUMBER']" \
+              "token = os.environ['GITHUB_TOKEN']" \
+              "url = f'https://api.github.com/repos/{repo}/issues/{pr}/comments'" \
+              "req = urllib.request.Request(url," \
+              "    data=json.dumps({'body': body}).encode()," \
+              "    headers={'Authorization': f'Bearer {token}'," \
+              "             'Accept': 'application/vnd.github+json'," \
+              "             'Content-Type': 'application/json'}," \
+              "    method='POST')" \
+              "try:" \
+              "    urllib.request.urlopen(req, timeout=30)" \
+              "    print('failure log posted to PR')" \
+              "except Exception as e:" \
+              "    print('post failed:', e)" \
+              > /tmp/post_comment.py
+            python3 /tmp/post_comment.py
+          fi
 
   # 内存与未定义行为检查。与 build 分开而不是加一个 step：插桩要改编译 flag，
   # 与上面的常规构建产物混在一起会互相污染。

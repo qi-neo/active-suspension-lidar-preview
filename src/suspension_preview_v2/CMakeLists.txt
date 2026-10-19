@@ -129,16 +129,18 @@ install(TARGETS road_preview_node suspension_driver_node offline_demo
   trend_selftest obstacle_selftest protocol_selftest level_selftest param_selftest
   DESTINATION lib/${PROJECT_NAME})
 
-# suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，
-# 而 v3 通过 find_package(suspension_preview_v2) 依赖它。只导出不安装的话，
-# 下游包 configure 阶段会报
-#   Package 'suspension_preview_v2' exports the library 'suspension_core'
-#   which couldn't be found
-# 静态库只需要 ARCHIVE，另外两项是为将来改成动态库留的。
+# suspension_core 用"导出目标"的方式安装：
+#   - 下游（v3）通过 find_package 拿到 imported target `suspension_core`，
+#     头文件目录、库路径、依赖都由目标自带，不需要下游自己拼路径；
+#   - 之前用 ament_export_libraries + 下游 get_filename_component/find_library
+#     去"上溯目录找库"，只在同一个 workspace 里成立，包一旦装到 /opt/ros
+#     或别的 workspace 就必然失效。
 install(TARGETS suspension_core
+  EXPORT suspension_core_targets
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin)
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include)
 
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
@@ -148,7 +150,7 @@ install(DIRECTORY include/
   DESTINATION include)
 
 ament_export_include_directories(include)
-ament_export_libraries(suspension_core)
+ament_export_targets(suspension_core_targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()
