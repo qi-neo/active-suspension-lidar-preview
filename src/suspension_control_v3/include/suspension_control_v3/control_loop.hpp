@@ -254,6 +254,21 @@ private:
     Attitude attitude_;
     ControlLoopStatus status_;
 
+    // 姿态有效性有三层含义，必须分开记：
+    //   attitude_.valid        最近一次收到的样本本身是否合法
+    //   过期                   样本是否太旧——每拍按 now 重算，不能只在收样本时算
+    //                          （IMU 断流后 submit_attitude 不再被调用，只在收样本时
+    //                           更新 age 会让它永远冻结，状态机据此看不到任何异常）
+    //   attitude_implausible_  收到过"物理上不可能"的姿态（超 max_abs_attitude_rad）。
+    //                          这不是"数据不可信"而是"传感器坏了"，必须进急停，
+    //                          不能被当成坏帧丢掉就完事
+    bool attitude_implausible_{false};
+
+    // 硬件急停的送达状态：成功后再不重复下发；首次失败则按 10 Hz 重试直到成功。
+    // 只在状态跃迁那一拍调一次的话，一次串口写失败就意味着永远不再急停
+    bool estop_sent_ok_{false};
+    double last_estop_attempt_sec_{-1.0e9};
+
     // 车速：保存最后一次有效读数及其时刻，过期判定在 step() 里做
     // （用控制环自己的时钟，而不是数据到达时刻，避免两个时钟漂移）
     bool has_speed_{false};

@@ -121,6 +121,10 @@ bool estimate_cell(const std::vector<float>& candidates, float lo, float hi,
         if (z < lo || z > hi) continue;
         in_window.push_back(z);
     }
+    // min_points <= 0 时下面会踩空区间：size() < 0 恒假，随后 minmax_element
+    // 对空 vector 解引用是未定义行为（YAML 里填 0 就能触发）。
+    // 这里显式要求至少一个点，把"没有下限"当成"至少 1 个点"
+    if (min_points < 1) min_points = 1;
     if (static_cast<int>(in_window.size()) < min_points) return false;
 
     // 格内高低差过大：疑似障碍物或跨越路沿，该格整体判无效——

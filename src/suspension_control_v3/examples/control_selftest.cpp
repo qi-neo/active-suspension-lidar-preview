@@ -3274,6 +3274,108 @@ void test_emergency_output_path() {
                 fx.driver->estop_calls_, fx.driver->cmd_calls_ - cmd_before);
 }
 
+// ---------------------------------------------------------------- 场景 33
+// 姿态断流：IMU 不再供数时必须降级，而不是带着"冻结的姿态"继续闭环。
+// 这是最隐蔽的一类失效——剖面还在正常更新，日志看不出任何异常。
+void test_attitude_stale_degrades() {
+    section("33. 姿态断流必须降级");
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    // 只推进时间、继续供剖面，但不再提交姿态：模拟 IMU 断流
+    constexpr double kDt = 0.005;
+    for (int i = 0; i < 100; ++i) {  // 0.5 s
+        fx.t += kDt;
+        fx.loop.submit_profile(make_frame(fx.t), fx.t);
+        fx.loop.step(fx.t, kDt);
+    }
+    check(fx.loop.status().state != ControlState::kBalancing,
+          "IMU 断流后不应仍然 BALANCING");
+    check((fx.loop.status().faults & kFaultStaleInput) != 0, "应置位输入过期故障");
+    check(fx.loop.status().attitude_age_ms > 400.0,
+          "姿态龄应随断流持续增长（不能冻结在断流瞬间）");
+    std::printf("  断流 0.5 s 后状态 %s，姿态龄 %.1f ms\n",
+                to_string(fx.loop.status().state), fx.loop.status().attitude_age_ms);
+}
+
+// ---------------------------------------------------------------- 场景 34
+// 超出 validator 物理上限的姿态（1.5 rad ≈ 86°）：会被 submit 拒收，
+// 但"传感器明显坏了"必须进急停。缺了这一支，保护对姿态量就不单调：
+// 20° 急停，70° 反而因为被当坏帧丢掉而没有保护。
+void test_attitude_implausible_trips_estop() {
+    section("34. 超物理上限的姿态必须急停");
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    Attitude a;
+    a.valid = true;
+    a.stamp_sec = fx.t;
+    a.roll_rad = 1.5;  // 超过 max_abs_attitude_rad(1.2)，也远超安全阈值 0.35
+    check(!fx.loop.submit_attitude(a, fx.t), "超物理上限的姿态应被拒收");
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(fx.loop.status().state == ControlState::kEmergency,
+          "被拒的极端姿态也应触发 EMERGENCY");
+    check((fx.loop.status().faults & kFaultAttitudeExceeded) != 0,
+          "应置位姿态超限故障");
+    std::printf("  1.5 rad 姿态 -> %s，faults=0x%02x\n",
+                to_string(fx.loop.status().state), fx.loop.status().faults);
+}
+
+// ---------------------------------------------------------------- 场景 35
+// 硬件急停写失败时必须重试，直到送达为止；送达之后不再重复调用
+void test_estop_retry_until_delivered() {
+    section("35. 硬件急停失败要重试");
+    LoopFixture fx(/*attach_driver=*/true);
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    fx.driver->estop_fail_ = true;
+    fx.loop.request_estop("测试急停");
+    fx.advance(0.5);
+    check(fx.loop.status().state == ControlState::kEmergency, "应进入 EMERGENCY");
+    check(fx.driver->estop_calls_ > 1, "急停写失败时应重试，而不是只试一次");
+    const int calls_while_failing = fx.driver->estop_calls_;
+
+    fx.driver->estop_fail_ = false;
+    fx.advance(0.4);
+    check(fx.driver->estop_calls_ > calls_while_failing, "恢复后应再次尝试");
+    const int calls_after_success = fx.driver->estop_calls_;
+    fx.advance(0.4);
+    check(fx.driver->estop_calls_ == calls_after_success, "成功后不再重复调用急停");
+    std::printf("  失败期间调用 %d 次，送达后共 %d 次\n", calls_while_failing,
+                fx.driver->estop_calls_);
+}
+
+// ---------------------------------------------------------------- 场景 36
+// 参数校验：物理上限必须严格大于安全阈值，否则保护不单调
+void test_param_check_attitude_ordering() {
+    section("36. 参数校验：姿态阈值分层");
+    ControlLoopParams loop_params;
+    StateMachineParams sm_params;
+    loop_params.max_abs_attitude_rad = 0.30;  // 小于安全阈值 0.35 -> 必须报致命错误
+    sm_params.max_abs_roll_rad = 0.35;
+    sm_params.max_abs_pitch_rad = 0.35;
+    const auto issues = suspension_control_v3::validate_params(
+        ControlParams{}, loop_params, ValidatorParams{}, sm_params);
+    bool found = false;
+    for (const auto& i : issues) {
+        if (i.key == "max_abs_attitude_rad" && i.fatal) found = true;
+    }
+    check(found, "物理上限不大于安全阈值时应报致命错误");
+
+    // 出厂默认必须干净（这条防的是"默认值一启动就报错"）
+    const auto clean = suspension_control_v3::validate_params(
+        ControlParams{}, ControlLoopParams{}, ValidatorParams{}, StateMachineParams{});
+    bool default_ok = true;
+    for (const auto& i : clean) {
+        if (i.fatal) default_ok = false;
+    }
+    check(default_ok, "出厂默认参数不应有致命项");
+}
+
 int main() {
     std::printf("suspension_control_v3 离线自检\n");
     std::printf("（控制环 200 Hz，剖面 10 Hz，无 ROS / 无硬件）\n");
@@ -3310,6 +3412,10 @@ int main() {
     test_driver_error_paths();
     test_param_validation();
     test_emergency_output_path();
+    test_attitude_stale_degrades();
+    test_attitude_implausible_trips_estop();
+    test_estop_retry_until_delivered();
+    test_param_check_attitude_ordering();
 
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d -> %s\n", g_checks, g_failed,

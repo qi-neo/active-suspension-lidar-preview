@@ -133,6 +133,13 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
             out.faults |= kFaultAttitudeExceeded;
         }
     }
+    // 姿态超出 validator 的物理上限（被控制回路拒帧）同样按姿态故障处理。
+    // 少了这一支，保护就对"姿态量"不单调：20° 会急停，70° 反而因为被当成
+    // "坏数据"丢掉而绕过安全判定
+    if (in.attitude_implausible) {
+        attitude_latched_ = true;
+        out.faults |= kFaultAttitudeExceeded;
+    }
     if (estop_latched_ || attitude_latched_) {
         out.state = ControlState::kEmergency;
         apply_contract(out);
@@ -154,12 +161,16 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     }
 
     // ---- 输入健康度统计 ----
-    // 判据只用"现有帧是否还在有效期 + 质量是否达标"：
+    // 判据是"手上这帧剖面还在有效期 + 质量达标 + 姿态可信"：
     // 剖面 10~20 Hz、控制环 200 Hz，同一帧本来就会被多个周期复用，
     // "本周期没有新帧"是正常现象，不能据此降级。单帧被拒也不降级，
     // 因为手上仍有一帧有效数据；只有它过期了才会触发。
+    //
+    // 姿态必须一起算进健康度：IMU 断流时剖面可能还在正常更新，但控制器
+    // 已经拿不到姿态反馈了。原先只看剖面，等于"眼睛瞎了但路还在更新"
+    // 也判定为健康，闭环会一直开环跑下去。
     const bool quality_ok = in.profile_quality >= in.min_quality;
-    const bool input_healthy = in.profile_fresh && quality_ok;
+    const bool input_healthy = in.profile_fresh && quality_ok && in.attitude_valid;
     if (input_healthy) {
         healthy_elapsed_ += dt;
         unhealthy_elapsed_ = 0.0;
@@ -169,6 +180,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     }
 
     if (!in.profile_fresh) out.faults |= kFaultStaleInput;
+    if (!in.attitude_valid) out.faults |= kFaultStaleInput;
     if (!quality_ok) out.faults |= kFaultLowQuality;
     if (in.profile_rejected) out.faults |= kFaultInvalidInput;
 

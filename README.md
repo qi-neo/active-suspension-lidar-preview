@@ -22,11 +22,11 @@
 > - 自研宇树 L1 的 UDP 报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑四组离线自检（v3 控制 395 项、驱动解析 63 项、
-> v2 纯函数 69 项、虚拟水平面 69 项，共 596 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑四组离线自检（v3 控制 410 项、驱动解析 69 项、
+> v2 纯函数 69 项、虚拟水平面 69 项，共 617 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
-> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（395 项检查）。
+> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（410 项检查）。
 
 ## 目录
 
@@ -144,6 +144,9 @@ ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex
 ros2 launch unilidar_driver unilidar_driver.launch.py
 
 # 5. 运行 v2 预瞄（先只发话题，不接硬件）
+#    预瞄节点要求 base_link -> 雷达 的 TF，而本仓库没有别的包发布 base_link，
+#    所以节点默认自己发一条静态变换（publish_static_tf）。安装量参数 mount_*
+#    默认全 0（占位），启动日志会 WARN 提醒——务必按实车实测后填，否则坐标是错的。
 ros2 launch suspension_preview_v2 preview_v2.launch.py enable_serial:=false
 ros2 topic echo /suspension/road_profile --once
 
@@ -154,10 +157,10 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 四个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
 
 ```bash
-ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
+ros2 run unilidar_driver decoder_selftest    # 报文解析，69 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
 ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，395 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，410 项检查
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
@@ -310,7 +313,7 @@ flowchart LR
 （`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
 联调时能直接看到"前馈到底按多远取了样"。
 
-离线自检 395 项，不需要 ROS 与硬件：
+离线自检 410 项，不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest

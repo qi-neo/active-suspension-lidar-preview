@@ -11,7 +11,7 @@
 控制律有一条 PD 和一条增量式 LQI 可选，预瞄前馈有时间域 FIR。
 
 **一句话定位**：感知（点云→路面剖面）+ 预瞄控制（提前量可算、可验证）+ 安全兜底
-（坏数据一律拒绝，故障分级降级）三件事都做完了，且有 395 项离线检查护着。
+（坏数据一律拒绝，故障分级降级）三件事都做完了，且有 410 项离线检查护着。
 
 ## 1. 五分钟跑起来（不需要 ROS、不需要硬件）
 
@@ -26,12 +26,13 @@ g++ -std=c++17 -O2 \
   examples/control_selftest.cpp \
   src/input_validator.cpp src/controller.cpp src/attitude_filter.cpp \
   src/safety_state_machine.cpp src/control_loop.cpp src/temporal_fuser.cpp \
+  src/param_check.cpp \
   -o /tmp/control_selftest
 
-/tmp/control_selftest   # 编译器约 4 s；运行 0.01 s，输出 395 项检查结果
+/tmp/control_selftest   # 编译器约 4 s；运行 0.01 s，输出 410 项检查结果
 ```
 
-看到 `检查项 395，失败 0 -> 全部通过` 就说明代码是完整的、逻辑是通的。
+看到 `检查项 410，失败 0 -> 全部通过` 就说明代码是完整的、逻辑是通的。
 这一条同时验证了：输入校验、安全状态机、两种控制律、预瞄前馈（单点与 FIR）、
 多帧融合、姿态滤波链、位置反馈与堵转判定、急停与降级路径。
 
@@ -61,7 +62,7 @@ g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/src/level_calibration.cpp -o /tmp/level && /tmp/level
 ```
 
-# 这四条合计 138 项，加上 v3 的 395 项共 **533 项**
+# 这四条合计 138 项，加上 v3 的 410 项共 **548 项**
 
 ### 想跑内存与未定义行为检查
 
@@ -72,6 +73,7 @@ g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
   examples/control_selftest.cpp \
   src/input_validator.cpp src/controller.cpp src/attitude_filter.cpp \
   src/safety_state_machine.cpp src/control_loop.cpp src/temporal_fuser.cpp \
+  src/param_check.cpp \
   -o /tmp/asan && /tmp/asan
 ```
 
@@ -109,7 +111,7 @@ flowchart LR
 
 三层，逐层变严：
 
-1. **395 项离线检查** — 每条断言都针对一个具体行为（不是"跑了没崩"）。
+1. **410 项离线检查** — 每条断言都针对一个具体行为（不是"跑了没崩"）。
    上面第 1 节已经跑过。
 2. **ASan / UBSan** — 内存越界与未定义行为。本项目靠它抓到过测试代码里的两处
    堆溢出（当时断言全绿）。
@@ -174,4 +176,4 @@ FIR 权重是按控制周期推的（时间域），落到空间剖面必须按 
 先用工具算好再填。
 
 **Q：改动之后怎么知道有没有弄坏？**
-跑第 1 节那条命令。395 项覆盖了主要路径与大部分错误路径。
+跑第 1 节那条命令。410 项覆盖了主要路径与大部分错误路径。

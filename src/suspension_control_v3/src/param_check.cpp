@@ -1,5 +1,6 @@
 #include "suspension_control_v3/param_check.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -248,6 +249,23 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
                    "横滚安全阈值，超过就进急停。", out);
     positive_up_to(sm.max_abs_pitch_rad, kHalfPi, "max_abs_pitch_rad",
                    "俯仰安全阈值，超过就进急停。", out);
+
+    // 两个阈值分属不同层：
+    //   max_abs_roll/pitch_rad 是"安全阈值"，超了进急停；
+    //   max_abs_attitude_rad   是 validator 的"物理合理性上限"，超了整帧拒收。
+    // 后者必须严格更大，否则保护对姿态量不单调——越离谱的样本先被物理上限
+    // 丢掉，状态机根本看不到它，于是"20°急停、70°无保护"。
+    {
+        const double safety_threshold = std::max(sm.max_abs_roll_rad, sm.max_abs_pitch_rad);
+        if (std::isfinite(loop.max_abs_attitude_rad) &&
+            loop.max_abs_attitude_rad <= safety_threshold) {
+            push(out, "max_abs_attitude_rad",
+                 "当前 " + fmt(loop.max_abs_attitude_rad) +
+                     "，必须大于横滚/俯仰安全阈值 (" + fmt(safety_threshold) +
+                     ")。否则超出物理上限的姿态会被整帧拒收，状态机看不到它，"
+                     "表现为\"小角度急停、大角度反而无保护\"。");
+        }
+    }
     positive(sm.link_lost_timeout_s, "link_lost_timeout_s",
              "作动器链路中断多久后急停；为 0 会让偶发丢包也触发急停。", out);
     positive(sm.stall_degrade_after_s, "stall_degrade_after_s",
