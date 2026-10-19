@@ -189,6 +189,23 @@
 链接期问题。为避免阻塞本次实时性改动，先保留原有 hack，待能拿到 CI 日志后
 单独开 PR 验证。CI 改造点已记录在 PR 描述里。
 
+### 构建重构：核心库与 PCL 层拆分
+
+`suspension_core` 原先把点云解析（PCL）与协议/串口/驱动放在同一个静态库里，
+导致"核心库不依赖 PCL"这句话只在源码层面成立：静态库链接 PCL 后，其
+`INTERFACE_LINK_LIBRARIES` 会带上 QHULL/VTK/Boost/FLANN 等导入目标，下游
+（v3）一旦不 `find_package(PCL)`，configure 阶段就会报一长串 target not found。
+
+- 新增 `suspension_extractor`（`road_profile_extractor.cpp` + `pipeline.cpp`），
+  依赖 PCL；接口输入本来就是 `pcl::PointCloud`，所以管线也归这一层；
+- `suspension_core` 只保留协议 / 串口 / 作动器驱动 / 趋势 / 障碍 / 标定 /
+  参数校验 / 输出接口，**源码与头文件都不再出现 `pcl/`**；
+- 预览节点与 `offline_demo` 显式链接两个库；`suspension_driver_node` 只链 core。
+
+本地验证：把 9 个 core 源文件在**不带任何 PCL include** 的情况下逐个编译通过，
+并 grep 确认核心头文件无 `pcl/` 引用。这是后续把 v3 切到 `ament_export_targets`
+（去掉路径 hack）的前提。
+
 ## [3.2.1] - 2026-10-15
 
 对应 `suspension_control_v3` 的 3.2.x。主线是前馈取样从"固定距离单点取样"

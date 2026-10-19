@@ -231,6 +231,11 @@ raw 模式、TF 失败无兜底、无效格静默填 0）均已在 v2 修复，�
 `suspension_core` 库（可离线复用与测试）；修正 v1 的 QoS 兼容、串口 raw 模式、TF 失败兜底、
 无效格静默填 0 等问题。
 
+核心库按依赖切成了两层：`suspension_core`（协议 / 串口 / 作动器驱动 / 趋势与障碍算法 /
+参数校验，**不依赖 ROS 也不依赖 PCL**）与 `suspension_extractor`（点云解析与管线，
+依赖 PCL，因为接口输入就是 `pcl::PointCloud`）。v3 控制包只依赖前者——这也是为什么
+它能做到"不装 PCL 也能编译自检"。
+
 ```mermaid
 %%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
 flowchart LR
