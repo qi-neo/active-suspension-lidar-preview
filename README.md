@@ -71,7 +71,7 @@
 ## 2. 系统架构
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart TB
     subgraph S1["感知层 · 硬件"]
         L["UniLiDAR<br/>点云 + IMU"]
@@ -108,7 +108,7 @@ flowchart TB
 ### 预瞄节点数据流
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart TB
     A["/unilidar/cloud"] --> B["TF 变换<br/>→ base_link"]
     B --> C["轮迹 ROI<br/>±0.1 m · 前方 5 m"]
@@ -237,7 +237,7 @@ raw 模式、TF 失败无兜底、无效格静默填 0）均已在 v2 修复，�
 它能做到"不装 PCL 也能编译自检"。
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart LR
     subgraph CORE["suspension_core · 不依赖 ROS"]
         EX["IRoadProfileExtractor"]
@@ -269,7 +269,7 @@ flowchart LR
 可脱离整车单独编译与自检。
 
 ```mermaid
-%%{init: {'themeVariables': {'fontFamily': '"PingFang SC","Microsoft YaHei","Heiti SC",sans-serif'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif', 'fontSize': '14px', 'primaryColor': '#ffffff', 'primaryTextColor': '#1f2328', 'primaryBorderColor': '#d0d7de', 'lineColor': '#8c959f', 'secondaryColor': '#f6f8fa', 'tertiaryColor': '#ffffff', 'edgeLabelBackground': '#ffffff', 'clusterBkg': '#ffffff', 'clusterBorder': '#e5e7eb', 'titleColor': '#1f2328'}}}%%
 flowchart LR
     BOOT["Boot"] --> CAL["Calibrating<br/>零位标定"]
     CAL --> LEV["Leveling<br/>回中找平"]
