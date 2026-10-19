@@ -81,14 +81,14 @@ jobs:
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（395 项）
+      - name: v3 控制与安全逻辑自检（410 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run suspension_control_v3 control_selftest
 
-      - name: 驱动报文解析自检（63 项）
+      - name: 驱动报文解析自检（69 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh

@@ -36,7 +36,11 @@ struct DecodeParams {
   double range_min{0.0};             // 用户侧距离下限 m
   double range_max{100.0};           // 用户侧距离上限 m
   bool use_system_timestamp{true};   // true 用本机时间，false 用雷达硬件时间戳
-  QuatOrder quat_order{QuatOrder::kWxyz};
+  // 默认 xyzw：官方 ROS2 节点填 Imu 话题时就是按 x,y,z,w 取的
+  // （unitree_lidar_ros2.h 里 orientation.x = quaternion[0] ... orientation.w = quaternion[3]）。
+  // 官方同一文件广播 TF 时又按 w,x,y,z 取，两处互相矛盾，所以节点启动时应
+  // 用"静止时 |w|≈1"做一次判定并把结果打日志，而不是默默信任默认值。
+  QuatOrder quat_order{QuatOrder::kXyzw};
 };
 
 struct DecodeStats {

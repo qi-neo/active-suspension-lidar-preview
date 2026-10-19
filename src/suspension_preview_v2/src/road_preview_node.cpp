@@ -11,6 +11,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 
 #include <Eigen/Geometry>
@@ -68,6 +69,14 @@ public:
 
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+        // 车体坐标系（base_link）是这个仓库自己定义的，仓库里没有任何包发布它。
+        // 少了这条 TF，cloud_callback 里每一次 lookupTransform 都失败、每一帧
+        // 都被丢弃，表现为"节点启动了但一个剖面都发不出来"。
+        // 这里按参数发一条静态变换；安装量（x/y/z/rpy）默认全 0，必须在实车上实测后填。
+        if (publish_static_tf_) {
+            publish_static_tf();
+        }
 
         // 点云用 SensorDataQoS，才与雷达的 BEST_EFFORT 发布方匹配
         sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -132,6 +141,17 @@ private:
         target_frame_ = declare_parameter<std::string>("target_frame", "base_link");
         publish_topic_ = declare_parameter<std::string>("publish_topic",
                                                         "/suspension/road_profile");
+
+        // 静态 TF：仓库里没有任何包发布 base_link，缺了它预瞄会 100% 丢帧。
+        // 安装量默认全 0（单位变换），必须按实车实测后填；全 0 时日志会明确告警
+        publish_static_tf_ = declare_parameter<bool>("publish_static_tf", true);
+        lidar_frame_ = declare_parameter<std::string>("lidar_frame", "unilidar_lidar");
+        mount_x_ = declare_parameter<double>("mount_x", 0.0);
+        mount_y_ = declare_parameter<double>("mount_y", 0.0);
+        mount_z_ = declare_parameter<double>("mount_z", 0.0);
+        mount_roll_ = declare_parameter<double>("mount_roll", 0.0);
+        mount_pitch_ = declare_parameter<double>("mount_pitch", 0.0);
+        mount_yaw_ = declare_parameter<double>("mount_yaw", 0.0);
 
         enable_serial_ = declare_parameter<bool>("enable_serial", true);
         serial_port_ = declare_parameter<std::string>("serial_port", "/dev/ttyS0");
@@ -350,6 +370,56 @@ private:
                     level_.tilt_deg, level_.gravity_mps2, accel_.count());
     }
 
+    // 发布 base_link -> 雷达的静态变换。
+    // 方向与 cloud_callback 里的 lookupTransform(target_frame_, msg->header.frame_id)
+    // 一致：父坐标系是 target_frame_（车体），子坐标系是雷达。
+    void publish_static_tf() {
+        if (lidar_frame_ == target_frame_) {
+            RCLCPP_WARN(get_logger(),
+                        "lidar_frame 与 target_frame 同为 %s，跳过静态 TF 发布"
+                        "（否则 tf2 会判成自变换）",
+                        lidar_frame_.c_str());
+            return;
+        }
+        static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = now();
+        tf.header.frame_id = target_frame_;
+        tf.child_frame_id = lidar_frame_;
+        tf.transform.translation.x = mount_x_;
+        tf.transform.translation.y = mount_y_;
+        tf.transform.translation.z = mount_z_;
+
+        const Eigen::Quaterniond q =
+            (Eigen::AngleAxisd(mount_yaw_, Eigen::Vector3d::UnitZ()) *
+             Eigen::AngleAxisd(mount_pitch_, Eigen::Vector3d::UnitY()) *
+             Eigen::AngleAxisd(mount_roll_, Eigen::Vector3d::UnitX()));
+        tf.transform.rotation.x = q.x();
+        tf.transform.rotation.y = q.y();
+        tf.transform.rotation.z = q.z();
+        tf.transform.rotation.w = q.w();
+        static_tf_broadcaster_->sendTransform(tf);
+
+        constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+        const bool identity = mount_x_ == 0.0 && mount_y_ == 0.0 && mount_z_ == 0.0 &&
+                              mount_roll_ == 0.0 && mount_pitch_ == 0.0 && mount_yaw_ == 0.0;
+        if (identity) {
+            RCLCPP_WARN(get_logger(),
+                        "已发布静态 TF %s -> %s，但安装量全为 0（单位变换）。"
+                        "这是占位值：实测雷达相对车体原点的 x/y/z 与 roll/pitch/yaw "
+                        "后填进 mount_* 参数，否则点云坐标是错的",
+                        target_frame_.c_str(), lidar_frame_.c_str());
+        } else {
+            RCLCPP_INFO(get_logger(),
+                        "已发布静态 TF %s -> %s | xyz=(%.3f, %.3f, %.3f) m "
+                        "rpy=(%.2f, %.2f, %.2f) deg",
+                        target_frame_.c_str(), lidar_frame_.c_str(), mount_x_, mount_y_,
+                        mount_z_, mount_roll_ * kRadToDeg,
+                        mount_pitch_ * kRadToDeg, mount_yaw_ * kRadToDeg);
+        }
+    }
+
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         frames_++;
         auto cloud = transform_to_target(msg);
@@ -428,6 +498,15 @@ private:
     int obstacle_min_points_{4};
     int tf_timeout_ms_{30};
     bool publish_marker_{true};
+    // 自动发布的静态 TF（base_link -> 雷达）
+    bool publish_static_tf_{true};
+    std::string lidar_frame_{"unilidar_lidar"};
+    double mount_x_{0.0};
+    double mount_y_{0.0};
+    double mount_z_{0.0};
+    double mount_roll_{0.0};
+    double mount_pitch_{0.0};
+    double mount_yaw_{0.0};
     double diag_period_s_{5.0};
 
     // 虚拟水平面标定
@@ -447,6 +526,7 @@ private:
     std::shared_ptr<SerialProfileSink> serial_sink_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Publisher<suspension_preview_v2::msg::RoadObstacles>::SharedPtr obstacles_pub_;

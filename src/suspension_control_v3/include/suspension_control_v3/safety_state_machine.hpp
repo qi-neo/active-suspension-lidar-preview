@@ -56,6 +56,12 @@ struct SafetyInputs {
     double roll_rate{0.0};
     double pitch_rate{0.0};
 
+    // 姿态"物理上不可能"（超出 validator 的合理性上限，例如 >69°）。
+    // 这种样本会被 submit_attitude() 拒掉，若只看 attitude_valid，就会在
+    // 姿态越离谱时反而没有任何保护——20° 急停、70° 静默忽略。
+    // 由控制回路在拒绝该样本时置位，状态机据此锁存姿态超限并进急停
+    bool attitude_implausible{false};
+
     bool actuator_connected{true};
     bool estop_requested{false};
 

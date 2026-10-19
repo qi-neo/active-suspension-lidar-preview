@@ -21,7 +21,16 @@ road_preview_node:
     # 地面高程窗口。按 base_link 原点在地面投影处取值；若坐标系定义不同需相应调整
     ground_z_min: -0.40                     # 窗口下界 (m)
     ground_z_max: 0.10                      # 窗口上界 (m)
-    mount_height: 0.20                      # 雷达安装高度 (m)，用于合理性校验
+    # 雷达相对车体的安装量（静态 TF 用）。仓库里没有任何包发布 base_link，
+    # 少了这条 TF 预瞄会 100% 丢帧。默认全 0 = 单位变换（占位），必须实测后填。
+    publish_static_tf: true                 # 是否由本节点发布 base_link -> 雷达 的静态 TF
+    lidar_frame: "unilidar_lidar"           # 雷达坐标系名（与驱动的 cloud_frame 一致）
+    mount_x: 0.0                            # 雷达在车体坐标系下的 x (m)
+    mount_y: 0.0                            # y (m)
+    mount_z: 0.0                            # z (m)
+    mount_roll: 0.0                         # 安装横滚 (rad)
+    mount_pitch: 0.0                        # 安装俯仰 (rad)
+    mount_yaw: 0.0                          # 安装偏航 (rad)
 
     # 鲁棒性
     min_points_per_cell: 3                  # 单格最少点数，不足判无效

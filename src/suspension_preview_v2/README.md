@@ -96,6 +96,27 @@ source install/setup.bash
 预瞄分支还没接，但数据已经能订阅、能在 rviz 里看、能喂给未来的决策。门槛（`obstacle_min_height_m`）
 过低会把噪声当障碍（空路频发告警），默认值 0.08 m 是在"漏检矮障碍"与"误检噪声"之间的折中。
 
+## 静态 TF（开箱可运行的必要条件）
+
+预瞄节点要把点云变换到车体坐标系 `target_frame`（默认 `base_link`），而本仓库里
+**没有任何包发布 `base_link`**：雷达驱动只广播 `unilidar_imu -> unilidar_lidar`
+与 `unilidar_imu_initial -> unilidar_imu`。缺了这条变换，每一帧 `lookupTransform`
+都失败、整条预瞄 100% 丢帧，表现为"节点起来了但一个剖面都没有"。
+
+因此节点默认自己发布一条静态变换（`publish_static_tf: true`）：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `publish_static_tf` | `true` | 是否由本节点发布 `base_link -> lidar_frame` |
+| `lidar_frame` | `unilidar_lidar` | 雷达坐标系名，需与驱动的 `cloud_frame` 一致 |
+| `mount_x/y/z` | `0.0` | 雷达在车体坐标系下的安装位置 (m) |
+| `mount_roll/pitch/yaw` | `0.0` | 安装角 (rad) |
+
+`mount_*` 默认全 0 表示单位变换，**只是占位值**——启动日志会 WARN 提醒。
+必须实测雷达相对车体原点的位置与安装角后填入，否则点云坐标是错的，
+算出来的路面高程同样不可信。若车队里已有其他节点发布 `base_link`，
+把 `publish_static_tf` 设为 `false` 即可（别让两条 TF 抢同一个子坐标系）。
+
 ## 离线验证
 
 不需要 ROS 运行时，也不需要雷达和硬件：

@@ -53,7 +53,7 @@ static std::vector<std::uint8_t> seal(uint32_t packet_type, const void* body, st
   std::memcpy(buf.data(), &head, sizeof(head));
   std::memcpy(buf.data() + kHeaderSize, body, body_size);
 
-  const uint32_t crc = crc32(buf.data(), total - kTailSize);
+  const uint32_t crc = crc32(buf.data() + kCrcOffset, total - kCrcOffset - kTailSize);
   FrameTail tail{};
   tail.crc32 = crc;
   tail.msg_type_check = packet_type;
@@ -128,6 +128,55 @@ static void test_crc_and_layout() {
   check(kImuPacketSize == kHeaderSize + sizeof(LidarImuData) + kTailSize,
         "IMU 整包 = 帧头 + 数据段 + 帧尾");
   check(kPointPacketSize % 4 == 0, "点云整包应四字节对齐");
+
+  // ---- CRC 覆盖范围回归（这条能锁住"真机一帧都解不出"那类事故）----
+  // 官方实现只把数据段算进 CRC（起点 frame+12、终点 frame+packet_size-12），
+  // 但官方头文件的注释写的是 "crc check of head and data"。照着注释实现会算错，
+  // 而且因为自检和编码器用的是同一份错误规则，63 项断言照样全绿。
+  {
+    const LidarPointData body = makePointBody(7, 10);
+    const auto good = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+    PacketParser pg;
+    pg.append(good.data(), good.size());
+    std::vector<uint8_t> outg;
+    uint32_t tg = 0;
+    check(pg.pull(outg, tg) == PullStatus::kFrameReady, "数据段 CRC 的帧应被接受");
+    check(pg.stats().bad_crc == 0, "接受路径不应计入 bad_crc");
+
+    auto wrong = good;
+    const uint32_t header_inclusive = crc32(wrong.data(), wrong.size() - kTailSize);
+    std::memcpy(wrong.data() + wrong.size() - kTailSize, &header_inclusive,
+                sizeof(header_inclusive));
+    PacketParser pw;
+    pw.append(wrong.data(), wrong.size());
+    std::vector<uint8_t> outw;
+    uint32_t tw = 0;
+    check(pw.pull(outw, tw) != PullStatus::kFrameReady,
+          "把帧头算进 CRC 的帧应被拒绝（官方只覆盖数据段）");
+    check(pw.stats().bad_crc >= 1, "该帧应计入 bad_crc");
+  }
+
+  // 数据段长度为 0 的包（packet_size == 24）：官方跳过 CRC 校验，这里也不该因 CRC 拒帧
+  {
+    std::vector<uint8_t> buf(kHeaderSize + kTailSize, 0);
+    FrameHeader head{};
+    std::memcpy(head.header, kHeaderMark, sizeof(kHeaderMark));
+    head.packet_type = kTypeAck;
+    head.packet_size = static_cast<uint32_t>(buf.size());
+    std::memcpy(buf.data(), &head, sizeof(head));
+    FrameTail tail{};
+    tail.crc32 = 0xDEADBEEFu;  // 故意填错：data_len == 0 时不应看这个字段
+    tail.msg_type_check = kTypeAck;
+    std::memcpy(tail.tail, kTailMark, sizeof(kTailMark));
+    std::memcpy(buf.data() + kHeaderSize, &tail, sizeof(tail));
+
+    PacketParser pz;
+    pz.append(buf.data(), buf.size());
+    std::vector<uint8_t> outz;
+    uint32_t tz = 0;
+    check(pz.pull(outz, tz) == PullStatus::kFrameReady, "24 字节空包应放行");
+    check(pz.stats().bad_crc == 0, "空包不应计入 bad_crc");
+  }
 }
 
 // ---------------------------------------------------------------------------

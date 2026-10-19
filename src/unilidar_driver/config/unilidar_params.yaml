@@ -24,8 +24,10 @@ unilidar_driver_node:
 
     # ---- IMU ----
     # 固件里四元数分量的排列官方未定死，wxyz 或 xyzw。
+    # 默认 xyzw：官方 ROS2 节点填 Imu 话题就是按 x,y,z,w 取的；
+    # 同一文件广播 TF 时又按 w,x,y,z 取，官方自身矛盾。
     # 判定方法：雷达静止水平放置，打印出的 w 应接近 ±1 而其余接近 0
-    quaternion_order: "wxyz"
+    quaternion_order: "xyzw"
 
     # true 用本机时间打时间戳，false 用雷达硬件时间戳
     use_system_timestamp: true

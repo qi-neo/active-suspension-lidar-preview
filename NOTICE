@@ -1,0 +1,105 @@
+unilidar-driver
+Copyright (c) 2026 qi-neo
+
+本项目以自己的代码为主，整体以 MIT 许可证发布（见 LICENSE）。其中两个文件
+包含派生自第三方开源项目的内容，按原始项目的许可证要求在此声明。
+
+
+================================================================================
+派生内容
+================================================================================
+
+以下两个文件包含派生自 Unitree Robotics 开源代码的内容：
+
+  src/unilidar_driver/include/unilidar_driver/protocol.hpp
+
+      报文结构定义：帧头、帧尾、数据段各结构的字段与顺序、报文类型常量、
+      帧头与帧尾的标识字节。
+      派生自 unitree_lidar_sdk2 的
+      unitree_lidar_sdk/include/unitree_lidar_protocol.h
+
+  src/unilidar_driver/src/frame_decoder.cpp
+
+      点云解码逻辑：测距值换算、水平角与垂直角的迭代方式、无效点与距离门限
+      的判定、以及由双棱镜扫描机构几何关系推出 XYZ 坐标的那一组公式。
+      派生自 unitree_lidar_sdk2 的
+      unitree_lidar_sdk/include/unitree_lidar_utilities.h
+      中的函数 parseFromPacketToPointCloud
+
+两个文件的头部均已按 BSD-3-Clause 第 1 条保留原始版权声明，并逐项列出了
+相对原始实现的改动，改动处可自行比对。
+
+
+================================================================================
+Unitree Robotics 的 BSD-3-Clause 许可证
+================================================================================
+
+unitree_lidar_sdk2
+https://github.com/unitreerobotics/unilidar_sdk2
+
+BSD 3-Clause License
+
+Copyright (c) 2024, Unitree Robotics
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+================================================================================
+未派生自第三方的内容
+================================================================================
+
+除上述两个文件中的派生部分外，本项目其余全部内容为原创，包括但不限于：
+
+  src/unilidar_driver/src/packet_parser.cpp
+      帧定界与重同步、CRC32 校验、序号连续性统计、缓冲上限保护
+
+  src/unilidar_driver/src/udp_receiver.cpp
+      POSIX UDP 收包封装、来源地址回填
+
+  src/unilidar_driver/src/unilidar_driver_node.cpp
+      ROS 适配层：参数、QoS、TF、PointCloud2 组装、诊断
+
+  src/unilidar_driver/examples/decoder_selftest.cpp
+      63 项断言的离线自检
+
+  src/unilidar_driver/examples/udp_probe.cpp
+      实测定界探针
+
+  tests/
+      UDP 回环集成测试与合成报文生成
+
+  docs/driver-design.md
+      驱动编写方法论文档
+
+  .github/workflows/ci.yml
+      持续集成配置
+
+其中 CRC32 实现是标准 CRC-32/ISO-HDLC（反射多项式 0xEDB88320，初值
+0xFFFFFFFF，结果取反），属公开标准算法，不专属任何厂商；自检中已用标准
+测试向量 "123456789" -> 0xCBF43926 校验其正确性。需要一并说明的是，
+官方的 unitree_lidar_utilities.h 里也有一个同名同算法的 crc32()，
+本文件的实现按标准定义独立写出（用掩码代替分支，行为等价），
+并按上述测试向量验证过。

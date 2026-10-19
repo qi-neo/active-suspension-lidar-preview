@@ -64,6 +64,10 @@ bool SuspensionControlLoop::submit_attitude(const Attitude& attitude, double now
         ok = false;
     } else if (std::fabs(attitude.roll_rad) > params_.max_abs_attitude_rad ||
                std::fabs(attitude.pitch_rad) > params_.max_abs_attitude_rad) {
+        // 超出物理上限：这不是"这一帧数据不可信"，而是传感器/安装已经坏了。
+        // 只把它当成坏帧丢掉会让系统在"姿态 > 69°"时反而没有任何保护
+        // （20° 已急停，70° 却被静默忽略）。标记出来交给状态机进急停。
+        attitude_implausible_ = true;
         ok = false;
     } else if (status_.attitude_age_ms > params_.max_attitude_age_ms ||
                status_.attitude_age_ms < -params_.max_attitude_age_ms) {
@@ -79,6 +83,7 @@ bool SuspensionControlLoop::submit_attitude(const Attitude& attitude, double now
 
     attitude_ = attitude;
     attitude_.valid = true;
+    attitude_implausible_ = false;  // 收到合法样本即解除"传感器坏了"的判定
     status_.attitude_accepted = true;
     return true;
 }
@@ -224,6 +229,25 @@ void SuspensionControlLoop::apply_command(
 const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) {
     ++status_.ticks;
 
+    // ---- 姿态过期判定：必须按"当前时刻"每拍重算 ----
+    // 不能只在 submit_attitude() 里算：IMU 断流后该函数不再被调用，age 会永远
+    // 停在最后一个值、attitude_.valid 永远是 true，于是控制器带着几秒前的姿态
+    // 持续输出、状态机零故障位——这是最危险的一种失效（看起来一切正常）。
+    //
+    // age 每拍都更新（即使已经判为无效），这样联调时能看到"姿态已经断了 2 s"，
+    // 而不是冻结在断流瞬间的那个数
+    {
+        const double attitude_age_ms = (now_sec - attitude_.stamp_sec) * 1000.0;
+        status_.attitude_age_ms = attitude_age_ms;
+        if (attitude_.valid &&
+            (attitude_age_ms > params_.max_attitude_age_ms ||
+             attitude_age_ms < -params_.max_attitude_age_ms)) {
+            attitude_.valid = false;
+            status_.attitude_accepted = false;
+            ++status_.attitude_rejected;
+        }
+    }
+
     // 周期时长封顶后再往下传。dt 异常大时（抖动、卡顿、断点），状态机里所有
     // "累计时长"型判据都会被一次性推过阈值，速率限制也会按它放行一个大跳变。
     // 宁可让计时少推进一拍，也不能让它跳过去
@@ -282,6 +306,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     in.pitch_rad = attitude_.pitch_rad;
     in.roll_rate = attitude_.roll_rate;
     in.pitch_rate = attitude_.pitch_rate;
+    // 姿态数据"物理上不可能"：这不是坏帧，是传感器/安装失效，状态机直接急停
+    in.attitude_implausible = attitude_implausible_;
     // require_driver 为真时，"声明要驱动却没驱动"按链路丢失上报并最终急停；
     // 纯软件联调模式（require_driver=false）不参与该判定
     const bool driver_ready =
@@ -312,19 +338,30 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         }
     }
 
-    // ---- 进入 Emergency 时触发硬件急停 ----
+    // ---- 硬件急停：直到送达为止 ----
     // 只下发目标高度 0 是不够的：那是位置伺服指令，作动器按自身速度慢慢走回零位；
     // 硬件急停是毫秒级的切断使能/泄压，两者安全等级不同，不能互相替代。
-    // 只在跃迁进来的第一拍调用一次：200 Hz 下每拍重复调用既淹没总线，
-    // 也不符合硬件急停"一次触发即保持"的语义
-    if (sm.state == ControlState::kEmergency && state_changed) {
-        if (params_.enable_driver && driver_) {
-            if (driver_->emergency_stop()) {
-                ++status_.estop_commands_sent;
-            } else {
-                ++status_.driver_errors;
+    //
+    // 但"只在跃迁那一拍调用一次"是错的：串口写失败一次（丢帧、忙、线被拔）
+    // 就再也不会重试，系统会停在"以为已经急停"的状态里。现在的语义是：
+    // 成功后不再重复（符合"一次触发即保持"），失败则按 10 Hz 重试直到成功。
+    if (sm.state == ControlState::kEmergency) {
+        const bool retry_due = (now_sec - last_estop_attempt_sec_) >= 0.1;
+        if (!estop_sent_ok_ && retry_due) {
+            last_estop_attempt_sec_ = now_sec;
+            if (params_.enable_driver && driver_) {
+                if (driver_->emergency_stop()) {
+                    estop_sent_ok_ = true;
+                    ++status_.estop_commands_sent;
+                } else {
+                    ++status_.driver_errors;
+                }
             }
         }
+    } else {
+        // 离开急停后重新武装：下次进 Emergency 需要重新下发一次
+        estop_sent_ok_ = false;
+        last_estop_attempt_sec_ = -1.0e9;
     }
 
     // ---- 零位标定：只在 Calibrating 阶段、姿态可信时累计 ----
@@ -374,6 +411,23 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         // 首次进入该状态时强制下发：last_command_ 初值就是全零，
         // 不强制的话回中/急停指令会被去重判为"没变化"而吞掉
         apply_command(zeros, state_changed);
+        return status_;
+    }
+
+    // 没有可信姿态时不重新计算：闭环的反馈项唯一来源是 IMU，缺了它只剩前馈，
+    // 等于开环"跟着路面走"，而反馈项的缺失还会让输出慢慢滑向零位。
+    // 这里保持上一拍下发值不动，等状态机在 degrade_after_unhealthy_s 后
+    // 把状态切到 Degraded（hold_output）再走既有的降级/急停路径。
+    if (!attitude_.valid) {
+        ControlOutput held_out;
+        std::array<double, kWheelCount> held{};
+        for (int i = 0; i < kWheelCount; ++i) {
+            const double v = static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
+            held_out.height_mm[static_cast<std::size_t>(i)] = v;
+            held[static_cast<std::size_t>(i)] = v;
+        }
+        status_.output = held_out;
+        controller_->sync_reference(reference_for_sync(held));
         return status_;
     }
 
