@@ -33,6 +33,8 @@
 suspension_preview_v2/
 ├── include/suspension_preview_v2/     对外接口
 │   ├── types.hpp                      LaneProfile / RoadProfileFrame
+│   ├── extractor_params.hpp           解析器参数（与 PCL 解耦，供参数校验复用）
+│   ├── param_check.hpp                启动前参数校验（不依赖 ROS/PCL）
 │   ├── protocol.hpp                   CRC16 与帧编解码
 │   ├── serial_port.hpp                串口低层封装
 │   ├── road_profile_extractor.hpp     点云解析接口与网格实现
@@ -55,7 +57,9 @@ colcon build --packages-select suspension_preview_v2
 source install/setup.bash
 ```
 
-产出四个目标：`road_preview_node`、`suspension_driver_node`、`offline_demo`、`trend_selftest`。
+产出：`road_preview_node`、`suspension_driver_node`、`offline_demo`，以及五个纯函数自检
+`trend_selftest` / `obstacle_selftest` / `protocol_selftest` / `level_selftest` / `param_selftest`。
+五个自检都注册进了 CTest（`colcon test --packages-select suspension_preview_v2` 会真正跑）。
 
 ## 地面筛选：窗口跟着路面前移
 
@@ -85,11 +89,14 @@ source install/setup.bash
 做法是在解析链路里多走一步（纯函数 `detect_lane_obstacles`，无 PCL 依赖）：
 
 1. 用每格的**地面参考高度**（剖面估计优先，缺格用趋势线补）作为基准；
-2. 重新扫描轮迹 ROI 的原始点，凡高于参考地面超过 `obstacle_min_height_m` 且单格
-   候选点 ≥ `obstacle_min_points` 的，聚合成一个障碍物；
-3. 记录其位置（沿车 `x`、横向 `lateral`）、顶端相对地面高度 `height`、沿前进方向半宽
-   `half_width`，发布到 `/suspension/road_obstacles`（`RoadObstacles` 消息，左右轮迹合并、
-   按 `x` 排序）。
+2. 重新扫描轮迹 ROI 的原始点，凡高于参考地面超过 `obstacle_min_height_m` 的逐格收集，
+   **相邻候选格合并成一个障碍簇**；簇内候选点总数 ≥ `obstacle_min_points` 才输出
+   （按簇判而不是按格判：5 cm 格在 5 m 处通常只有 2 个点，按格判 4 点等于把远处障碍
+   全漏掉）；
+3. 记录其位置（簇区间中心）、横向 `lateral`、相对地面高度 `height`（簇内候选点残差的
+   **中位数**，单个飞点不会把 10 cm 路沿报成 1.9 m）、沿前进方向半宽 `half_width`
+   （簇跨过的格区间半宽，跨格障碍不再被压成"单格半宽 ≤ 2.5 cm"），发布到
+   `/suspension/road_obstacles`（`RoadObstacles` 消息，左右轮迹合并、按 `x` 排序）。
 
 关键点：这些高出路面的点**本身就没进高度剖面**（已被开窗排除），这里只是把它们回收成
 结构化输出，因此零侵入、不污染前馈。该输出目前是"接口就绪"状态——控制侧（v3）的语义
@@ -117,6 +124,12 @@ source install/setup.bash
 算出来的路面高程同样不可信。若车队里已有其他节点发布 `base_link`，
 把 `publish_static_tf` 设为 `false` 即可（别让两条 TF 抢同一个子坐标系）。
 
+输出侧同理：`/suspension/road_profile` 消息与 Marker 的 `header.frame_id`
+**一律等于 `target_frame`**（`RosTopicSink` 构造时显式传入，而不是由管线调用方
+随手传的字符串决定）。v3 的剖面校验按 `expected_frame` 拒收坐标系不符的帧，
+两边不一致时这个校验要么形同虚设、要么整条链路被静默拒收——现在两处由节点
+同一个参数驱动，`param_selftest` 也会在 `target_frame` 为空时拒绝启动。
+
 ## 离线验证
 
 不需要 ROS 运行时，也不需要雷达和硬件：
@@ -124,14 +137,22 @@ source install/setup.bash
 ```bash
 ros2 run suspension_preview_v2 offline_demo      # 端到端：解析 + 协议往返
 ros2 run suspension_preview_v2 trend_selftest    # 趋势与逐格估计的纯函数自检，29 项
-ros2 run suspension_preview_v2 obstacle_selftest # 障碍物检测纯函数自检，12 项
-ros2 run suspension_preview_v2 protocol_selftest # 串口协议纯函数自检，28 项
+ros2 run suspension_preview_v2 obstacle_selftest # 障碍物检测纯函数自检，32 项
+ros2 run suspension_preview_v2 protocol_selftest # 串口协议纯函数自检，82 项
+ros2 run suspension_preview_v2 level_selftest    # 虚拟水平面标定纯函数自检，69 项
+ros2 run suspension_preview_v2 param_selftest    # 启动前参数校验自检，53 项
 ```
 
 `protocol_selftest` 覆盖 CRC16-CCITT-FALSE 标准向量（`"123456789"` → `0x29B1`）、检错
 能力、帧布局与小端字节序、编解码往返、坏帧拒收（CRC 错 / 截断 / 无帧头）、`encode_lane`
 的毫米换算与无效点 `0x7FFF` 标记，以及超量程钳位——后者尤其关键：串口负载是 int16 毫米，
 若超量程回绕会把 +33 m 变成约 -32 m，下发到执行器是方向性灾难。
+
+字节流解析（`decode_stream`）另外覆盖接收端最容易被卡住的一类问题：半包 / 截断报
+`kNeedMore`（保留数据等待，不是坏帧）、粘包一次只消费一帧、伪帧头逐字节重同步、
+长度字段超上限报 `kBadLength`、CRC 错报 `kBadCrc` 且只丢 1 字节继续找真帧。
+旧接口对"半包"和"坏帧"都返回 false + consumed=0，一个被噪声改坏的 `count` 字段
+（比如 65535）就能让接收端永远等一个 131 KB 的"半包"，后面所有真帧一起丢掉。
 
 `offline_demo` 合成一段带凸起路面的点云，跑一遍解析接口并与真值比对，最后做一次协议编解码往返校验：
 
@@ -152,6 +173,29 @@ ros2 run suspension_preview_v2 protocol_selftest # 串口协议纯函数自检�
 
 它不依赖 PCL（只编译 `road_trend.cpp`），所以在没有 PCL 的机器上也能单独验证——提取器本身
 要 PCL，只能靠 CI。
+
+## 启动前参数校验
+
+节点在 `declare_parameters()` 之后、创建 TF / 串口 / 订阅之前，先用不依赖 ROS 的
+纯函数 `validate_params()` 把解析参数与节点关键参数过一遍：
+
+- **fatal**（这套配置不可能正常工作）：逐条 `RCLCPP_FATAL` 打印"填错会导致什么
+  现象"，然后抛异常、进程以非零码退出——launch / systemd 能看出"节点没起来"，
+  而不是"起来了但什么都不工作"；
+- **可疑**（能跑但会埋坑）：`RCLCPP_WARN`，不拦启动。
+
+典型 fatal：`target_frame` 为空（TF 查询必失败、整条链路零输出）、`preview_dist=0`
+（ROI 为空）、`wheel_dist=0` 或 `2×lane_half_width ≥ wheel_dist`（两条轮迹 ROI 重叠，
+左右高程永远相同、横滚前馈恒 0）、`min_points_per_cell=0`（0 点也算有效）、
+`trend_min_cells` 超过拟合范围内能提供的格数（趋势永远拟合失败、静默退回固定窗口）、
+不支持的 `baud_rate`（serial_port.cpp 会静默回退到 115200）。
+
+默认配置里 `trend_window_half_m(0.15) ≥ obstacle_min_height_m(0.08)` 会触发一条
+非致命告警：地面开窗比障碍阈值还宽，8~15 cm 的障碍顶面与路面同处一个窗内，
+格内点多的一方决定中位数——同一物理目标会随点云密度在"漏检"与"检出"之间翻转。
+这是已知问题，两个阈值怎么改需要实测数据定夺，所以只告警不拒绝启动。
+自检 `param_selftest` 覆盖了每条判据（填 0 / NaN / 上下界颠倒 / 交叉关系 /
+关闭某功能后对应参数不再误报）。
 
 ## 运行
 
@@ -220,10 +264,14 @@ driver->emergency_stop();
 3      seq        帧序号 0-255 循环
 4-5    count      uint16 小端，负载元素个数
 6..    payload    count × int16 小端，单位毫米，无效点填 0x7FFF
-末 2   crc16      CRC16-CCITT，覆盖帧头到负载末尾
+末 2   crc16      CRC16-CCITT，覆盖偏移 0 到负载末尾（6+2×count 字节）
 ```
 
-该格式与 v1 不兼容（v1 是 float32 加 8 位累加和）。`protocol::decode_frame()` 是参考解析实现，下游可直接复用。
+单帧负载上限 2048 个 int16：`count` 虽能到 65535，但被噪声改坏的长度字段会让
+接收端一直等一个收不齐的"半包"。超上限按坏帧处理并逐字节重同步。
+该格式与 v1 不兼容（v1 是 float32 加 8 位累加和）。`protocol::decode_stream()` 是参考
+解析实现（返回 `Ok/NeedMore/NoHeader/BadLength/BadCrc` 明确状态 + 建议丢弃字节数），
+下游可直接复用；只需要"这个缓冲里有没有完整帧"的场合用 `decode_frame()`。
 
 ## 诊断日志
 
@@ -240,8 +288,9 @@ driver->emergency_stop();
    未使用平面拟合（RANSAC / 格内 PCA 法向量）；
 3. 障碍物已由解析链路单独检测并发布到 `/suspension/road_obstacles`（左右轮迹合并、
    按 x 排序），但控制侧（v3）的语义预瞄分支（避让 / 减速）尚未接——目前是"接口就绪"；
-4. 分箱逻辑、趋势拟合、障碍物检测、串口协议都已有纯函数测试
-   （`trend_selftest` / `obstacle_selftest` / `protocol_selftest`，共 69 项，均不依赖 PCL）；
+4. 分箱逻辑、趋势拟合、障碍物检测、串口协议、参数校验都已有纯函数测试
+   （`trend_selftest` / `obstacle_selftest` / `protocol_selftest` / `level_selftest` /
+   `param_selftest`，共 265 项，均不依赖 PCL）；
 5. `offline_demo` 只覆盖解析链路，未覆盖串口（需要真实设备）；
 6. **位置反馈尚未在串口驱动上实现**：`ISuspensionDriver` 已新增可选的
    `has_position_feedback()` / `get_position()`（默认不支持，故既有实现零改动即可编译），

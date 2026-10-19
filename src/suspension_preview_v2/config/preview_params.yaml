@@ -57,6 +57,17 @@ road_preview_node:
     obstacle_min_height_m: 0.08             # 高出地面多少才算障碍候选 (m)
     obstacle_min_points: 4                  # 单格至少多少候选点才算稳定障碍
 
+    # 虚拟水平面标定：启动时用静止的加速度计读数建一次"水平"，把点云先旋正
+    # 再提取高程。雷达竖直安装或车体有静倾角时，点云的 z 不是离地高度。
+    # 标定失败会自动退回"不做校正"（不会下发错数据），但高程仍带姿态误差
+    level_calib_enable: true                # 是否在启动时做一次重力标定
+    imu_topic: "/unilidar/imu"              # IMU 话题（标定用加速度计）
+    level_calib_duration_s: 3.0             # 标定窗口时长 (s)
+    level_calib_min_samples: 60             # 最少样本数
+    level_calib_max_std: 0.05               # 三轴抖动上限 (m/s^2)，超过判"不静止"
+    level_calib_max_tilt_deg: 60.0          # 允许的车身静倾角上限 (deg)，超过拒绝
+                                            # （>90° 时竖直方向正负无法确定）
+
     # 其它
     tf_timeout_ms: 30                       # TF 查询超时 (ms)
     publish_marker: true                    # 发布 rviz Marker

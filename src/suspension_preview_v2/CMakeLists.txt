@@ -35,12 +35,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 #   road_trend（局部地面趋势，无 PCL，单独自检）
 #   obstacle_detect（非地面障碍物检测，无 PCL，单独自检）
 #   level_calibration（重力向量建虚拟水平面，无 PCL，单独自检）
+#   param_check（启动前参数校验，无 PCL / 无 ROS，单独自检）
 add_library(suspension_core STATIC
   src/protocol.cpp
   src/serial_port.cpp
   src/road_trend.cpp
   src/obstacle_detect.cpp
   src/level_calibration.cpp
+  src/param_check.cpp
   src/road_profile_extractor.cpp
   src/profile_sink.cpp
   src/serial_profile_sink.cpp
@@ -101,9 +103,30 @@ add_executable(level_selftest
 target_include_directories(level_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# 启动前参数校验的纯函数自检（致命判据 / 交叉关系 / 可疑项 / 默认配置）
+# 链接 serial_port.cpp 是因为校验器复用 SerialPort::is_baud_supported 的波特率表，
+# 避免"校验用的速率表"和"串口实际支持的速率表"各写一份、迟早漂移
+add_executable(param_selftest
+  examples/param_selftest.cpp src/param_check.cpp src/serial_port.cpp)
+target_include_directories(param_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# 五个纯函数自检注册进 CTest：colcon test / ctest 会真正跑它们。
+# 此前只有 install(TARGETS) 而没有 add_test，colcon test 是空的——
+# "装了可执行但没有任何步骤调用它"正是这些自检长期不进 CI 的原因。
+include(CTest)
+if(BUILD_TESTING)
+  enable_testing()
+  add_test(NAME trend_selftest COMMAND trend_selftest)
+  add_test(NAME obstacle_selftest COMMAND obstacle_selftest)
+  add_test(NAME protocol_selftest COMMAND protocol_selftest)
+  add_test(NAME level_selftest COMMAND level_selftest)
+  add_test(NAME param_selftest COMMAND param_selftest)
+endif()
+
 # 安装
 install(TARGETS road_preview_node suspension_driver_node offline_demo
-  trend_selftest obstacle_selftest protocol_selftest level_selftest
+  trend_selftest obstacle_selftest protocol_selftest level_selftest param_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 # suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，
