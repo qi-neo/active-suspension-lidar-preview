@@ -88,7 +88,10 @@ private:
     imu_topic_ = declare_parameter<std::string>("imu_topic", "/unilidar/imu");
 
     cloud_scan_num_ = declare_parameter<int>("cloud_scan_num", 18);
-    quat_order_str_ = declare_parameter<std::string>("quaternion_order", "wxyz");
+    // 默认 xyzw：官方 ROS2 节点填 Imu 话题就是这么取的（orientation.x = quaternion[0]）。
+    // 官方同一文件广播 TF 时又按 wxyz 取，两处矛盾，所以这个参数必须能改；
+    // 台架上用"静止水平时 |w|≈1"确认一次即可。
+    quat_order_str_ = declare_parameter<std::string>("quaternion_order", "xyzw");
     use_system_timestamp_ = declare_parameter<bool>("use_system_timestamp", true);
     range_min_ = declare_parameter<double>("range_min", 0.0);
     range_max_ = declare_parameter<double>("range_max", 100.0);
@@ -268,7 +271,9 @@ private:
 
     if (ps.frames_ok == 0 && ps.bad_crc + ps.bad_size + ps.bad_tail > 0) {
       RCLCPP_WARN(get_logger(),
-                  "一帧都没解出却不乏错误计数：通常是 IP/端口不对，或对面根本不是宇树雷达。"
+                  "一帧都没解出却不乏错误计数：先看 bad_crc 是否在涨——若持续在涨而 bad_tail "
+                  "很少，最常见的是 CRC 覆盖范围与本固件不一致（官方实现只覆盖数据段）；"
+                  "否则通常是 IP/端口不对，或对面根本不是宇树雷达。"
                   "可用 udp_probe 工具先看原始包的实际长度与 CRC 情况。");
     }
     if (dstats_.size_hint > 0) {

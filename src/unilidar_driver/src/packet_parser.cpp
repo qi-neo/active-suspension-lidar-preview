@@ -93,10 +93,16 @@ PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out
     if (!ok) {
       stats_.bad_tail++;
     } else {
-      const uint32_t got = crc32(frame, frame_len - sizeof(FrameTail));
-      if (got != tail.crc32) {
-        stats_.bad_crc++;
-        ok = false;
+      // CRC 只覆盖数据段：[kCrcOffset, frame_len - kTailSize)。
+      // 官方实现的 CRC 起点是 frame+12、终点是 frame+packet_size-12（见 protocol.hpp）。
+      // 数据段长度为 0 的包（packet_size == 24）官方不校验，这里保持一致。
+      const std::size_t data_len = frame_len - kCrcOffset - kTailSize;
+      if (data_len > 0) {
+        const uint32_t got = crc32(frame + kCrcOffset, data_len);
+        if (got != tail.crc32) {
+          stats_.bad_crc++;
+          ok = false;
+        }
       }
     }
 

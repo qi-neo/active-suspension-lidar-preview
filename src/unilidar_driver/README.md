@@ -33,7 +33,7 @@ src/unilidar_driver/
 │   └── udp_receiver.hpp    POSIX UDP 收包
 ├── src/                    以上四个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
-│   ├── decoder_selftest.cpp  离线自检，63 项断言
+│   ├── decoder_selftest.cpp  离线自检，69 项断言
 │   └── udp_probe.cpp         实测定界探针
 ├── launch/unilidar_driver.launch.py
 └── config/unilidar_params.yaml
@@ -140,7 +140,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界 | 离线自检 63 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界 | 离线自检 69 项断言全过 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 测试自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
 | `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
