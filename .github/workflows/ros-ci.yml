@@ -7,6 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 容器 job 的默认 shell 是 sh（dash），不支持 `set -o pipefail`。
+# 本工作流的步骤里用了 pipefail（配合 tee 保留失败码），必须显式用 bash。
+defaults:
+  run:
+    shell: bash
+
 # 失败时要把日志贴回 PR，需要写 issue comment 权限
 permissions:
   contents: read
