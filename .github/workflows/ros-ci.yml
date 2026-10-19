@@ -273,11 +273,18 @@ jobs:
               "src/suspension_preview_v2/src/${src}" -o "build-cov/${name}"
             "./build-cov/${name}" > /dev/null
           done
-          # 参数校验器也要跑，否则它在预览包的分母里贡献 0 覆盖，拖低门禁
+          # 参数校验器也要跑，否则它在预览包的分母里贡献 0 覆盖。
+          # 但 serial_port.cpp 是纯 termios I/O：离线自检只能覆盖到
+          # is_baud_supported，实测 7% 行 / 3.5% 分支，插桩进来会把分支门禁
+          # 直接拖穿（本地复算：其余文件全在 94~100%）。所以它**不插桩**，
+          # 只作为链接依赖参与，不进分母。
+          g++ -std=c++17 -O0 -I src/suspension_preview_v2/include \
+            -c src/suspension_preview_v2/src/serial_port.cpp \
+            -o build-cov/serial_port_noinstr.o
           g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
             src/suspension_preview_v2/examples/param_selftest.cpp \
             src/suspension_preview_v2/src/param_check.cpp \
-            src/suspension_preview_v2/src/serial_port.cpp -o build-cov/param_selftest
+            build-cov/serial_port_noinstr.o -o build-cov/param_selftest
           ./build-cov/param_selftest > /dev/null
 
       - name: 汇总覆盖率
