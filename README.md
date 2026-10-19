@@ -23,7 +23,7 @@
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
 > CI 在 ROS Humble 容器里 `colcon build` 五个包，再 `colcon test` 跑注册进 CTest 的自检，并跑四组离线自检（v3 控制 428 项、驱动解析 69 项、
-> v2 纯函数 69 项、虚拟水平面 69 项，共 635 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> v2 纯函数 196 项、虚拟水平面 69 项，共 762 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
 > 不需要 ROS 和硬件就能确认这套代码是完整可跑的（428 项检查）。

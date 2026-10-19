@@ -22,9 +22,12 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "suspension_preview_v2/level_calibration.hpp"
+#include "suspension_preview_v2/param_check.hpp"
 #include "suspension_preview_v2/pipeline.hpp"
 #include "suspension_preview_v2/ros_topic_sink.hpp"
 #include "suspension_preview_v2/serial_profile_sink.hpp"
@@ -33,6 +36,8 @@
 using suspension_preview_v2::ExtractorParams;
 using suspension_preview_v2::GravityAccumulator;
 using suspension_preview_v2::LevelRotation;
+using suspension_preview_v2::ParamIssue;
+using suspension_preview_v2::PreviewNodeParams;
 using suspension_preview_v2::PreviewPipeline;
 using suspension_preview_v2::RosTopicSink;
 using suspension_preview_v2::SerialProfileSink;
@@ -41,6 +46,9 @@ class RoadPreviewNode : public rclcpp::Node {
 public:
     RoadPreviewNode() : rclcpp::Node("road_preview_node") {
         declare_parameters();
+        // 参数错了就别启动：v2 的参数大多是物理量/阈值，填错时节点"看着在跑、
+        // 其实全错"，日志还一切正常。校验器把每条错误的后果讲清楚后统一拒绝
+        validate_parameters_or_throw();
 
         const ExtractorParams ep = make_extractor_params();
         const std::size_t cells = static_cast<std::size_t>(
@@ -49,8 +57,10 @@ public:
         // 组装管线：解析器 + 输出（话题 / 串口）
         pipeline_ = std::make_unique<PreviewPipeline>(
             suspension_preview_v2::make_grid_extractor(ep));
-        pipeline_->add_sink(
-            std::make_shared<RosTopicSink>(*this, publish_topic_, publish_marker_));
+        // 输出坐标系显式传入 target_frame：v3 按 header.frame_id ==
+        // expected_frame 校验剖面，不能让 frame_id 由 pipeline 调用方随手传
+        pipeline_->add_sink(std::make_shared<RosTopicSink>(
+            *this, publish_topic_, target_frame_, publish_marker_));
 
         if (enable_serial_) {
             auto serial = std::make_shared<SerialProfileSink>(serial_port_, baud_rate_);
@@ -204,6 +214,54 @@ private:
         level_calib_max_std_ = declare_parameter<double>("level_calib_max_std", 0.05);
         level_calib_max_tilt_deg_ =
             declare_parameter<double>("level_calib_max_tilt_deg", 60.0);
+    }
+
+    // 节点层参数里参与校验的那部分。校验器不依赖 ROS，只吃这个纯结构体
+    PreviewNodeParams make_node_params() const {
+        PreviewNodeParams p;
+        p.cloud_topic = cloud_topic_;
+        p.target_frame = target_frame_;
+        p.publish_topic = publish_topic_;
+        p.enable_serial = enable_serial_;
+        p.serial_port = serial_port_;
+        p.baud_rate = baud_rate_;
+        p.tf_timeout_ms = tf_timeout_ms_;
+        p.publish_static_tf = publish_static_tf_;
+        p.lidar_frame = lidar_frame_;
+        p.publish_obstacles = publish_obstacles_;
+        p.obstacles_topic = obstacles_topic_;
+        p.level_calib_enable = level_calib_enable_;
+        p.imu_topic = imu_topic_;
+        p.level_calib_duration_s = level_calib_duration_s_;
+        p.level_calib_min_samples = level_calib_min_samples_;
+        p.level_calib_max_std = level_calib_max_std_;
+        p.level_calib_max_tilt_deg = level_calib_max_tilt_deg_;
+        p.diag_period_s = diag_period_s_;
+        return p;
+    }
+
+    // fatal 项 -> 逐条 FATAL 日志 + 抛异常拒绝启动（main 会捕获并返回 1，
+    // 让 launch/systemd 能看见"起不来"而不是"起来了但不工作"）；
+    // 可疑项只在启动日志里 WARN，不拦启动
+    void validate_parameters_or_throw() {
+        const std::vector<ParamIssue> issues =
+            suspension_preview_v2::validate_params(make_extractor_params(),
+                                                   make_node_params());
+        bool has_fatal = false;
+        for (const ParamIssue& issue : issues) {
+            if (issue.fatal) {
+                has_fatal = true;
+                RCLCPP_FATAL(get_logger(), "[参数错误] %s：%s",
+                             issue.key.c_str(), issue.message.c_str());
+            } else {
+                RCLCPP_WARN(get_logger(), "[参数可疑] %s：%s",
+                            issue.key.c_str(), issue.message.c_str());
+            }
+        }
+        if (has_fatal) {
+            throw std::runtime_error(
+                "参数校验未通过，拒绝启动（逐条原因见上方 FATAL 日志）");
+        }
     }
 
     ExtractorParams make_extractor_params() const {
@@ -432,6 +490,8 @@ private:
         }
         const double stamp_sec = static_cast<double>(msg->header.stamp.sec) +
                                  static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+        // 点云已在 target_frame_ 下：剖面/障碍物统一用它作 header.frame_id，
+        // v3 的剖面校验按 expected_frame 拒收，坐标系必须与 target_frame 一致
         pipeline_->process(cloud, stamp_sec, target_frame_);
 
         // 语义预瞄：把高出路面的障碍物单独发布（高度剖面不含它们）
@@ -539,7 +599,16 @@ private:
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<RoadPreviewNode>());
+    try {
+        rclcpp::spin(std::make_shared<RoadPreviewNode>());
+    } catch (const std::exception& ex) {
+        // 参数校验失败等启动期异常的退出码必须是非零：launch/systemd 靠它
+        // 判断"节点没起来"，否则会把"进程活着但什么都不干"当成正常
+        RCLCPP_FATAL(rclcpp::get_logger("road_preview_node"),
+                     "节点启动失败: %s", ex.what());
+        rclcpp::shutdown();
+        return 1;
+    }
     rclcpp::shutdown();
     return 0;
 }

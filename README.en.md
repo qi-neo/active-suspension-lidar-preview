@@ -24,7 +24,7 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
 > executes four offline self-test groups (v3 control: 428 checks, driver parsing: 69
-> checks, v2 pure functions: 69 checks, level calibration: 69 checks — 635 in total). **Tags before v3.1.0 do
+> checks, v2 pure functions: 196 checks, level calibration: 69 checks — 762 in total). **Tags before v3.1.0 do
 > not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`

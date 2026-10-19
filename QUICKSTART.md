@@ -46,15 +46,21 @@ g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/trend_selftest.cpp \
   src/suspension_preview_v2/src/road_trend.cpp -o /tmp/trend && /tmp/trend
 
-# 障碍物检测（12 项）
+# 障碍物检测（32 项）
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/obstacle_selftest.cpp \
   src/suspension_preview_v2/src/obstacle_detect.cpp -o /tmp/obst && /tmp/obst
 
-# 串口协议编解码（28 项）
+# 串口协议编解码（82 项）
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/protocol_selftest.cpp \
   src/suspension_preview_v2/src/protocol.cpp -o /tmp/proto && /tmp/proto
+
+# 启动参数校验（21 组致命判据，53 项）
+g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
+  src/suspension_preview_v2/examples/param_selftest.cpp \
+  src/suspension_preview_v2/src/param_check.cpp \
+  src/suspension_preview_v2/src/serial_port.cpp -o /tmp/param && /tmp/param
 
 # 虚拟水平面（重力向量定姿，69 项）
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
@@ -62,7 +68,7 @@ g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/src/level_calibration.cpp -o /tmp/level && /tmp/level
 ```
 
-# 这四条合计 138 项，加上 v3 的 428 项共 **548 项**
+# 这五条合计 265 项，加上 v3 的 428 项共 **693 项**
 
 ### 想跑内存与未定义行为检查
 
