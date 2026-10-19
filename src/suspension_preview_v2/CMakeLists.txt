@@ -21,6 +21,10 @@ find_package(rosidl_default_generators REQUIRED)
 
 # 显式依赖 PCL，不靠 pcl_ros 的传递依赖
 find_package(PCL REQUIRED COMPONENTS common filters)
+# PCL 头文件本身 include Eigen（pcl/point_cloud.h -> Eigen/StdVector），
+# 而 Eigen 的 include 路径是随 PCL 的导入目标传的。静态库不链 PCL 目标之后，
+# 必须自己把 Eigen 头路径加进来，否则编译 PCL 头直接 fatal error。
+find_package(Eigen3 REQUIRED)
 
 # 自定义消息
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -55,6 +59,12 @@ target_include_directories(suspension_core PUBLIC
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
+if(DEFINED EIGEN3_INCLUDE_DIR)
+  target_include_directories(suspension_core PUBLIC ${EIGEN3_INCLUDE_DIR})
+elseif(TARGET Eigen3::Eigen)
+  target_include_directories(suspension_core PUBLIC
+    $<TARGET_PROPERTY:Eigen3::Eigen,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 # 注意：静态库不需要在这里链接 PCL。
 # 链接 PCL 只是为了让最终可执行文件带上库；而写在这里会被记进
 # INTERFACE_LINK_LIBRARIES，并随 install(EXPORT) 传给下游——下游（v3）不
