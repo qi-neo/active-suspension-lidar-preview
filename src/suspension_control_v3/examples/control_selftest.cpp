@@ -32,6 +32,9 @@
 //  23. 预瞄前馈 FIR：关闭时行为不变 / 直流增益守恒 / 凸起被权重分摊而非全跟 /
 //      零权重拍归一化 / 远端缺格回退到最近有效格 / preview_start_m 决定窗口位置 /
 //      权重为空退回单点
+//  33. 姿态断流必须降级 / 34. 超物理上限的姿态必须急停 / 35. 急停失败重试
+//  36. 姿态阈值分层 / 37. 参数校验补充（增益、频率、跳变阈值、找平超时）
+//  38. 下发失败重试 / 39. 找平就绪判据 / 40. 限幅与速率限制上报
 
 #include <algorithm>
 #include <cmath>
@@ -3376,6 +3379,149 @@ void test_param_check_attitude_ordering() {
     check(default_ok, "出厂默认参数不应有致命项");
 }
 
+
+// ---------------------------------------------------------------- 场景 37
+// 参数校验补齐：反馈增益符号、滤波系数、控制频率、跳变阈值与量程的关系
+void test_param_check_gaps() {
+    section("37. 参数校验：增益 / 频率 / 跳变阈值");
+    auto run = [](const ControlParams& c, const ControlLoopParams& l,
+                  const ValidatorParams& v, const StateMachineParams& s) {
+        return suspension_control_v3::validate_params(c, l, v, s);
+    };
+    auto fatal_has = [](const std::vector<suspension_control_v3::ParamIssue>& issues,
+                        const char* key) {
+        for (const auto& i : issues) {
+            if (i.fatal && i.key == key) return true;
+        }
+        return false;
+    };
+
+    {   // 反馈增益为 0：等于静默放弃闭环；为负：正反馈
+        ControlParams c;
+        c.kp_roll = 0.0;
+        check(fatal_has(run(c, {}, {}, {}), "kp_roll"), "kp_roll=0 应报致命错误");
+    }
+    {
+        ControlParams c;
+        c.kd_pitch = -1.0;
+        check(fatal_has(run(c, {}, {}, {}), "kd_pitch"), "kd_pitch 为负应报致命错误");
+    }
+    {   // 滤波系数落在 (0,1] 之外会让滤波发散或永久冻结
+        ControlParams c;
+        c.attitude_gyro_alpha = 0.0;
+        check(fatal_has(run(c, {}, {}, {}), "attitude_gyro_alpha"),
+              "滤波系数为 0 应报致命错误");
+    }
+    {   // 控制频率过低：按拍计时的安全判据粒度不可用
+        ControlParams c;
+        c.control_period_s = 0.05;  // 20 Hz
+        check(fatal_has(run(c, {}, {}, {}), "control_rate_hz"),
+              "控制频率过低应报致命错误");
+    }
+    {   // 跳变阈值大于物理量程：这条检查永远不会触发
+        ValidatorParams v;
+        v.check_jump = true;
+        v.max_jump_m = 5.0;
+        v.height_abs_limit_m = 0.6;
+        check(fatal_has(run({}, {}, v, {}), "max_jump_m"),
+              "跳变阈值大于量程应报致命错误");
+    }
+    {   // 找平超时必须大于找平时长
+        StateMachineParams sm;
+        sm.leveling_duration_s = 1.0;
+        sm.leveling_max_wait_s = 0.5;
+        check(fatal_has(run({}, {}, {}, sm), "leveling_max_wait_s"),
+              "找平超时小于找平时长应报致命错误");
+    }
+}
+
+// ---------------------------------------------------------------- 场景 38
+// 下行链路：写失败不能算"已下发"，下一拍要重试
+void test_command_retry_on_send_failure() {
+    section("38. 下发失败要重试");
+    LoopFixture fx(/*attach_driver=*/true);
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    fx.driver->send_fail_ = true;
+    const int sent_before = static_cast<int>(fx.loop.status().commands_sent);
+    const int err_before = static_cast<int>(fx.loop.status().driver_errors);
+    fx.advance(0.2, 0.0, 0.2, 0.0);  // 指令随横滚反馈变化，每一拍都尝试下发
+    check(static_cast<int>(fx.loop.status().commands_sent) == sent_before,
+          "写失败不应计为已下发");
+    check(static_cast<int>(fx.loop.status().driver_errors) > err_before,
+          "写失败应计入 driver_errors");
+
+    const int cmds_while_failing = fx.driver->cmd_calls_;
+    fx.driver->send_fail_ = false;
+    fx.advance(0.2);
+    check(static_cast<int>(fx.loop.status().commands_sent) > sent_before,
+          "链路恢复后应重发并成功");
+    check(fx.driver->cmd_calls_ > cmds_while_failing, "恢复后应继续尝试下发");
+    std::printf("  失败期 cmds=%d，恢复后 commands_sent=%zu\n", cmds_while_failing,
+                static_cast<std::size_t>(fx.loop.status().commands_sent));
+}
+
+// ---------------------------------------------------------------- 场景 39
+// 找平就绪判据：只看时间会在车身还歪着时就进闭环
+void test_leveling_readiness() {
+    section("39. 找平就绪判据");
+    StateMachineParams p;
+    SafetyInputs in;
+    in.profile_valid = true;
+    in.profile_fresh = true;
+    in.profile_quality = 100;
+    in.min_quality = 40;
+    in.attitude_valid = true;
+    in.actuator_connected = true;
+    in.roll_rate = 0.0;
+    in.pitch_rate = 0.0;
+
+    {   // 姿态已回到零位：正常进入 BALANCING
+        SafetyStateMachine sm(p);
+        for (int i = 0; i < 400; ++i) sm.tick(in, 0.005);  // 2 s
+        check(sm.state() == ControlState::kBalancing, "姿态回中时应进入 BALANCING");
+    }
+    {   // 姿态未回中：到点也不能进闭环，超过最长等待转降级
+        SafetyStateMachine sm(p);
+        for (int i = 0; i < 60; ++i) sm.tick(in, 0.005);  // 标定 0.3 s -> LEVELING
+        check(sm.state() == ControlState::kLeveling, "标定完成后应进入 LEVELING");
+        in.roll_err_rad = 0.10;  // 约 5.7°，远大于 0.05 阈值
+        for (int i = 0; i < 150; ++i) sm.tick(in, 0.005);  // 0.75 s，未到就绪
+        check(sm.state() == ControlState::kLeveling,
+              "姿态未回中时不应只按时间进 BALANCING");
+        for (int i = 0; i < 300; ++i) sm.tick(in, 0.005);  // 累计超过最长等待
+        check(sm.state() == ControlState::kDegraded, "找平超时应转 DEGRADED");
+    }
+}
+
+// ---------------------------------------------------------------- 场景 40
+// 限幅与速率限制要能从状态里看出来
+void test_saturation_reported_in_status() {
+    section("40. 限幅与速率限制上报");
+    {   // 行程只有 5 mm 而反馈要求 50 mm：必然撞限幅
+        ControlParams c;
+        c.height_limit_mm = 5.0;
+        c.rate_limit_mm_per_s = 1.0e6;
+        LoopFixture fx(/*attach_driver=*/false, /*require_driver=*/false, &c);
+        fx.advance(3.0);
+        fx.advance(0.3, 0.0, 0.2, 0.0);  // 0.2 rad * kp(250) = 50 mm
+        check(fx.loop.status().controller_saturated, "撞行程限幅时应上报 saturated");
+        check(!fx.loop.status().controller_rate_limited,
+              "速率限制放宽时不应上报 rate_limited");
+    }
+    {   // 速率限制很紧：输出每拍只能挪一点点
+        ControlParams c;
+        c.height_limit_mm = 40.0;
+        c.rate_limit_mm_per_s = 1.0;
+        LoopFixture fx(/*attach_driver=*/false, /*require_driver=*/false, &c);
+        fx.advance(3.0);
+        fx.advance(0.2, 0.0, 0.1, 0.0);
+        check(fx.loop.status().controller_rate_limited,
+              "速率限制很紧时应上报 rate_limited");
+    }
+}
+
 int main() {
     std::printf("suspension_control_v3 离线自检\n");
     std::printf("（控制环 200 Hz，剖面 10 Hz，无 ROS / 无硬件）\n");
@@ -3416,6 +3562,10 @@ int main() {
     test_attitude_implausible_trips_estop();
     test_estop_retry_until_delivered();
     test_param_check_attitude_ordering();
+    test_param_check_gaps();
+    test_command_retry_on_send_failure();
+    test_leveling_readiness();
+    test_saturation_reported_in_status();
 
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d -> %s\n", g_checks, g_failed,

@@ -64,9 +64,11 @@ void SafetyStateMachine::enter(ControlState next) {
     output_.state = next;
     time_in_state_ = 0.0;
     // 离开异常状态时清掉对应的过程量
-    if (next != ControlState::kDegraded) {
-        healthy_elapsed_ = 0.0;
-    }
+    // healthy_elapsed_ 是"降级后持续健康了多久"，必须从进入降级那一刻重新计。
+    // 原先只在离开降级时清零，进入前累积的健康时长会直接满足 recover_duration_s，
+    // 于是降级下一拍就弹回 Leveling，恢复去抖形同虚设（在 Leveling 超时场景
+    // 会来回横跳）。这里无条件清零：其余状态不用这个量
+    healthy_elapsed_ = 0.0;
     if (next != ControlState::kCalibrating) {
         calibrate_count_ = 0;
     }
@@ -218,13 +220,24 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
             break;
         }
 
-        case ControlState::kLeveling:
+        case ControlState::kLeveling: {
+            // 就绪 = 输入健康 + 姿态已回到零位基准附近。
+            // 只看时间会在作动器还没走完时就进闭环：闭环第一拍会把"还没到位"
+            // 当成姿态误差去修，等于自己跟自己打架
+            const bool leveled =
+                std::fabs(in.roll_err_rad) <= params_.leveling_max_tilt_rad &&
+                std::fabs(in.pitch_err_rad) <= params_.leveling_max_tilt_rad;
             if (degrade_triggered || stall_degrade) {
                 out.state = ControlState::kDegraded;
-            } else if (input_healthy && time_in_state_ >= params_.leveling_duration_s) {
+            } else if (input_healthy && leveled &&
+                       time_in_state_ >= params_.leveling_duration_s) {
                 out.state = ControlState::kBalancing;
+            } else if (time_in_state_ >= params_.leveling_max_wait_s) {
+                // 迟迟回不了中：可能是作动器卡住/机型不对，转降级让上层处理
+                out.state = ControlState::kDegraded;
             }
             break;
+        }
 
         case ControlState::kBalancing:
             if (degrade_triggered || stall_degrade) out.state = ControlState::kDegraded;

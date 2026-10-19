@@ -205,23 +205,33 @@ void SuspensionControlLoop::apply_command(
             static_cast<int>(std::lround(height_mm[static_cast<std::size_t>(i)]));
     }
 
-    status_.commanded_mm = next;
+    status_.commanded_mm = next;  // 期望值（诊断用，不代表已经送达）
 
     // 命令没变就不重复下发。控制环 200 Hz 时，零位或降级保持值会被连发几百次，
     // 白白占用总线带宽，也淹没有效帧。
     // force 用于状态跃迁：进入回中/急停时哪怕数值相同也必须发一次，
-    // 否则初始 last_command_ 就是全零，回中指令会被去重吞掉，作动器永远收不到
+    // 否则初始 last_command_ 就是全零，回中指令会被去重吞掉，作动器永远收不到。
+    //
+    // 去重比较的基准必须是"已经成功送达的值"，而不是"上一次想发的值"：
+    // 先更新后发送的话，串口写失败一次就会被下一拍的"没变化"判据吞掉，
+    // 作动器永远收不到这条指令，除了 driver_errors 看不出任何异常。
     if (!force && next == last_command_) return;
-    last_command_ = next;
 
-    if (!params_.enable_driver || !driver_) return;
+    if (!params_.enable_driver || !driver_) {
+        // 纯软件/未接驱动器：没有"送达"概念，直接记账
+        last_command_ = next;
+        return;
+    }
+
     std::array<int, suspension_preview_v2::kSuspensionWheelCount> cmd{};
     for (int i = 0; i < kWheelCount; ++i) {
-        cmd[static_cast<std::size_t>(i)] = last_command_[static_cast<std::size_t>(i)];
+        cmd[static_cast<std::size_t>(i)] = next[static_cast<std::size_t>(i)];
     }
     if (driver_->set_target_height(cmd)) {
+        last_command_ = next;  // 只有真的写成功才认为已下发
         ++status_.commands_sent;
     } else {
+        // 不更新 last_command_：下一拍还会重试同一条指令
         ++status_.driver_errors;
     }
 }
@@ -308,6 +318,10 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     in.pitch_rate = attitude_.pitch_rate;
     // 姿态数据"物理上不可能"：这不是坏帧，是传感器/安装失效，状态机直接急停
     in.attitude_implausible = attitude_implausible_;
+    // 找平就绪判据用"相对零位标定基准"的误差：车停在斜坡上时，原始姿态不是 0，
+    // 但相对标定零位是 0——用原始姿态判就绪会永远等不到
+    in.roll_err_rad = attitude_.roll_rad - status_.calibrated_roll_rad;
+    in.pitch_err_rad = attitude_.pitch_rad - status_.calibrated_pitch_rad;
     // require_driver 为真时，"声明要驱动却没驱动"按链路丢失上报并最终急停；
     // 纯软件联调模式（require_driver=false）不参与该判定
     const bool driver_ready =
@@ -389,6 +403,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
                 static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
         }
         status_.output = held_out;
+        status_.controller_saturated = false;
+        status_.controller_rate_limited = false;
 
         // 控制器内部的速率限制基准仍停留在降级前的值，与实际下发值脱节。
         // 不同步的话，恢复闭环后的第一拍会从旧值起步，产生超过速率限制的跳变
@@ -404,6 +420,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     if (sm.output_zero) {
         ControlOutput zero;
         status_.output = zero;
+        status_.controller_saturated = false;
+        status_.controller_rate_limited = false;
         const std::array<double, kWheelCount> zeros{0.0, 0.0, 0.0, 0.0};
         // 有反馈时以实际位置为速率限制基准：回中指令发出后作动器还在往回走，
         // 基准应该是它此刻真正在的地方，而不是"已经到零位"这个假设
@@ -427,6 +445,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
             held[static_cast<std::size_t>(i)] = v;
         }
         status_.output = held_out;
+        status_.controller_saturated = false;
+        status_.controller_rate_limited = false;
         controller_->sync_reference(reference_for_sync(held));
         return status_;
     }
@@ -473,6 +493,10 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     }
 
     status_.output = controller_->compute(ci, step_dt);
+    // 限幅/速率限制是"输出已经不等于控制律算出来的值"的信号。
+    // 之前只在控制器内部置位、没有上报，联调时看不出作动器为什么跟不上
+    status_.controller_saturated = status_.output.saturated;
+    status_.controller_rate_limited = status_.output.rate_limited;
     // 取样位置由控制器算出（单一出处：与真正用来采样的公式同一个），
     // 这里只做搬运，避免"上报的值"和"实际用的值"漂移
     status_.sample_position_m = status_.output.sample_position_m;

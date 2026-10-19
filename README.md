@@ -22,11 +22,11 @@
 > - 自研宇树 L1 的 UDP 报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑四组离线自检（v3 控制 410 项、驱动解析 69 项、
-> v2 纯函数 69 项、虚拟水平面 69 项，共 617 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，再 `colcon test` 跑注册进 CTest 的自检，并跑四组离线自检（v3 控制 428 项、驱动解析 69 项、
+> v2 纯函数 69 项、虚拟水平面 69 项，共 635 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
-> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（410 项检查）。
+> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（428 项检查）。
 
 ## 目录
 
@@ -160,7 +160,7 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ros2 run unilidar_driver decoder_selftest    # 报文解析，69 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
 ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，410 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，428 项检查
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
@@ -286,6 +286,8 @@ flowchart LR
 
 - **零位标定**：静止时测姿态基准，车停在斜坡上也能正确判断"什么是水平"
 - **降级有时限**：数据断流超过 5 s 转急停回中，不让作动器一直停在旧行程上
+- **找平就绪判据**：不只按时间，还要求姿态已回到零位基准附近（默认 2.9°），
+  否则作动器还没走完就进闭环，第一拍会把"没到位"当成姿态误差去修
 - **急停锁存**：需先解除急停再复位，对应实物"急停按钮已复位"
 - **单周期时长封顶**：定时抖动不会把累计时长判据一次性推过阈值造成误动作
 - **硬件急停**：进入急停时同时调用驱动器的 `emergency_stop()`，而不只是下发零位指令
@@ -311,9 +313,10 @@ flowchart LR
 
 生效的车速、取样距离、帧龄每拍写进 `ControlStatus`
 （`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
-联调时能直接看到"前馈到底按多远取了样"。
+联调时能直接看到"前馈到底按多远取了样"；`saturated` / `rate_limited` 两个布尔量
+则回答"作动器为什么跟不上"——是撞了行程限幅，还是被速率限制卡住。
 
-离线自检 410 项，不需要 ROS 与硬件：
+离线自检 428 项，不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest

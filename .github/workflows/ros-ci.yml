@@ -77,7 +77,13 @@ jobs:
                              suspension_control_v3 unilidar_driver car_balancer \
             --cmake-args -Wall -Wextra -Wpedantic \
             --event-handlers console_cohesion+
-          colcon test-result --verbose || true
+          # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
+          # test-result 只是把"没有测试结果"打印出来而已。现在 v3 注册了 CTest，
+          # 这里真的跑一遍并且不容忍失败
+          colcon test --packages-select suspension_control_v3 \
+            --event-handlers console_direct+ \
+            --return-code-on-test-failure
+          colcon test-result --verbose
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的

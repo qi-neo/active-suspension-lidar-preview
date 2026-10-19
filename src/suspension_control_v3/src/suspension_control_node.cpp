@@ -15,6 +15,7 @@
 #include <suspension_preview_v2/msg/road_obstacles.hpp>
 #include <suspension_preview_v2/msg/road_profile.hpp>
 #include <suspension_preview_v2/suspension_driver.hpp>
+#include <suspension_preview_v2/serial_port.hpp>
 #include <suspension_control_v3/msg/control_status.hpp>
 
 #include <algorithm>
@@ -306,6 +307,11 @@ private:
                                                            sm_.calibrate_max_rate);
         sm_.leveling_duration_s = declare_parameter<double>("leveling_duration_s",
                                                             sm_.leveling_duration_s);
+        sm_.leveling_max_tilt_rad = declare_parameter<double>(
+            "leveling_max_tilt_deg", sm_.leveling_max_tilt_rad * kRadToDeg) /
+            kRadToDeg;
+        sm_.leveling_max_wait_s =
+            declare_parameter<double>("leveling_max_wait_s", sm_.leveling_max_wait_s);
         sm_.degrade_after_unhealthy_s = declare_parameter<double>(
             "degrade_after_unhealthy_s", sm_.degrade_after_unhealthy_s);
         sm_.recover_duration_s = declare_parameter<double>("recover_duration_s",
@@ -537,6 +543,8 @@ private:
         out.feedforward_fallback = st.output.feedforward_fallback;
         out.feedforward_fir = st.output.feedforward_fir;
         out.lqi_windup_clamped = st.output.lqi_windup_clamped;
+        out.saturated = st.controller_saturated;
+        out.rate_limited = st.controller_rate_limited;
         out.profile_age_ms = static_cast<float>(st.profile_age_ms);
         out.sample_position_m = static_cast<float>(st.sample_position_m);
         out.fused_frames = static_cast<uint32_t>(st.fused_frames);

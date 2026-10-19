@@ -30,6 +30,8 @@ bool    feedforward_fir   # 本拍前馈走的是 FIR（true）还是单点比�
 bool    lqi_windup_clamped # 修正量被"剩余行程权威"钳住：前馈已吃掉大部分行程，
                            # 姿态修正只能在小范围工作。台架上频繁置位就该减小
                            # feedforward_gain 或增大行程，而不是继续加积分增益
+bool    saturated            # 本拍输出触发过行程限幅（|cmd| 撞到 height_limit_mm）
+bool    rate_limited         # 本拍输出触发过速率限制（作动器跟不上指令变化）
 
 uint32 fused_frames          # 本拍参与融合的帧数（1 = 未融合）
 uint32 low_confidence_cells  # 跨帧离散度过大被判无效的格数（左右合计）

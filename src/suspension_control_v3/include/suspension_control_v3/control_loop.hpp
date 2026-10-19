@@ -83,6 +83,11 @@ struct ControlLoopStatus {
     bool hold_output{false};
     bool output_zero{true};
 
+    // 本拍输出是否触发过行程限幅 / 速率限制。控制器内部本来就有这两个标志，
+    // 但一直没往状态里传：联调时只能看到"作动器跟不上"，看不到原因
+    bool controller_saturated{false};
+    bool controller_rate_limited{false};
+
     ControlOutput output;
     std::array<int, kWheelCount> commanded_mm{0, 0, 0, 0};  // 实际下发的值
 
