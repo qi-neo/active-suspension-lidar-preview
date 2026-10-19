@@ -23,8 +23,8 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes four offline self-test groups (v3 control: 428 checks, driver parsing: 69
-> checks, v2 pure functions: 196 checks, level calibration: 69 checks — 762 in total). **Tags before v3.1.0 do
+> executes four offline self-test groups (v3 control: 428 checks, driver parsing: 91
+> checks, v2 pure functions: 196 checks, level calibration: 69 checks — 784 in total). **Tags before v3.1.0 do
 > not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
