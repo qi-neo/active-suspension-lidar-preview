@@ -56,8 +56,9 @@ jobs:
 
       - name: 安装构建与依赖工具
         run: |
-          set -e
-          exec > >(tee /tmp/apt.log) 2>&1
+          set -eo pipefail
+          {
+          echo "== apt-get update =="
           apt-get update
           apt-get install -y --no-install-recommends \
             python3-colcon-common-extensions \
@@ -65,15 +66,17 @@ jobs:
             python3-pip
           rosdep init || true
           rosdep update
+          } 2>&1 | tee /tmp/apt.log
 
       - name: rosdep 安装依赖
         run: |
-          set -e
-          exec > >(tee /tmp/rosdep.log) 2>&1
+          set -eo pipefail
+          {
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           rosdep install --from-paths src --ignore-src -r -y --skip-keys libpcl-all-dev
           # libpcl-all-dev 在部分平台没有对应 rosdep 条目，单独装
           apt-get install -y --no-install-recommends libpcl-dev || true
+          } 2>&1 | tee /tmp/rosdep.log
 
       - name: colcon build
         run: |
