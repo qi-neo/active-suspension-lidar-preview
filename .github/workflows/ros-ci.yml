@@ -78,16 +78,16 @@ jobs:
             --cmake-args -Wall -Wextra -Wpedantic \
             --event-handlers console_cohesion+
           # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
-          # test-result 只是把"没有测试结果"打印出来而已。现在 v3 注册了 CTest，
-          # 这里真的跑一遍并且不容忍失败
-          colcon test --packages-select suspension_control_v3 \
+          # test-result 只是把"没有测试结果"打印出来而已。现在 v3 与 v2 都注册了
+          # CTest，这里真的跑一遍并且不容忍失败
+          colcon test --packages-select suspension_control_v3 suspension_preview_v2 \
             --event-handlers console_direct+ \
             --return-code-on-test-failure
           colcon test-result --verbose
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（410 项）
+      - name: v3 控制与安全逻辑自检（428 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
@@ -103,12 +103,12 @@ jobs:
 
       # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
       # install(TARGETS) 里装了可执行，却没有任何步骤调用它
-      - name: v2 纯函数自检（69 项）
+      - name: v2 纯函数自检（196 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
-          for t in trend_selftest obstacle_selftest protocol_selftest; do
+          for t in trend_selftest obstacle_selftest protocol_selftest param_selftest; do
             echo "--- $t ---"
             ros2 run suspension_preview_v2 "$t"
           done
@@ -198,6 +198,19 @@ jobs:
             "/tmp/asan_${name}"
           done
 
+      # param_selftest 依赖两个源文件（参数校验 + 串口能力查询），单独编
+      - name: v2 参数校验自检（ASan + UBSan）
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -I src/suspension_preview_v2/include \
+            src/suspension_preview_v2/examples/param_selftest.cpp \
+            src/suspension_preview_v2/src/param_check.cpp \
+            src/suspension_preview_v2/src/serial_port.cpp \
+            -o /tmp/asan_param_selftest
+          /tmp/asan_param_selftest
+
   # 覆盖率。单独 job：插桩要改编译 flag，且 -O0 + --coverage 与 sanitizer 不共存。
   #
   # 目的是**用数据找没被测到的代码**，而不是刷高数字。本地实测当前水位：
@@ -260,6 +273,12 @@ jobs:
               "src/suspension_preview_v2/src/${src}" -o "build-cov/${name}"
             "./build-cov/${name}" > /dev/null
           done
+          # 参数校验器也要跑，否则它在预览包的分母里贡献 0 覆盖，拖低门禁
+          g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
+            src/suspension_preview_v2/examples/param_selftest.cpp \
+            src/suspension_preview_v2/src/param_check.cpp \
+            src/suspension_preview_v2/src/serial_port.cpp -o build-cov/param_selftest
+          ./build-cov/param_selftest > /dev/null
 
       - name: 汇总覆盖率
         run: |
