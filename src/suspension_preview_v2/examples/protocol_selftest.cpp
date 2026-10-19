@@ -2,12 +2,15 @@
 //   g++ -std=c++17 -I include examples/protocol_selftest.cpp src/protocol.cpp -o /tmp/proto
 //
 // 覆盖：CRC 标准向量与检错能力、帧布局与字节序、编解码往返、坏帧拒收
-// （CRC 错 / 截断 / 无帧头）、encode_lane 的毫米换算与无效点标记、越界钳位。
+// （CRC 错 / 截断 / 无帧头）、encode_lane 的毫米换算与无效点标记、越界钳位；
+// 以及字节流解析的半包 / 截断 / 粘包两帧 / 伪帧头重同步 / 超长 count / CRC 错
+// 各自的明确状态码与 consumed 语义。
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -66,6 +69,8 @@ void test_frame_layout() {
 
     // 布局：AA 55 | id | seq | count(LE u16) | payload(LE i16)×n | crc(LE u16)
     check(f.size() == 6 + payload.size() * 2 + 2, "帧长应为 6+2n+2");
+    check(f.size() == protocol::frame_size_bytes(payload.size()),
+          "frame_size_bytes() 应与实际帧长一致");
     check(f[0] == protocol::kHead0 && f[1] == protocol::kHead1, "帧头应为 AA 55");
     check(f[2] == 0x01, "id 字段应为 0x01");
     check(f[3] == 0x07, "seq 字段应为 7");
@@ -119,7 +124,7 @@ void test_bad_frames() {
     consumed = 12345;   // 先污染，验证失败时会被置 0
     check(!protocol::decode_frame(garbage.data(), garbage.size(), out, consumed),
           "无帧头的垃圾数据应拒收");
-    check(consumed == 0, "拒收时 consumed 应被置 0（调用方据此跳字节）");
+    check(consumed == 0, "拒收时 consumed 应被置 0（旧接口语义）");
     std::printf("  坏帧：CRC 错/截断/无帧头 均拒收，consumed 归零\n");
 }
 
@@ -173,12 +178,259 @@ void test_encode_lane_clamp() {
 // ---------------- concat ----------------
 
 void test_concat() {
-    std::vector<uint8_t> a{1, 2, 3};
-    std::vector<uint8_t> b{4, 5};
     const std::vector<uint8_t> c =
         protocol::concat(std::vector<uint8_t>{1, 2, 3}, std::vector<uint8_t>{4, 5});
     check(c.size() == 5 && c[0] == 1 && c[4] == 5, "concat 应顺序拼接两段");
     std::printf("  concat: 3+2 -> %zu 字节\n", c.size());
+}
+
+// ---------------- 字节流解析：状态码 / 半包 / 粘包 / 重同步 ----------------
+
+void test_decode_status_names() {
+    using protocol::DecodeStatus;
+    check(std::string(protocol::decode_status_name(DecodeStatus::kOk)) == "Ok",
+          "kOk 的状态名应为 Ok");
+    check(std::string(protocol::decode_status_name(DecodeStatus::kNeedMore)) ==
+              "NeedMore",
+          "kNeedMore 的状态名应为 NeedMore");
+    check(std::string(protocol::decode_status_name(DecodeStatus::kBadLength)) ==
+              "BadLength",
+          "kBadLength 的状态名应为 BadLength");
+    check(std::string(protocol::decode_status_name(DecodeStatus::kBadCrc)) ==
+              "BadCrc",
+          "kBadCrc 的状态名应为 BadCrc");
+}
+
+void test_decode_need_more_on_half_packet() {
+    const std::vector<int16_t> payload = {11, -22, 33};
+    const std::vector<uint8_t> f = protocol::encode_frame(0x01, 5, payload);
+
+    // 0 字节 / 只有半个帧头 / 帧头完整但负载没齐 / 只缺最后一字节 CRC：
+    // 全都要报 kNeedMore，而不是"坏帧"——否则接收端会把正常的半包丢掉
+    const std::size_t cuts[] = {0, 1, 5, f.size() - 1};
+    for (const std::size_t cut : cuts) {
+        const protocol::DecodeResult r =
+            protocol::decode_stream(f.data(), cut);
+        check(r.status == protocol::DecodeStatus::kNeedMore,
+              "数据不足（半包）时应返回 kNeedMore");
+        check(r.consumed == 0, "帧头就在开头时半包不应要求丢弃任何字节");
+    }
+
+    // 补齐后必须能解出，且 payload/字段完好
+    const protocol::DecodeResult r = protocol::decode_stream(f.data(), f.size());
+    check(r.status == protocol::DecodeStatus::kOk, "半包补齐后应解出完整帧");
+    check(r.frame.payload == payload && r.frame.seq == 5,
+          "补齐后的帧内容应与原帧一致");
+    std::printf("  半包：cuts=0/1/5/%zu 全部 NeedMore(consumed=0)，补齐后 Ok\n",
+                f.size() - 1);
+}
+
+void test_decode_sticky_packets() {
+    // 粘包：一次 write 里两帧。解析器必须只消费第一帧，consumed 指向第二帧起点
+    const std::vector<int16_t> p1 = {10, 20};
+    const std::vector<int16_t> p2 = {-1, -2, -3};
+    const std::vector<uint8_t> a = protocol::encode_frame(0x01, 1, p1);
+    const std::vector<uint8_t> b = protocol::encode_frame(0x02, 2, p2);
+    std::vector<uint8_t> buf = a;
+    buf.insert(buf.end(), b.begin(), b.end());
+
+    const protocol::DecodeResult r1 = protocol::decode_stream(buf.data(), buf.size());
+    check(r1.status == protocol::DecodeStatus::kOk, "粘包第一帧应解出");
+    check(r1.consumed == a.size(), "粘包时 consumed 应只覆盖第一帧");
+    check(r1.frame.id == 0x01 && r1.frame.payload == p1,
+          "粘包第一帧内容应正确");
+
+    const protocol::DecodeResult r2 = protocol::decode_stream(
+        buf.data() + r1.consumed, buf.size() - r1.consumed);
+    check(r2.status == protocol::DecodeStatus::kOk, "粘包第二帧应解出");
+    check(r2.consumed == b.size(), "第二帧 consumed 应等于第二帧长度");
+    check(r2.frame.id == 0x02 && r2.frame.payload == p2,
+          "粘包第二帧内容应正确");
+    check(r1.consumed + r2.consumed == buf.size(), "两帧 consumed 之和应等于总长度");
+    std::printf("  粘包：两帧 consumed=%zu+%zu=%zu\n", r1.consumed, r2.consumed,
+                buf.size());
+}
+
+void test_decode_fake_header_overlong_count() {
+    // 伪帧头 + 被改坏的长度字段（0xFFFF = 65535 > kMaxPayloadPoints）。
+    // 旧实现会算出 total=131078 字节，永远 >= len，于是一直返回 false 且
+    // consumed=0 —— 接收端以为"还差一点"，把这个半包等到天荒地老。
+    // 要求：跳过 1 字节继续逐字节找，真帧就在后面
+    std::vector<uint8_t> junk = {0xAA, 0x55, 0x01, 0x02, 0xFF, 0xFF};
+    const std::vector<uint8_t> f = protocol::encode_frame(0x02, 9, {7, 8});
+    junk.insert(junk.end(), f.begin(), f.end());
+
+    const protocol::DecodeResult r =
+        protocol::decode_stream(junk.data(), junk.size());
+    check(r.status == protocol::DecodeStatus::kOk,
+          "超长 count 的伪帧头应被跳过，解出后面的真帧");
+    check(r.consumed == 6 + f.size(),
+          "consumed 应包含伪帧头 6 字节 + 真帧长度");
+    check(r.frame.id == 0x02 && r.frame.payload == (std::vector<int16_t>{7, 8}),
+          "重同步后解出的应是真帧内容");
+
+    // 只有伪帧头、后面没有真帧：必须明确报 kBadLength，而不是永远 kNeedMore
+    const protocol::DecodeResult only = protocol::decode_stream(junk.data(), 6);
+    check(only.status == protocol::DecodeStatus::kBadLength,
+          "只剩超长 count 伪帧头时应返回 kBadLength");
+    check(only.consumed == 6, "kBadLength 应把已扫描的垃圾全部 consumed 掉");
+    std::printf("  伪帧头：超长 count 跳过 -> 真帧 Ok（consumed=%zu）；孤立伪帧头 -> "
+                "BadLength\n",
+                r.consumed);
+}
+
+void test_decode_leading_garbage() {
+    // 帧头前是普通垃圾字节：逐字节找 AA 55，跳过垃圾
+    std::vector<uint8_t> buf = {0x00, 0x13, 0x37};
+    const std::vector<uint8_t> f = protocol::encode_frame(0x01, 2, {3, 4});
+    buf.insert(buf.end(), f.begin(), f.end());
+    const protocol::DecodeResult r = protocol::decode_stream(buf.data(), buf.size());
+    check(r.status == protocol::DecodeStatus::kOk, "帧头前的垃圾应被跳过");
+    check(r.consumed == 3 + f.size(), "consumed 应包含被跳过的垃圾字节");
+    check(r.frame.id == 0x01 && r.frame.payload == (std::vector<int16_t>{3, 4}),
+          "跳过垃圾后帧内容应正确");
+    std::printf("  前缀垃圾 3 字节：跳过并解出，consumed=%zu\n", r.consumed);
+}
+
+void test_decode_truncated_frame_waits() {
+    // 截断帧：长度字段说还有，但字节不够 -> 保留等待（不是坏帧）
+    const std::vector<uint8_t> f = protocol::encode_frame(0x01, 1, {1, 2, 3});
+    const protocol::DecodeResult r =
+        protocol::decode_stream(f.data(), f.size() - 2);   // 缺两个 CRC 字节
+    check(r.status == protocol::DecodeStatus::kNeedMore,
+          "截断帧应返回 kNeedMore，不能当坏帧丢掉半个正常数据");
+    check(r.consumed == 0, "截断帧的帧头就在开头，不应要求丢弃");
+
+    // 只有半个帧头（0xAA 结尾）：保留 0xAA，只丢它前面的垃圾
+    const std::vector<uint8_t> half = {0x00, 0xAA};
+    const protocol::DecodeResult r2 = protocol::decode_stream(half.data(), half.size());
+    check(r2.status == protocol::DecodeStatus::kNeedMore,
+          "只有半个帧头时应等待更多字节");
+    check(r2.consumed == 1, "半个帧头前的垃圾应丢弃，0xAA 必须保留");
+    std::printf("  截断：缺 CRC -> NeedMore(consumed=0)；半个帧头 -> 保留 0xAA\n");
+}
+
+void test_decode_bad_crc_reports_status() {
+    const std::vector<int16_t> good_payload = {1, 2};
+    std::vector<uint8_t> bad = protocol::encode_frame(0x01, 1, {10, 20});
+    bad[6] ^= 0xFF;   // 改负载，CRC 字段不动
+    const std::vector<uint8_t> good = protocol::encode_frame(0x02, 3, good_payload);
+    std::vector<uint8_t> buf = bad;
+    buf.insert(buf.end(), good.begin(), good.end());
+
+    const protocol::DecodeResult r1 = protocol::decode_stream(buf.data(), buf.size());
+    check(r1.status == protocol::DecodeStatus::kBadCrc,
+          "CRC 错应返回独立的 kBadCrc，而不是与半包同状态");
+    check(r1.consumed == 1, "kBadCrc 至少丢帧头首字节，下一步才能重同步");
+
+    // 坏帧后面紧跟真帧：丢掉 1 字节后重扫，必须能解出真帧不被坏帧堵住
+    const protocol::DecodeResult r2 = protocol::decode_stream(
+        buf.data() + r1.consumed, buf.size() - r1.consumed);
+    check(r2.status == protocol::DecodeStatus::kOk, "坏帧不应堵住后面的真帧");
+    check(r2.consumed == bad.size() - 1 + good.size(),
+          "重同步后 consumed 应覆盖剩余坏帧 + 真帧");
+    check(r2.frame.id == 0x02 && r2.frame.payload == good_payload,
+          "重同步后解出的应是后面的真帧");
+    std::printf("  CRC 错：BadCrc(consumed=1)，继续解析可解出后续真帧\n");
+}
+
+void test_decode_garbage_only() {
+    const std::vector<uint8_t> garbage(16, 0x00);
+    const protocol::DecodeResult r =
+        protocol::decode_stream(garbage.data(), garbage.size());
+    check(r.status == protocol::DecodeStatus::kNoHeader, "纯垃圾应返回 kNoHeader");
+    check(r.consumed == garbage.size(), "纯垃圾应整段丢弃（consumed=len）");
+
+    // 末尾恰好是 0xAA：可能是下一个帧头的前半，必须保留并等待（kNeedMore）
+    const std::vector<uint8_t> tail = {0x00, 0x01, 0x02, 0xAA};
+    const protocol::DecodeResult r2 = protocol::decode_stream(tail.data(), tail.size());
+    check(r2.status == protocol::DecodeStatus::kNeedMore &&
+              r2.consumed == tail.size() - 1,
+          "末尾 0xAA 可能是半个帧头：只丢前面 3 字节，保留等待更多数据");
+    std::printf("  纯垃圾：NoHeader 整段丢弃；末尾 0xAA 保留\n");
+}
+
+void test_decode_nested_header() {
+    // 0xAA 0xAA 0x55 ...：第一个 0xAA 是垃圾，真正的帧头从第二个字节开始
+    const std::vector<uint8_t> f = protocol::encode_frame(0x01, 1, {42});
+    std::vector<uint8_t> buf = {0xAA};
+    buf.insert(buf.end(), f.begin(), f.end());
+    const protocol::DecodeResult r = protocol::decode_stream(buf.data(), buf.size());
+    check(r.status == protocol::DecodeStatus::kOk, "重叠帧头应能正确定位到 AA 55");
+    check(r.consumed == 1 + f.size(), "重叠帧头的首个 0xAA 应作为垃圾丢掉");
+    check(r.frame.payload == (std::vector<int16_t>{42}), "重叠帧头解出的负载应正确");
+    std::printf("  重叠帧头 AA AA 55：从第二个字节定位，丢 1 字节\n");
+}
+
+void test_decode_empty_and_null() {
+    const protocol::DecodeResult r = protocol::decode_stream(nullptr, 0);
+    check(r.status == protocol::DecodeStatus::kNeedMore && r.consumed == 0,
+          "空输入应返回 kNeedMore 且 consumed=0（不能崩）");
+    const std::vector<uint8_t> empty;
+    const protocol::DecodeResult r2 =
+        protocol::decode_stream(empty.data(), empty.size());
+    check(r2.status == protocol::DecodeStatus::kNeedMore,
+          "空字节流应返回 kNeedMore");
+}
+
+void test_encode_limit() {
+    // 超过单帧上限：编码必须失败（返回空），不能静默截断 count。
+    // 截断后的帧 count 与实际负载不一致，接收端会按错误长度切帧
+    std::vector<int16_t> too_many(protocol::kMaxPayloadPoints + 1, 1);
+    check(protocol::encode_frame(0x01, 0, too_many).empty(),
+          "超过 kMaxPayloadPoints 的负载应编码失败（空 vector）");
+
+    // 恰好到上限：帧长与上限匹配，且能完整往返
+    std::vector<int16_t> at_limit(protocol::kMaxPayloadPoints, 123);
+    const std::vector<uint8_t> f = protocol::encode_frame(0x01, 0, at_limit);
+    check(f.size() == protocol::frame_size_bytes(protocol::kMaxPayloadPoints),
+          "上限帧的帧长应为 6+2n+2");
+    check(f.size() <= protocol::kMaxFrameBytes, "上限帧不应超过 kMaxFrameBytes");
+    const protocol::DecodeResult r = protocol::decode_stream(f.data(), f.size());
+    check(r.status == protocol::DecodeStatus::kOk &&
+              r.frame.payload.size() == protocol::kMaxPayloadPoints &&
+              r.frame.payload.back() == 123,
+          "上限帧应能完整解出");
+    std::printf("  编码上限：kMaxPayloadPoints=%zu，越限拒绝、上限帧可往返\n",
+                protocol::kMaxPayloadPoints);
+}
+
+void test_decode_stream_invariants_under_random_input() {
+    // 确定性伪随机：解析器对任意字节流都不应越界、不应"零进展死循环"。
+    // 随机数据里偶发 AA 55 会构造出伪帧头/假长度，正是重同步逻辑的考场
+    std::mt19937 gen(20261019u);
+    std::uniform_int_distribution<int> byte_dist(0, 255);
+    std::uniform_int_distribution<int> len_dist(0, 96);
+    bool all_ok = true;
+    for (int iter = 0; iter < 2000; ++iter) {
+        std::vector<uint8_t> buf(static_cast<std::size_t>(len_dist(gen)));
+        for (uint8_t& b : buf) b = static_cast<uint8_t>(byte_dist(gen));
+        const protocol::DecodeResult r =
+            protocol::decode_stream(buf.empty() ? nullptr : buf.data(), buf.size());
+        if (r.consumed > buf.size()) all_ok = false;
+        if (r.status == protocol::DecodeStatus::kOk) {
+            if (r.consumed == 0) all_ok = false;
+            if (r.consumed < protocol::frame_size_bytes(r.frame.payload.size())) {
+                all_ok = false;
+            }
+        } else if (!buf.empty() && r.consumed == 0 &&
+                   r.status != protocol::DecodeStatus::kNeedMore) {
+            all_ok = false;   // 非 Ok 且不能推进的只允许是"等待更多数据"
+        }
+    }
+    check(all_ok, "随机输入下：consumed 不越界、非 Ok 状态要么可推进要么等待、Ok 至少推进一帧");
+    std::printf("  随机字节流 2000 组：无越界、无零进展死循环\n");
+}
+
+void test_decode_zero_payload() {
+    // 空负载是合法帧（例如急停只需 id，不带参数）
+    const std::vector<uint8_t> f = protocol::encode_frame(0x12, 3, {});
+    check(f.size() == protocol::frame_size_bytes(0), "空负载帧长应为 8");
+    const protocol::DecodeResult r = protocol::decode_stream(f.data(), f.size());
+    check(r.status == protocol::DecodeStatus::kOk && r.frame.payload.empty() &&
+              r.consumed == f.size(),
+          "空负载帧应能合法解出");
+    std::printf("  空负载帧（急停 id=0x12）可解码，帧长 %zu\n", f.size());
 }
 
 }  // namespace
@@ -193,6 +445,19 @@ int main() {
     test_encode_lane();
     test_encode_lane_clamp();
     test_concat();
+    test_decode_status_names();
+    test_decode_need_more_on_half_packet();
+    test_decode_sticky_packets();
+    test_decode_fake_header_overlong_count();
+    test_decode_leading_garbage();
+    test_decode_truncated_frame_waits();
+    test_decode_bad_crc_reports_status();
+    test_decode_garbage_only();
+    test_decode_nested_header();
+    test_decode_empty_and_null();
+    test_encode_limit();
+    test_decode_zero_payload();
+    test_decode_stream_invariants_under_random_input();
     std::printf("=== 检查项 %d，失败 %d ===\n", g_total, g_fail);
     return g_fail ? 1 : 0;
 }
