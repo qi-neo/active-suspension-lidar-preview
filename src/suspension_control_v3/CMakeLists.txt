@@ -43,7 +43,12 @@ target_include_directories(suspension_control_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(suspension_control_core suspension_preview_v2)
+# 只取 v2 的头文件路径，不通过 ament_target_dependencies 代链。
+# 后者会把 ${suspension_preview_v2_LIBRARIES}（导出目标名）当库名传进链接行，
+# 变成 `-lsuspension_core` 而找不到（CI 实测：cannot find -lsuspension_core）。
+# 真正需要链接的库由下面显式的 imported target 提供。
+target_include_directories(suspension_control_core PUBLIC
+  ${suspension_preview_v2_INCLUDE_DIRS})
 
 
 # 离线自检：不依赖 ROS 运行时，可直接执行
@@ -59,8 +64,10 @@ target_link_libraries(suspension_control_node suspension_control_core)
 # 只在本 workspace 成立，安装到 /opt/ros 或别的 workspace 就会断。
 target_link_libraries(suspension_control_node suspension_core)
 ament_target_dependencies(suspension_control_node
-  rclcpp std_msgs sensor_msgs nav_msgs suspension_preview_v2
+  rclcpp std_msgs sensor_msgs nav_msgs
 )
+target_include_directories(suspension_control_node PRIVATE
+  ${suspension_preview_v2_INCLUDE_DIRS})
 # 节点用到 v2 的 RoadProfile 消息，要链它的 typesupport。
 #
 # 注意这里不能用 rosidl_get_typesupport_target(v2_ts suspension_preview_v2 ...)：
