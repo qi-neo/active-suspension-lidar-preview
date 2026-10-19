@@ -182,12 +182,12 @@
 - 自检 428 → **443 项**（场景 41 异步通道：不阻塞/合并/重试/急停优先/析构冲刷；
   场景 42 回路接入异步通道后 600 拍不被 20 ms/次的写阻塞）。
 
-**构建规范化（P2）**
+**构建规范化（P2）—— 暂缓**
 
-- `suspension_preview_v2` 改用 `install(... EXPORT ...)` + `ament_export_targets`；
-  v3 删掉 `get_filename_component` 上溯目录与 `find_library` 硬找路径的 hack，
-  直接链接 imported target `suspension_core`。旧写法只在本 workspace 成立，
-  包安装到 `/opt/ros` 或别的 workspace 必然失效。
+`install(EXPORT)` + `ament_export_targets` 的改造已写好但**暂未合入**：首轮 CI 的
+`colcon build` 未通过，而本机没有 ROS/容器、拿不到日志，无法定位是配置期还是
+链接期问题。为避免阻塞本次实时性改动，先保留原有 hack，待能拿到 CI 日志后
+单独开 PR 验证。CI 改造点已记录在 PR 描述里。
 
 ## [3.2.1] - 2026-10-15
 
