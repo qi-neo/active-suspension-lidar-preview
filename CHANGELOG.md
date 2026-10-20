@@ -13,6 +13,17 @@
 时间域 FIR、把"测什么"从凭感觉补用例改成按覆盖率指路、以及把 CI 补齐为
 构建 + 内存检查 + 覆盖率三道门禁。
 
+### CI 与文档
+
+- **sanitizer 拆成独立 workflow**（`.github/workflows/sanitizer.yml`）：GitHub 的
+  workflow 徽章只能对应整个 workflow，没有"单个 job 的徽章"；混在 `ros-ci.yml`
+  里时 README 只能放一个总徽章，看不出 ASan 这一项到底绿没绿。拆开后 ASan 徽章
+  真正只反映 sanitizer 状态。两个 workflow 都保留"失败自动把日志贴回 PR"，
+  查看失败原因不需要登录 Actions
+- **README 新增「质量保障」章节**（中英）：四条门禁各跑什么、红了的含义、覆盖边界
+  （sanitizer 只覆盖不依赖 ROS/PCL 的纯逻辑层；覆盖率排除 `serial_port.cpp`），
+  以及两个真实案例（ASan 抓到堆越界写、覆盖率暴露口径打架）
+
 ### 新增
 
 - **预瞄前馈 FIR**（`use_preview_fir`，默认关闭）：前馈从单点比例改为

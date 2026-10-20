@@ -7,6 +7,7 @@
 激光雷达随车速自适应预瞄路面高程（0.5–5 m），融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架，抑制非结构化路面上的车身振动与姿态波动。
 
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+[![ASan + UBSan](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
@@ -44,8 +45,9 @@
 7. [实测结果](#7-实测结果)
 8. [下行带宽](#8-下行带宽)
 9. [常见问题](#9-常见问题)
-10. [许可证](#10-许可证)
-11. [English Abstract](#11-english-abstract)
+10. [质量保障](#10-质量保障)
+11. [许可证](#11-许可证)
+12. [English Abstract](#12-english-abstract)
 
 ## 1. 项目简介
 
@@ -466,13 +468,38 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 
 </details>
 
-## 10. 许可证
+## 10. 质量保障
+
+CI 分两个 workflow（`.github/workflows/`），共四条独立检查，任何一条红了 PR 就合不了：
+
+| 检查 | 在哪 | 实际跑什么 | 红了意味着 |
+|---|---|---|---|
+| 常规构建 | `ros-ci.yml` → `build` | ROS Humble 容器里 `colcon build` 四个包 + `colcon test` + 五个离线自检 | 编译失败、CTest 断言失败 |
+| 内存 / 未定义行为 | `sanitizer.yml` → `sanitize` | 纯逻辑自检带 `-fsanitize=address,undefined` 跑一遍 | 越界、use-after-free、整数溢出、未定义行为 |
+| 覆盖率 | `ros-ci.yml` → `coverage` | `gcovr` 统计控制内核与预览核心的源码 | 行覆盖 < 80% 或分支覆盖 < 70% |
+| 依赖 / 参数一致性 | `ros-ci.yml` 前置步骤 | `tools/check_deps.py`、`tools/check_ros_params.py` | CMakeLists 与 package.xml 脱节、节点参数与 YAML 键不一致 |
+
+**边界要清楚**：sanitizer 只覆盖**不依赖 ROS/PCL 的纯逻辑层**（控制内核、安全状态机、协议解析、
+趋势/障碍/标定、参数校验）；真实 ROS 节点与 PCL 点云链路在常规构建里只做普通编译运行，没有插桩。
+覆盖率同样排除 `serial_port.cpp`——它是纯 termios I/O，离线自检只能覆盖到 `is_baud_supported`
+（实测 7% 行覆盖），插桩进来会把分支门禁直接拖穿；它作为链接依赖参与，但不进分母。
+
+两个具体案例，说明这些检查不是摆设：
+
+- **ASan 抓到过堆越界写**：用 999 当"无凸起"哨兵去索引 100 格数组，当时 **234 项断言全过**——
+  断言验的是"值对不对"，验不出"写没写错地方"；
+- **覆盖率暴露过口径打架**：`examples/*_selftest.cpp` 自带的断言分支上千个，混进统计会把分支覆盖
+  从 74% 压到 57%，和门槛口径互相矛盾，后来两边统一了 filter。
+
+失败时不用登录 Actions：两个 workflow 都会在 job 结束后自动把日志尾部贴成 PR 评论。
+
+## 11. 许可证
 
 [MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
 
 版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
-## 11. English Abstract
+## 12. English Abstract
 
 <details>
 <summary>点击展开英文摘要</summary>
