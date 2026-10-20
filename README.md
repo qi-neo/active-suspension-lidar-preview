@@ -379,10 +379,10 @@ ros2 run car_balancer test_imu_node
 > 波动 = 各路段动态行驶段（被动取 `Mode=0` 段、主动取全程）姿态角 / 垂向加速度相对各自均值的峰峰值；改善 =（被动 − 主动）/ 被动。三次测试为不同路段独立采集，工况 02 主动侧俯仰与垂向略高于被动、工况 03 横滚主动侧略大，应与各次路面输入不一致有关，此处如实列出。
 
 <p align="center"><img src="docs/figures/attitude_compare.png" width="660" alt="被动与主动悬架横滚角、俯仰角曲线对比"></p>
-<p align="center"><sub>图 1　常规路面工况（01）：横滚角与俯仰角，250 Hz 原始数据去均值、36 ms 滑动平均</sub></p>
+<p align="center"><sub>图 1　常规路面工况（01）：横滚角与俯仰角，250 Hz 原始数据去均值、36 ms 滑动平均；阴影为主动悬架相对 1 s 趋势线的局部 ±1σ 波动幅度（非统计置信区间）</sub></p>
 
 <p align="center"><img src="docs/figures/obstacle_pitch.png" width="660" alt="越障工况俯仰角响应对比"></p>
-<p align="center"><sub>图 2　越障工况（03）：俯仰角响应，主动悬架峰值明显收窄</sub></p>
+<p align="center"><sub>图 2　越障工况（03）：俯仰角响应，主动悬架峰值明显收窄；阴影口径同图 1</sub></p>
 
 <p align="center"><img src="docs/figures/paper_exp1_compare.png" width="520" alt="论文图 1：实验 1 被动与主动悬架性能指标对比"></p>
 <p align="center"><sub>图 3　项目论文图 1（实验 1）：被动与主动悬架性能指标对比</sub></p>

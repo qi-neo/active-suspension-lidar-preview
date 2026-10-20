@@ -20,6 +20,10 @@ Regular/Medium 两个面（matplotlib 默认只认 ttc 的第一个面）；缺�
     抽到临时目录再注册；没有 fontTools / 不是 macOS 时按后备字体链降级，
     并在 stderr 提示，不会让出图中断。
   - 白底、无上/右边框、只保留极淡的横向网格；被动灰、主动深墨蓝，主动线略粗。
+  - 主动线加一层很淡的波动带。口径要说准：单次采集没有重复样本，且曲线本身
+    已经是 36 ms 平滑后的均值（相对它的残差 σ 只有 0.01° 量级，画出来不足 1 px）。
+    所以这里定义成"原始信号相对 1 s 趋势线的局部 ±1σ"——它描述的是 1 s 尺度上的
+    观测波动幅度（0.1–0.3° 量级），**不是**统计置信区间；图注里也按这个说法写。
   - 300 dpi 输出，README 里按 660–720 px 宽度显示，视网膜屏下依然清晰。
 """
 from __future__ import annotations
@@ -36,6 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib import font_manager
+from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator
 
 # ---------------------------------------------------------------- 设计常量
@@ -51,6 +56,14 @@ LW_PASSIVE = 0.9
 LW_ACTIVE = 1.15
 FIG_W = 7.0
 DPI = 300
+
+SAMPLE_HZ = 250        # 试验记录采样率
+
+BAND_ALPHA = 0.12      # 波动带透明度（要"很淡"，别压过主曲线）
+BAND_SIGMA = 1.0       # ±1σ
+BAND_BASE_S = 1.0      # 趋势基线窗：相对 1 s 趋势线取残差
+BAND_WINDOW_S = 1.0    # 残差局部 σ 的窗（1 s）
+BAND_SMOOTH = 21       # σ 曲线再做一次平滑，避免锯齿
 
 _PINGFANG_POSTSCRIPT = ("PingFangSC-Regular", "PingFangSC-Medium")
 _FALLBACK_FAMILIES = ("Hiragino Sans GB", "Noto Sans CJK SC", "Heiti SC",
@@ -148,12 +161,16 @@ def load(data_dir: str, name: str, smooth: int = 9) -> dict:
     t = df["Time(s)"].to_numpy()
     df = df[(t > 0.5) & (t < t.max() - 0.5)].reset_index(drop=True)
     out = {"t": df["Time(s)"].to_numpy()}
-    out["roll"] = df["Roll(deg)"]
-    out["pitch"] = df["Pitch(deg)"]
-    out["acc"] = df["Acc_Z(g)"] / 9.80665  # 该列实际单位是 m/s²
-    for key in ("roll", "pitch", "acc"):
-        out[key] = (out[key] - out[key].mean()).rolling(
-            smooth, center=True, min_periods=1).mean()
+    columns = {"roll": "Roll(deg)", "pitch": "Pitch(deg)",
+               "acc": "Acc_Z(g)"}
+    for key, column in columns.items():
+        raw = df[column].astype(float)
+        if key == "acc":
+            raw = raw / 9.80665  # 该列实际单位是 m/s²
+        raw = raw - raw.mean()
+        out[key] = raw.rolling(smooth, center=True, min_periods=1).mean()
+        # 保留去均值后的原始序列：波动带 = 原始 - 平滑 的局部 σ
+        out[key + "_raw"] = raw
     return out
 
 
@@ -181,12 +198,31 @@ def _decorate_axes(axes) -> None:
         ax.title.set_color(INK)
 
 
+def _confidence_band(ax, t, smooth, raw) -> None:
+    """主动线的很淡波动带：原始信号相对 1 s 趋势线的局部 ±1σ。
+
+    注意这不是统计置信区间（单次采集没有重复样本），而是 1 s 尺度上的
+    观测波动幅度；相对 36 ms 平滑均值的残差量级太小，画出来不可见。
+    """
+    base = max(3, int(BAND_BASE_S * SAMPLE_HZ))
+    win = max(3, int(BAND_WINDOW_S * SAMPLE_HZ))
+    trend = raw.rolling(base, center=True, min_periods=1).mean()
+    residual = raw - trend
+    sigma = residual.rolling(win, center=True, min_periods=win // 4).std()
+    sigma = sigma.bfill().ffill().fillna(0.0)
+    sigma = sigma.rolling(BAND_SMOOTH, center=True, min_periods=1).mean()
+    ax.fill_between(t, smooth - BAND_SIGMA * sigma, smooth + BAND_SIGMA * sigma,
+                    color=ACTIVE, alpha=BAND_ALPHA, linewidth=0, zorder=1.6)
+
+
 def _legend(ax, labels) -> None:
-    """图例放到坐标区上方：一行、无边框、细线段。"""
+    """图例放到坐标区上方：一行、无边框、细线段 + 波动带色块。"""
     handles = [plt.Line2D([], [], color=PASSIVE, lw=LW_PASSIVE),
-               plt.Line2D([], [], color=ACTIVE, lw=LW_ACTIVE)]
-    ax.legend(handles, labels, loc="lower left", bbox_to_anchor=(0.0, 1.01),
-              ncol=2, frameon=False, fontsize=9, handlelength=2.2,
+               plt.Line2D([], [], color=ACTIVE, lw=LW_ACTIVE),
+               Patch(facecolor=ACTIVE, alpha=0.25, edgecolor="none")]
+    entries = list(labels) + ["±1σ 波动带"]
+    ax.legend(handles, entries, loc="lower left", bbox_to_anchor=(0.0, 1.01),
+              ncol=3, frameon=False, fontsize=9, handlelength=2.2,
               handletextpad=0.6, columnspacing=1.8, borderaxespad=0.0)
 
 
@@ -196,6 +232,7 @@ def attitude(data_dir: str, out_dir: str) -> str:
                              gridspec_kw={"hspace": 0.20})
     for ax, key, ylabel in ((axes[0], "roll", "横滚角 / °"),
                             (axes[1], "pitch", "俯仰角 / °")):
+        _confidence_band(ax, active["t"], active[key], active[key + "_raw"])
         ax.plot(passive["t"], passive[key], color=PASSIVE, lw=LW_PASSIVE,
                 label="被动悬架", zorder=2)
         ax.plot(active["t"], active[key], color=ACTIVE, lw=LW_ACTIVE,
@@ -219,6 +256,7 @@ def obstacle(data_dir: str, out_dir: str) -> str:
     passive = load(data_dir, "被动悬架03")
     active = load(data_dir, "主动悬架03")
     fig, ax = plt.subplots(figsize=(FIG_W, 2.5))
+    _confidence_band(ax, active["t"], active["pitch"], active["pitch_raw"])
     ax.plot(passive["t"], passive["pitch"], color=PASSIVE, lw=LW_PASSIVE,
             label="被动悬架", zorder=2)
     ax.plot(active["t"], active["pitch"], color=ACTIVE, lw=LW_ACTIVE,
@@ -226,6 +264,8 @@ def obstacle(data_dir: str, out_dir: str) -> str:
     ax.set_xlabel("时间 / s", fontsize=9.5, color=INK, labelpad=8)
     ax.set_ylabel("俯仰角 / °", fontsize=9.5, color=INK, labelpad=8)
     ax.set_xlim(0, 27)
+    # 纵轴范围钉住，避免波动带把自动缩放撑大、刻度变成 0/6/12
+    ax.set_ylim(-4.6, 17.4)
     _style_axes(ax)
     _legend(ax, ["被动悬架", "主动悬架"])
     fig.subplots_adjust(left=0.095, right=0.985, top=0.82, bottom=0.19)
