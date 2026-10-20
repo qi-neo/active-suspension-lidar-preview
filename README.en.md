@@ -7,6 +7,7 @@
 Reads the road surface 0.5–5 m ahead with a LiDAR, speed-adaptive, fuses IMU attitude feedback, and drives four independent digital servos per wheel in real time to suppress body vibration and attitude fluctuation on unstructured terrain.
 
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+[![ASan + UBSan](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
@@ -407,6 +408,26 @@ obstacle), or outside the `ground_z_min/max` window. Enable `interpolate_gaps` f
 **TF errors, or the node never publishes**
 v2 drops the frame when TF is unavailable instead of publishing anyway. Check that the transform between
 `base_link` and the LiDAR frame is being published, and relax `tf_timeout_ms` if necessary.
+
+## Quality gates
+
+CI runs in two workflows and gates every PR:
+
+| Check | Workflow | What actually runs | Fails when |
+|---|---|---|---|
+| Build | `ros-ci.yml` → `build` | `colcon build` for all packages + `colcon test` + five offline self-tests in a ROS Humble container | compile error / failed CTest assertion |
+| ASan + UBSan | `sanitizer.yml` → `sanitize` | pure-logic self-tests compiled with `-fsanitize=address,undefined` | out-of-bounds, use-after-free, integer overflow, undefined behaviour |
+| Coverage | `ros-ci.yml` → `coverage` | `gcovr` over the control and preview core sources | line coverage < 80% or branch coverage < 70% |
+| Dependency & param consistency | `ros-ci.yml` → pre-build steps | `tools/check_deps.py`, `tools/check_ros_params.py` | CMakeLists / package.xml drift, node params vs YAML mismatch |
+
+Scope: the sanitizer only covers the ROS/PCL-free logic layer; real nodes and the PCL point-cloud path are
+built but not instrumented. Coverage excludes `serial_port.cpp` (termios-only I/O) because an offline
+self-test can only reach `is_baud_supported` there and instrumenting it would drag the branch gate down.
+
+These checks are not decorative: ASan once caught a heap out-of-bounds write (a 999 "no bump" sentinel used
+to index a 100-cell array) while all 234 assertions passed — assertions verify values, not memory.
+
+Failures are posted as a PR comment automatically, so reading them does not require access to Actions logs.
 
 ## License
 
