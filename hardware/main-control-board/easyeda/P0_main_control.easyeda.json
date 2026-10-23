@@ -1,0 +1,623 @@
+{
+  "head": "easyeda",
+  "schematics": [
+    {
+      "data": "",
+      "sha": "",
+      "title": "P0 Main Control Board",
+      "schematics": [],
+      "shape": []
+    }
+  ],
+  "components": [
+    {
+      "ref": "U1",
+      "name": "STM32G474CBT6",
+      "lib": "P0lib:MCU_G474",
+      "footprint": "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+      "x": 0,
+      "y": 0
+    },
+    {
+      "ref": "U2",
+      "name": "MAX485",
+      "lib": "P0lib:MAX485",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "x": 55,
+      "y": -45
+    },
+    {
+      "ref": "U3",
+      "name": "MAX485",
+      "lib": "P0lib:MAX485",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "x": 55,
+      "y": -15
+    },
+    {
+      "ref": "U4",
+      "name": "MAX485",
+      "lib": "P0lib:MAX485",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "x": 55,
+      "y": 15
+    },
+    {
+      "ref": "U5",
+      "name": "MAX485",
+      "lib": "P0lib:MAX485",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "x": 55,
+      "y": 45
+    },
+    {
+      "ref": "U6",
+      "name": "SI8640",
+      "lib": "P0lib:ISO4",
+      "footprint": "Package_SO:SOIC-16_3.9x9.9mm_P1.27mm",
+      "x": -60,
+      "y": 0
+    },
+    {
+      "ref": "U7",
+      "name": "AMS1117-3.3",
+      "lib": "P0lib:AMS1117",
+      "footprint": "Package_TO_SOT:SOT-223-3_TabPin2",
+      "x": -60,
+      "y": -55
+    },
+    {
+      "ref": "Q1",
+      "name": "AO4407A",
+      "lib": "P0lib:PMOS",
+      "footprint": "Package_TO_SOT:SOT-23",
+      "x": -60,
+      "y": 55
+    },
+    {
+      "ref": "U8",
+      "name": "TPS3823-33",
+      "lib": "P0lib:TPS3823",
+      "footprint": "Package_TO_SOT:SOT-23-5",
+      "x": -60,
+      "y": 25
+    },
+    {
+      "ref": "J1",
+      "name": "SERVO0",
+      "lib": "P0lib:CONN4",
+      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "x": 110,
+      "y": -45
+    },
+    {
+      "ref": "J2",
+      "name": "SERVO1",
+      "lib": "P0lib:CONN4",
+      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "x": 110,
+      "y": -15
+    },
+    {
+      "ref": "J3",
+      "name": "SERVO2",
+      "lib": "P0lib:CONN4",
+      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "x": 110,
+      "y": 15
+    },
+    {
+      "ref": "J4",
+      "name": "SERVO3",
+      "lib": "P0lib:CONN4",
+      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "x": 110,
+      "y": 45
+    },
+    {
+      "ref": "J5",
+      "name": "PWR_IN",
+      "lib": "P0lib:CONN2",
+      "footprint": "Connector_TerminalBlock:TerminalBlock_1x02_P5.08mm",
+      "x": -120,
+      "y": -55
+    },
+    {
+      "ref": "J6",
+      "name": "SERVO_PWR",
+      "lib": "P0lib:CONN2",
+      "footprint": "Connector_TerminalBlock:TerminalBlock_1x02_P5.08mm",
+      "x": -120,
+      "y": 55
+    },
+    {
+      "ref": "J7",
+      "name": "SWD",
+      "lib": "P0lib:CONN4",
+      "footprint": "Connector_Generic:Conn_01x04",
+      "x": -120,
+      "y": 0
+    },
+    {
+      "ref": "SW1",
+      "name": "ESTOP",
+      "lib": "P0lib:SW2",
+      "footprint": "Button_Switch_THT:SW_Push_2Pin",
+      "x": -60,
+      "y": 80
+    },
+    {
+      "ref": "F1",
+      "name": "PTC_5A",
+      "lib": "P0lib:FUSE",
+      "footprint": "Fuseholder_Card:Fuseholder_Card_5x20mm",
+      "x": -90,
+      "y": -55
+    },
+    {
+      "ref": "C1",
+      "name": "0.1u",
+      "lib": "P0lib:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "x": -30,
+      "y": -55
+    },
+    {
+      "ref": "C2",
+      "name": "10u",
+      "lib": "P0lib:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "x": -30,
+      "y": -40
+    },
+    {
+      "ref": "C3",
+      "name": "100u",
+      "lib": "P0lib:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "x": -30,
+      "y": 55
+    },
+    {
+      "ref": "C4",
+      "name": "0.1u",
+      "lib": "P0lib:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "x": 30,
+      "y": -55
+    },
+    {
+      "ref": "C5",
+      "name": "10u",
+      "lib": "P0lib:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "x": 30,
+      "y": -40
+    },
+    {
+      "ref": "C6",
+      "name": "0.1u",
+      "lib": "P0lib:C",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "x": 30,
+      "y": 55
+    },
+    {
+      "ref": "R1",
+      "name": "1k",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": -30,
+      "y": 80
+    },
+    {
+      "ref": "R2",
+      "name": "1k",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": 0,
+      "y": 80
+    },
+    {
+      "ref": "R3",
+      "name": "1k",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": 30,
+      "y": 80
+    },
+    {
+      "ref": "R4",
+      "name": "330",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": -90,
+      "y": 25
+    },
+    {
+      "ref": "D1",
+      "name": "PWR",
+      "lib": "P0lib:LED",
+      "footprint": "LED_SMD:LED_0805_2012Metric",
+      "x": -90,
+      "y": -30
+    },
+    {
+      "ref": "D2",
+      "name": "RUN",
+      "lib": "P0lib:LED",
+      "footprint": "LED_SMD:LED_0805_2012Metric",
+      "x": -90,
+      "y": -15
+    },
+    {
+      "ref": "D3",
+      "name": "LINK",
+      "lib": "P0lib:LED",
+      "footprint": "LED_SMD:LED_0805_2012Metric",
+      "x": -90,
+      "y": 0
+    },
+    {
+      "ref": "D4",
+      "name": "ESTOP",
+      "lib": "P0lib:LED",
+      "footprint": "LED_SMD:LED_0805_2012Metric",
+      "x": -90,
+      "y": 15
+    },
+    {
+      "ref": "R5",
+      "name": "330",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": -105,
+      "y": 15
+    },
+    {
+      "ref": "TP1",
+      "name": "nRESET",
+      "lib": "P0lib:CONN2",
+      "footprint": "TestPoint:TestPoint_Pad_D1.0mm",
+      "x": -120,
+      "y": 25
+    }
+  ],
+  "nets": [
+    {
+      "net": "GND",
+      "nodes": [
+        "J5.1",
+        "J6.1",
+        "U1.VSS",
+        "U6.GND_A",
+        "U6.GND_B",
+        "U7.GND",
+        "U2.GND",
+        "U3.GND",
+        "U4.GND",
+        "U5.GND",
+        "U8.GND",
+        "SW1.1",
+        "D1.K",
+        "D2.K",
+        "D3.K",
+        "D4.K",
+        "C1.1",
+        "C2.1",
+        "C3.1",
+        "C4.1",
+        "C5.1",
+        "C6.1",
+        "J1.2",
+        "J2.2",
+        "J3.2",
+        "J4.2",
+        "TP1.2"
+      ]
+    },
+    {
+      "net": "5V_IN",
+      "nodes": [
+        "J5.2",
+        "F1.1"
+      ]
+    },
+    {
+      "net": "5V",
+      "nodes": [
+        "F1.2",
+        "U7.IN"
+      ]
+    },
+    {
+      "net": "3V3",
+      "nodes": [
+        "U7.OUT",
+        "U1.VDD",
+        "U6.VCC_A",
+        "U6.VCC_B",
+        "U2.VCC",
+        "U3.VCC",
+        "U4.VCC",
+        "U5.VCC",
+        "U8.VDD",
+        "R4.1",
+        "C1.2",
+        "C4.2",
+        "C2.2",
+        "C5.2",
+        "C3.2",
+        "C6.2",
+        "R5.2",
+        "R1.2",
+        "R2.2",
+        "R3.2"
+      ]
+    },
+    {
+      "net": "SERVO_V+_IN",
+      "nodes": [
+        "J6.2",
+        "Q1.S"
+      ]
+    },
+    {
+      "net": "SERVO_V+",
+      "nodes": [
+        "Q1.D",
+        "J1.1",
+        "J2.1",
+        "J3.1",
+        "J4.1",
+        "J1.1",
+        "J2.1",
+        "J3.1",
+        "J4.1"
+      ]
+    },
+    {
+      "net": "OP_LINK_TX",
+      "nodes": [
+        "J7.3",
+        "U6.INA"
+      ]
+    },
+    {
+      "net": "USART1_RX",
+      "nodes": [
+        "U6.VOA",
+        "U1.PA10_USART1_RX"
+      ]
+    },
+    {
+      "net": "USART1_TX",
+      "nodes": [
+        "U1.PA9_USART1_TX",
+        "U6.INB"
+      ]
+    },
+    {
+      "net": "OP_LINK_RX",
+      "nodes": [
+        "J7.4",
+        "U6.VOB"
+      ]
+    },
+    {
+      "net": "SWDIO",
+      "nodes": [
+        "J7.1",
+        "U1.PA13_SWDIO"
+      ]
+    },
+    {
+      "net": "SWCLK",
+      "nodes": [
+        "J7.2",
+        "U1.PA14_SWCLK"
+      ]
+    },
+    {
+      "net": "SERVO0_TX",
+      "nodes": [
+        "U2.DI",
+        "U1.PA2_USART2_TX"
+      ]
+    },
+    {
+      "net": "SERVO0_RX",
+      "nodes": [
+        "U2.RO",
+        "U1.PA3_USART2_RX"
+      ]
+    },
+    {
+      "net": "SERVO0_DIR",
+      "nodes": [
+        "U2.DE",
+        "U2.nRE",
+        "U1.PA4_SERVO0_DIR"
+      ]
+    },
+    {
+      "net": "SERVO0_A",
+      "nodes": [
+        "U2.A",
+        "J1.3"
+      ]
+    },
+    {
+      "net": "SERVO0_B",
+      "nodes": [
+        "U2.B",
+        "J1.4"
+      ]
+    },
+    {
+      "net": "SERVO1_TX",
+      "nodes": [
+        "U3.DI",
+        "U1.PB10_USART3_TX"
+      ]
+    },
+    {
+      "net": "SERVO1_RX",
+      "nodes": [
+        "U3.RO",
+        "U1.PB11_USART3_RX"
+      ]
+    },
+    {
+      "net": "SERVO1_DIR",
+      "nodes": [
+        "U3.DE",
+        "U3.nRE",
+        "U1.PB12_SERVO1_DIR"
+      ]
+    },
+    {
+      "net": "SERVO1_A",
+      "nodes": [
+        "U3.A",
+        "J2.3"
+      ]
+    },
+    {
+      "net": "SERVO1_B",
+      "nodes": [
+        "U3.B",
+        "J2.4"
+      ]
+    },
+    {
+      "net": "SERVO2_TX",
+      "nodes": [
+        "U4.DI",
+        "U1.PA0_UART4_TX"
+      ]
+    },
+    {
+      "net": "SERVO2_RX",
+      "nodes": [
+        "U4.RO",
+        "U1.PA1_UART4_RX"
+      ]
+    },
+    {
+      "net": "SERVO2_DIR",
+      "nodes": [
+        "U4.DE",
+        "U4.nRE",
+        "U1.PA5_SERVO2_DIR"
+      ]
+    },
+    {
+      "net": "SERVO2_A",
+      "nodes": [
+        "U4.A",
+        "J3.3"
+      ]
+    },
+    {
+      "net": "SERVO2_B",
+      "nodes": [
+        "U4.B",
+        "J3.4"
+      ]
+    },
+    {
+      "net": "SERVO3_TX",
+      "nodes": [
+        "U5.DI",
+        "U1.PC12_UART5_TX"
+      ]
+    },
+    {
+      "net": "SERVO3_RX",
+      "nodes": [
+        "U5.RO",
+        "U1.PD2_UART5_RX"
+      ]
+    },
+    {
+      "net": "SERVO3_DIR",
+      "nodes": [
+        "U5.DE",
+        "U5.nRE",
+        "U1.PC11_SERVO3_DIR"
+      ]
+    },
+    {
+      "net": "SERVO3_A",
+      "nodes": [
+        "U5.A",
+        "J4.3"
+      ]
+    },
+    {
+      "net": "SERVO3_B",
+      "nodes": [
+        "U5.B",
+        "J4.4"
+      ]
+    },
+    {
+      "net": "ESTOP_GATE",
+      "nodes": [
+        "U1.PB0_ESTOP_GATE",
+        "Q1.G",
+        "R4.2",
+        "SW1.2"
+      ]
+    },
+    {
+      "net": "WDI",
+      "nodes": [
+        "U1.PB1_WDI",
+        "U8.WDI"
+      ]
+    },
+    {
+      "net": "nRESET",
+      "nodes": [
+        "U8.nRESET",
+        "TP1.1"
+      ]
+    },
+    {
+      "net": "LED_PWR",
+      "nodes": [
+        "D1.A",
+        "R1.1"
+      ]
+    },
+    {
+      "net": "LED_RUN",
+      "nodes": [
+        "D2.A",
+        "R2.1"
+      ]
+    },
+    {
+      "net": "LED_LINK",
+      "nodes": [
+        "D3.A",
+        "R3.1"
+      ]
+    },
+    {
+      "net": "LED_ESTOP",
+      "nodes": [
+        "D4.A",
+        "R5.1"
+      ]
+    }
+  ],
+  "base": {
+    "attach": [],
+    "info": {
+      "title": "P0 Main Control & Actuation Board"
+    }
+  }
+}

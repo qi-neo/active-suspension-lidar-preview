@@ -2,7 +2,7 @@
 
 把确定性的 **200 Hz 舵机控制** 与 **4 路舵机总线** 从香橙派（Linux，非硬实时）搬到一颗 MCU 上，并内置**硬件急停/看门狗**。直接消除 `command_sink` 的串口阻塞，并把 `safety_state_machine` 的 Emergency 分支做成硅级 fail-safe。
 
-> 状态：设计文档（BOM 见 [`bom.md`](bom.md)，框图见 [`schematic.svg`](schematic.svg)）。KiCad/EasyEDA 工程待绘制。
+> 状态：设计文档（BOM 见 [`bom.md`](bom.md)，框图见 [`schematic.svg`](schematic.svg)）+ **已生成可交付工程**（[`kicad/`](kicad/) KiCad v8 工程、[`easyeda/`](easyeda/) EasyEDA 工程、[`connections.md`](kicad/connections.md) 网络表、[`mcu_pin_assignment.md`](kicad/mcu_pin_assignment.md) 引脚分配）。网表已通过一致性校验（39 网络 / 34 元件 / 0 引脚冲突）。
 
 ## 1. 为什么是这块板（对齐代码痛点）
 
@@ -90,3 +90,29 @@
 - [ ] 模拟心跳丢失 → 验证急停 MOSFET 切断 + `Emergency` 行为
 - [ ] 长时运行验证确定性环抖动（示波器看控制周期）
 - [ ] 接入整车主回路，跑通现有 ROS2 节点（零协议改动）
+
+## 8. 已生成工程（kicad/ 与 easyeda/）
+
+由 `gen_pcb.py` 脚本生成，**所有符号自包含**（自定义符号库 `P0lib.kicad_sym`），引脚坐标可控，网表内部一致。
+
+### 8.1 文件清单
+| 路径 | 说明 |
+|------|------|
+| `kicad/P0_main_control.kicad_pro` | KiCad v8 工程文件 |
+| `kicad/P0_main_control.kicad_sch` | 原理图（34 元件，以网络标签连线） |
+| `kicad/P0_main_control.kicad_pcb` | PCB（已放置封装、未布线，含板框） |
+| `kicad/P0lib.kicad_sym` | 自包含符号库（MCU/MAX485/隔离器/LDO/PMOS/看门狗等） |
+| `kicad/sym-lib-table` · `fp-lib-table` | 库表（`${KIPRJMOD}` 相对路径） |
+| `kicad/P0_main_control.net` | 网表（KiCad 格式，可导入 PCB） |
+| `kicad/bom.csv` | 物料清单（含 LCSC 参考编码） |
+| `kicad/connections.md` | 人类可读网络连接表 |
+| `kicad/mcu_pin_assignment.md` | STM32G474CBT6 引脚分配（**需对照 DS12531 复核**） |
+| `easyeda/P0_main_control.easyeda.json` | EasyEDA 工程（组件 + 网络，导入参考） |
+
+### 8.2 打开与后续
+1. **KiCad**：用 KiCad 8 打开 `kicad/P0_main_control.kicad_pro`；`P0lib` 符号库随工程加载，封装引用标准 KiCad 库（需本机装有默认库）。
+2. **更新 PCB**：原理图 → 「Update PCB from schematic」把网络灌入已放置的封装，再布线 + DRC。
+3. **校验状态**：生成时已做语法（单根 S-expr）与网表一致性校验（无引脚落入两个网络）。但本环境**无 KiCad，无法跑 DRC / 电气规则检查**，需你本地验证；MCU 引脚复用功能须对照数据手册逐脚核对，尤其多 VDD/VSS 与 BOOT0。
+4. **EasyEDA**：`easyeda/*.json` 为结构化导入参考；正式绘制建议在 EasyEDA 内按 `connections.md` 重新连线。
+
+> ⚠️ 本工程为设计阶段产物，打样前请完成：封装焊盘/极性核对、电源树电流余量、隔离器/收发器电平与终端电阻、看门狗超时与舵机协议帧格式（0xAA55/CRC16）端到端联调。
