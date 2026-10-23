@@ -32,8 +32,12 @@
 ## 目录
 
 1. [项目简介](#1-项目简介)
+    - [硬件设计 / Hardware](#硬件设计--hardware)
 2. [系统架构](#2-系统架构)
+    - [预瞄节点数据流](#预瞄节点数据流)
 3. [快速开始](#3-快速开始)
+    - [Rviz2 可视化验证](#rviz2-可视化验证)
+    - [驱动默认参数 ↔ L1 官方规格对照](#驱动默认参数--l1-官方规格对照)
 4. [仓库结构](#4-仓库结构)
 5. [模块说明](#5-模块说明)
     - [unilidar_driver](#unilidar_driver--宇树-l1-激光雷达驱动)
@@ -205,10 +209,11 @@ L1 (TTL UART) ──► CH340 转接模块 ──► USB ──► 香橙派 USB
 > 没有串口接收实现。若实物走 CH340 串口，需要补一条串口收数路径——
 > 好在 `packet_parser` 本就按「无边界字节流」设计（注释已说明串口可能在任意位置开始接收），
 > 协议/解析层与传输层是解耦的，补一个 serial receiver 即可复用现有解析，不必改协议层。
+
 - **报文处理链**：私有 UDP 报文 → `packet_parser`（流式定界，UDP 可能丢包/提前截断）→ `frame_decoder` → 标准 `PointCloud2` + `Imu`。
 - **节奏**：雷达约 180 Hz 出扫描线，`cloud_scan_num=18` 合成约 **10 Hz** 点云，与预瞄节点输入节奏匹配。
 - **坐标系**：`unilidar_lidar` / `unilidar_imu` → `base_link`。
-- **先跑探针再跑驱动**：`ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex`，核对本机 IP/端口与包长分布。
+- **先跑探针再跑驱动**（UDP 备选路径）：`ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex`，核对本机 IP/端口与包长分布。
 - ⚠️ **四元数顺序**：官方未定死，默认 `xyzw`。雷达静止水平放置时正确顺序下 `w ≈ ±1`、其余 ≈ 0——接线通电后第一件事就是验这个。
 
 **2) 舵机下行 —— UART / `0xAA55`**
@@ -259,16 +264,16 @@ L1 (TTL UART) ──► CH340 转接模块 ──► USB ──► 香橙派 USB
 - [ ] 逐个单轮下发，验证顺序与升降方向与固件约定一致
 - [ ] 急停链路独立于软件（见 `hardware/estop-watchdog-board/`）
 
-## 硬件设计 / Hardware
+### 硬件设计 / Hardware
 
 把"飞线 + 开发板"的科研样机升级为可打样、带硬件安全链路的机电系统，并作为开源硬件补充进仓库。设计方案、BOM 与框图见 [`hardware/`](hardware/README.md)：
 
-- **P0 主控 + 执行一体化板**：把确定性 200 Hz 舵机控制与 4 路舵机总线从香橙派搬到 MCU（STM32G4），并原生解析现有下行协议（`0xAA55` + CRC16，`0x10/0x11/0x12` 命令），消除 `command_sink` 串口阻塞；
+- **P0 主控 + 执行一体化板**：把确定性 200 Hz 舵机控制与 4 路 PWM 舵机输出从香橙派搬到 MCU（STM32G4），并原生解析现有下行协议（`0xAA55` + CRC16，`0x10/0x11/0x12` 命令），消除 `command_sink` 串口阻塞；
 - **P1 电源 / EMC 板**：隔离舵机大电流与算力/传感，集中供电 + 反接/保险丝/共模扼流；
-- **P1 硬件急停 / 看门狗板**：心跳丢失即切舵机电源，把 `safety_state_machine` 的 Emergency 做成硅级 fail-safe；
-- **P2 传感器 / L1 接口板**：IMU/轮速信号调理 + 减振，UniLiDAR L1 转接与减振安装。
+- **P2 硬件急停 / 看门狗板**：心跳丢失即切舵机电源，把 `safety_state_machine` 的 Emergency 做成硅级 fail-safe；
+- **P3 传感器 / L1 接口板**：IMU/轮速信号调理 + 减振，UniLiDAR L1 转接与减振安装。
 
-> 状态：设计文档先行（KiCad/EasyEDA 工程待绘制），严格对齐仓库软件接口的痛点与协议。
+> 状态：**P0 已有可打开的 KiCad v8 + EasyEDA 工程**（自包含符号库、27 网络 / 34 元件、网表自洽；本机无 EDA 工具链，未跑 DRC）；P1–P3 为设计文档先行。全部严格对齐仓库软件接口的痛点与协议。
 
 ## 2. 系统架构
 
@@ -333,7 +338,7 @@ flowchart TB
 mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/qi-neo/active-suspension-lidar-preview
 # 如果还想用官方节点做对照，再 clone 官方 SDK（本仓库的驱动不依赖它）
-# git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# git clone https://github.com/unitreerobotics/unilidar_sdk
 # 雷达驱动另有独立仓库（含驱动编写思路文档），二者内容一致，按需选用：
 # git clone https://github.com/qi-neo/unilidar-driver
 
@@ -359,7 +364,7 @@ ros2 topic echo /suspension/road_profile --once
 ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```
 
-四个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
+除历史包 `suspension_preview`（v1）外，各包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
 
 ```bash
 ros2 run unilidar_driver decoder_selftest    # 报文解析，135 项检查
@@ -424,7 +429,7 @@ active-suspension-lidar-preview/
 
 ### unilidar_driver — 宇树 L1 激光雷达驱动
 
-点云与 IMU 原本依赖官方 `unitree_lidar_sdk` 的预编译静态库，看不到也改不了
+点云与 IMU 原本依赖官方 `libunitree_lidar_sdk.a` 的预编译静态库，看不到也改不了
 解析逻辑。这个包自行实现了 Unitree L1 的 UDP 报文解析与几何换算，发布标准
 `/unilidar/cloud`（PointCloud2）与 `/unilidar/imu`（Imu）话题，可直接顶替
 官方节点，其他包零改动。
@@ -755,9 +760,9 @@ ros2 run car_balancer test_imu_node
 | 01 常规路面 | 车身横滚角 | −3.24° ~ +4.86° | −3.38° ~ +2.99° | +21% |
 | 01 常规路面 | 车身俯仰角 | −1.02° ~ +1.16° | −0.78° ~ +1.14° | +12% |
 | 01 常规路面 | Z 轴加速度 | 0.36g | 0.32g | +10% |
-| 02 | 车身横滚角 | −2.11° ~ +3.18° | −2.30° ~ +2.97° | +0% |
-| 02 | 车身俯仰角 | −2.65° ~ +1.18° | −2.43° ~ +1.75° | −9% |
-| 02 | Z 轴加速度 | 0.30g | 0.36g | −20% |
+| 02 路段二 | 车身横滚角 | −2.11° ~ +3.18° | −2.30° ~ +2.97° | +0% |
+| 02 路段二 | 车身俯仰角 | −2.65° ~ +1.18° | −2.43° ~ +1.75° | −9% |
+| 02 路段二 | Z 轴加速度 | 0.30g | 0.36g | −20% |
 | 03 越障冲击 | 车身横滚角 | −0.60° ~ +0.62° | −0.48° ~ +1.13° | −32% |
 | 03 越障冲击 | 车身俯仰角 | −4.10° ~ +15.5° | −3.19° ~ +10.7° | +29% |
 | 03 越障冲击 | Z 轴加速度 | 0.93g | 0.57g | +38% |
@@ -792,6 +797,7 @@ ros2 run car_balancer test_imu_node
 | v2 | 208 B（int16 毫米 + CRC16） | 416 B | 约 28 帧/s | 约 111 帧/s |
 
 v1 在 115200 bps 下的上限与雷达 10–20 Hz 的输出正好对冲，这是 v2 改用 int16 与提高波特率选项的原因。
+按同样口径，921600 bps 下 v2 约 **221 帧/s**，余量更大；`ControlStatus.command_coalesced` 持续增长即说明所选波特率已顶到上限。
 
 ## 10. 常见问题
 

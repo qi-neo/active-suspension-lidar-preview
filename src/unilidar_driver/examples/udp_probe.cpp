@@ -104,10 +104,12 @@ int main(int argc, char** argv) {
 
   UdpReceiver rx;
   std::string err;
-  if (!rx.open(opt.port, opt.ip, opt.timeout_ms, err)) {
+  if (!rx.open(opt.port, opt.ip, opt.timeout_ms, kDefaultRecvBufBytes, err)) {
     std::fprintf(stderr, "UDP 打开失败: %s\n", err.c_str());
     return 1;
   }
+  std::printf("SO_RCVBUF 请求 %d 字节，实际生效 %d 字节\n\n", kDefaultRecvBufBytes,
+              rx.recvBufBytes());
 
   PacketParser parser;
   std::ofstream dump;
@@ -173,6 +175,8 @@ int main(int argc, char** argv) {
   std::printf("校验失败 帧尾     %lu\n", static_cast<unsigned long>(st.bad_tail));
   std::printf("长度字段越界      %lu\n", static_cast<unsigned long>(st.bad_size));
   std::printf("序号缺口          %lu\n", static_cast<unsigned long>(st.seq_gaps));
+  std::printf("重复包            %lu\n", static_cast<unsigned long>(st.duplicates));
+  std::printf("乱序包            %lu\n", static_cast<unsigned long>(st.out_of_order));
 
   std::printf("\nUDP 包长分布（雷达通常一个 UDP 包就是一整报文）:\n");
   if (datagram_sizes.empty()) std::printf("  （没有收到任何数据）\n");
@@ -197,14 +201,16 @@ int main(int argc, char** argv) {
   std::printf("\n本驱动按字段实算：点云整包 %zu 字节，IMU 整包 %zu 字节\n", kPointPacketSize,
               kImuPacketSize);
 
+  // 退出码约定（脚本/CI 依赖这一点）：只要在 --seconds 内一个 UDP 包都没收到，
+  // 就必须返回非 0，否则"端口配错、网线没插"会被误判成驱动正常。
   if (datagrams == 0) {
-    std::printf("\n结论：没收到任何 UDP 数据。请检查本机 IP、端口与雷达的目标地址是否对应，\n"
-                "     以及防火墙。可先去掉 --ip 让本机监听所有网卡再试。\n");
+    std::printf("\n结论：没收到任何 UDP 数据（退出码 1）。请检查本机 IP、端口与雷达的目标"
+                "地址是否对应，\n     以及防火墙。可先去掉 --ip 让本机监听所有网卡再试。\n");
     return 1;
   }
   if (frames == 0) {
-    std::printf("\n结论：收到了数据但一帧都没解出。CRC 次数高多半是整包长度与本驱动预期\n"
-                "     不一致（报文被按错误长度切开），或对面不是宇树雷达。\n");
+    std::printf("\n结论：收到了数据但一帧都没解出（退出码 1）。CRC 次数高多半是整包长度与"
+                "本驱动预期\n     不一致（报文被按错误长度切开），或对面不是宇树雷达。\n");
     return 1;
   }
   return 0;

@@ -1,8 +1,8 @@
 # P0 · 主控 + 执行一体化板 / Main Control & Actuation Board
 
-把确定性的 **200 Hz 舵机控制** 与 **4 路舵机总线** 从香橙派（Linux，非硬实时）搬到一颗 MCU 上，并内置**硬件急停/看门狗**。直接消除 `command_sink` 的串口阻塞，并把 `safety_state_machine` 的 Emergency 分支做成硅级 fail-safe。
+把确定性的 **200 Hz 舵机控制** 与 **4 路 PWM 舵机输出** 从香橙派（Linux，非硬实时）搬到一颗 MCU 上，并内置**硬件急停/看门狗**。直接消除 `command_sink` 的串口阻塞，并把 `safety_state_machine` 的 Emergency 分支做成硅级 fail-safe。
 
-> 状态：设计文档（BOM 见 [`bom.md`](bom.md)，框图见 [`schematic.svg`](schematic.svg)）+ **已生成可交付工程**（[`kicad/`](kicad/) KiCad v8 工程、[`easyeda/`](easyeda/) EasyEDA 工程、[`connections.md`](kicad/connections.md) 网络表、[`mcu_pin_assignment.md`](kicad/mcu_pin_assignment.md) 引脚分配）。网表已通过一致性校验（39 网络 / 34 元件 / 0 引脚冲突）。
+> 状态：设计文档（BOM 见 [`bom.md`](bom.md)，框图见 [`schematic.svg`](schematic.svg)）+ **已生成可交付工程**（[`kicad/`](kicad/) KiCad v8 工程、[`easyeda/`](easyeda/) EasyEDA 工程、[`connections.md`](kicad/connections.md) 网络表、[`mcu_pin_assignment.md`](kicad/mcu_pin_assignment.md) 引脚分配）。网表已通过一致性校验（27 网络 / 34 元件 / 0 引脚冲突）。
 
 ## 1. 为什么是这块板（对齐代码痛点）
 
@@ -35,7 +35,7 @@
 | 主控 MCU | STM32G474 (Cortex-M4 + FPU, 170 MHz) | 硬件 FPU 跑 LQI/PD；高分辨率定时器做确定性环；多 USART |
 | 数字隔离器 | Si8640 / ADuM1400 | 香橙派↔MCU uart 电气隔离，抗舵机噪声 |
 | 舵机驱动 | **MCU 定时器 PWM 直驱** + 缓冲/保护 | 4 路独立 PWM，见 4.2；（**RDS3115 为 PWM 舵机，非总线舵机**） |
-| PWM 输出保护 | 串阻 + TVS + 可选 74HC 缓冲 | 舵机线较长时抑制振铃与 ESD |
+| PWM 输出保护 | 串阻 + TVS + 可选 74HCT 缓冲 | 舵机线较长时抑制振铃与 ESD |
 | 舵机电源轨 | 5 V / 6.8 V，**堵转 2.5 A/路** | 四路同动需 ≥10 A，线径与压降要算 |
 | 电源 | 由 [`power-emc-board`](../power-emc-board/) 供 3.3V/5V/舵机轨 | 本板只做负载侧稳压与去耦 |
 | 急停 MOSFET | AO4407 / IRF9xxx + 栅极驱动 | 切断舵机电源，低边或高边开关 |
@@ -93,11 +93,11 @@
 - 确定性：控制环用 MCU 定时器触发（如 200 Hz），不走 RTOS 非实时任务；关键路径禁用中断抢占。
 - 隔离：香橙派侧与舵机/功率侧 galvanic isolation；逻辑地、功率地、屏蔽地单点连接。
 - EMI：舵机电缆用屏蔽线 + 磁珠；板上舵机电源铺铜加过孔；晶振/模拟区远离功率。
-- 调试：留 SWD 口 + 逻辑分析仪测试点（UART/方向脚）。
+- 调试：留 SWD 口 + 逻辑分析仪测试点（UART/PWM）。
 
 ## 7. 打样与测试清单
 
-- [ ] KiCad 工程 + DRC 通过
+- [ ] KiCad 工程本地打开 + DRC 通过（生成环境无 KiCad，待本地执行）
 - [ ] 焊接 MCU + 隔离器 + PWM 输出通路，单独上电测各路电源纹波
 - [ ] 4 路 PWM 空载验证（示波器看 500/1500/2500 μs 三点，频率 50 Hz）
 - [ ] MCU 解析 `0xAA55` 帧（用 PC 串口发 0x10/0x11/0x12，验证 CRC 复算与响应）
@@ -116,7 +116,7 @@
 | `kicad/P0_main_control.kicad_pro` | KiCad v8 工程文件 |
 | `kicad/P0_main_control.kicad_sch` | 原理图（34 元件，以网络标签连线） |
 | `kicad/P0_main_control.kicad_pcb` | PCB（已放置封装、未布线，含板框） |
-| `kicad/P0lib.kicad_sym` | 自包含符号库（MCU/MAX485/隔离器/LDO/PMOS/看门狗等） |
+| `kicad/P0lib.kicad_sym` | 自包含符号库（MCU/隔离器/LDO/PMOS/看门狗/连接器等） |
 | `kicad/sym-lib-table` · `fp-lib-table` | 库表（`${KIPRJMOD}` 相对路径） |
 | `kicad/P0_main_control.net` | 网表（KiCad 格式，可导入 PCB） |
 | `kicad/bom.csv` | 物料清单（含 LCSC 参考编码） |

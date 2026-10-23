@@ -17,6 +17,29 @@ struct PointXYZI {
   float intensity{0.f};
 };
 
+// 带逐点时间与环号的点。字段取名与 ROS PointCloud2 的字段名一致。
+//
+// time：绝对时间（Unix 秒）= 该帧时间戳 + 该点在报文内的相对偏移。
+//   相对偏移按官方 parseFromPacketToPointCloud 的语义取 j * time_increment
+//   （从 0 起、每处理一个点加一次，含被剔除的无效点），推导见 frame_decoder.cpp。
+//   用 float 是配合 ROS 的 FLOAT32 字段：1.7e9 秒附近量化步长约 256 ns，
+//   对 7.7 µs 量级的点间步长（官方示例数据的实测值）足够。
+//   注意：不同报文重新从 0 起算相对偏移，跨包绝对时间由各包时间戳接续，
+//   不是"整圈内连续计数"。
+//
+// ring：该点所属扫描线在整圈中的序号，1 基。协议里一个点云报文就是一条
+//   扫描线（官方默认 cloud_scan_num = 18 条拼成一圈），单包内没有"第几条线"
+//   字段，所以由调用方按拼帧顺序传入；不传时默认 1，与官方参考实现
+//   parseFromPacketToPointCloud 里 point3d.ring = 1 的行为一致。
+struct PointXYZIT {
+  float x{0.f};
+  float y{0.f};
+  float z{0.f};
+  float intensity{0.f};
+  float time{0.f};
+  std::uint16_t ring{1};
+};
+
 // 固件里四元数分量的排列没有公开文档，官方 ROS2 包自身也不一致：
 // Imu 消息按 x,y,z,w 填，而 TF 广播按 w,x,y,z 填。所以做成可配，由实测确定。
 enum class QuatOrder {
@@ -54,6 +77,9 @@ struct DecodeStats {
   std::uint64_t size_mismatch{0};       // 整包长度不足以读到所需字段
   std::uint64_t size_hint{0};           // 整包长度与本驱动预期值不同，提示核对固件
   std::uint64_t short_reads{0};         // 包比预期短，短于部分按零处理
+  // 报文的 time_increment 非正或非有限，逐点时间退化为帧时间戳本身
+  // （仍按官方公式算，只是步长为 0）。只在带 time/ring 的解码路径里计数。
+  std::uint64_t time_increment_invalid{0};
 };
 
 // 把原始四元数按给定顺序整理成 x, y, z, w
@@ -64,6 +90,14 @@ void resolveQuaternion(const float raw[4], QuatOrder order, float out[4]);
 bool decodePointCloud(const std::vector<std::uint8_t>& frame, const DecodeParams& params,
                       double now, std::vector<PointXYZI>& out, double& out_stamp,
                       DecodeStats& stats);
+
+// 同上，但额外输出逐点绝对时间 time 与环号 ring（见 PointXYZIT 的注释）。
+// ring 为这条扫描线在整圈中的 1 基序号，由调用方（节点按拼帧顺序）给出；
+// 默认 1 与官方参考实现里 point3d.ring = 1 的语义一致。
+// 该重载与上面的旧签名互不影响，旧路径（xyz + intensity）保持原样。
+bool decodePointCloud(const std::vector<std::uint8_t>& frame, const DecodeParams& params,
+                      double now, std::vector<PointXYZIT>& out, double& out_stamp,
+                      DecodeStats& stats, std::uint16_t ring = 1);
 
 // 解码 IMU 包
 bool decodeImu(const std::vector<std::uint8_t>& frame, const DecodeParams& params, double now,

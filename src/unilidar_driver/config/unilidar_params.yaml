@@ -17,7 +17,8 @@ unilidar_driver_node:
 
     # ---- 点云 ----
     # 多少条扫描线合成一帧点云。雷达约 180Hz 出扫描线，
-    # 18 条约合 10Hz 的点云，与 v2 预瞄节点的输入节奏匹配
+    # 18 条约合 10Hz 的点云，与 v2 预瞄节点的输入节奏匹配。
+    # 点云逐点 ring 字段的取值就是 1..cloud_scan_num（1 基线号）。
     cloud_scan_num: 18
     range_min: 0.0              # 有效最近距离 m
     range_max: 100.0            # 有效最远距离 m
@@ -37,3 +38,10 @@ unilidar_driver_node:
     poll_period_ms: 2           # 轮询收包的周期
     recv_timeout_ms: 1          # 单次 recv 超时
     diag_period_s: 5.0          # 诊断日志周期
+
+    # ---- 收包缓冲 ----
+    # 请求的 SO_RCVBUF 字节数，0 表示沿用系统默认。雷达约 180 KB/s，
+    # 内核默认 rmem 只有约 200 KB，调度抖动时会溢出丢包，所以默认请求 8 MiB。
+    # 注意：Linux 会按 net.core.rmem_max 裁剪并把请求值翻倍，诊断日志里的
+    # "SO_RCVBUF 实际 ... 字节" 才是生效值；若序号缺口持续增长就先调大它。
+    recv_buf_bytes: 8388608

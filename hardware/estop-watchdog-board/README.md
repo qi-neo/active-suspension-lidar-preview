@@ -1,4 +1,4 @@
-# P1 · 硬件急停 / 看门狗板 / E-Stop & Watchdog Board
+# P2 · 硬件急停 / 看门狗板 / E-Stop & Watchdog Board
 
 把 `safety_state_machine` 的 **Emergency 分支做成硅级 fail-safe**：即使 香橙派 死机、MCU 固件跑飞、或控制线程饿死，也能在**硬件层面**切断舵机动力并回中。软件安全判据不可用时，这是最后一道防线。
 

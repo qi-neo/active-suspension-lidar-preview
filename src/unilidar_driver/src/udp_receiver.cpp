@@ -14,7 +14,7 @@ namespace unilidar_driver {
 UdpReceiver::~UdpReceiver() { close(); }
 
 bool UdpReceiver::open(unsigned short local_port, const std::string& local_ip,
-                       int recv_timeout_ms, std::string& err) {
+                       int recv_timeout_ms, int recv_buf_bytes, std::string& err) {
   close();
 
   fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -26,6 +26,23 @@ bool UdpReceiver::open(unsigned short local_port, const std::string& local_ip,
 
   const int reuse = 1;
   ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  // 接收缓冲要在 bind 之前设好，避免 bind 之后到首次 recvfrom 之间到的包
+  // 用默认（偏小）的缓冲接。setsockopt 失败不致命：可能没有权限或超出
+  // 系统上限，此时仍按内核允许的值收包，实际值由下面的 getsockopt 读出。
+  if (recv_buf_bytes > 0) {
+    const int want = recv_buf_bytes;
+    ::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &want, sizeof(want));
+  }
+  {
+    // Linux 会把 SO_RCVBUF 的请求值翻倍，并受 net.core.rmem_max 裁剪，
+    // 所以日志里必须打印这个读回值而不是请求值，否则排查丢包时会误判。
+    int actual = 0;
+    socklen_t actual_len = sizeof(actual);
+    if (::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &actual, &actual_len) == 0) {
+      recv_buf_bytes_ = actual;
+    }
+  }
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -64,6 +81,7 @@ void UdpReceiver::close() {
     ::close(fd_);
     fd_ = -1;
   }
+  recv_buf_bytes_ = 0;
 }
 
 int UdpReceiver::receive(std::uint8_t* buf, std::size_t cap, std::string& err,

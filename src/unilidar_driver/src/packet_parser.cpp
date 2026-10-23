@@ -12,6 +12,7 @@ PacketParser::PacketParser(std::size_t max_packet, std::size_t max_buffered)
 
 void PacketParser::reset() {
   buf_.clear();
+  seq_state_.clear();
   stats_ = ParseStats{};
 }
 
@@ -116,21 +117,41 @@ PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out
 
     // 序号连续性：只在同一种报文类型之间比较才有意义，
     // 点云与 IMU 各自有一套递增序号，混在一起比会一直误报。
+    //
+    // 三类异常分开统计，含义不重叠：
+    //   seq == last          -> 重复包（重传/回环），整包丢弃，不交给解码层；
+    //   seq  > last + 1      -> 序号缺口，中间可能丢了包（seq_gaps 语义保持不变）；
+    //   seq  < last          -> 乱序，包仍然交付，但顺序不可信（out_of_order）。
     DataInfo info;
     std::memcpy(&info, frame + kHeaderSize, sizeof(DataInfo));
-    if (stats_.have_last_seq && head.packet_type == stats_.last_type) {
-      const std::uint32_t expected = stats_.last_seq + 1;
-      if (info.seq != expected) {
-        if (info.seq > expected) {
-          stats_.seq_gaps++;
-        } else {
-          stats_.seq_discontinuity++;
-        }
+    SeqState& seq_state = seq_state_[head.packet_type];
+    bool duplicate = false;
+    if (seq_state.have_last) {
+      // 用无符号回绕差值判断前后，避免 seq 从 0xFFFFFFFF 回到 0 时误报。
+      // delta < 2^31 视为「向前」（含正常 +1）；否则视为「倒退」。
+      const std::uint32_t delta = info.seq - seq_state.last;
+      if (delta == 0) {
+        duplicate = true;
+        stats_.duplicates++;
+      } else if (delta < 0x80000000u && delta > 1) {
+        stats_.seq_gaps++;
+      } else if (delta >= 0x80000000u) {
+        stats_.out_of_order++;
       }
+      // delta == 1 是正常递增，无需计数
     }
-    stats_.last_seq = info.seq;
-    stats_.last_type = head.packet_type;
-    stats_.have_last_seq = true;
+    // 重复包也更新 last：值相同，无副作用；后续包仍以它作为比较基准。
+    seq_state.have_last = true;
+    seq_state.last = info.seq;
+
+    if (duplicate) {
+      // CRC 与帧尾都已校验通过，边界可信，可以直接跳过这一整包。
+      // 重复包不增加 frames_ok，也不能混进点云（否则同一扫描线被计两次）。
+      stats_.resync_bytes += pos;  // 帧头之前若还有垃圾字节，仍按重同步计
+      buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(pos + frame_len));
+      pos = 0;
+      continue;
+    }
 
     // 帧头之前的字节都是被丢掉的垃圾，成功路径也要计进去，否则统计会漏
     stats_.resync_bytes += pos;

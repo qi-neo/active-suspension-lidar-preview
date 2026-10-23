@@ -15,6 +15,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/point_field.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -49,7 +50,7 @@ private:
     declareParams();
 
     std::string err;
-    if (!rx_.open(local_port_, local_ip_, recv_timeout_ms_, err)) {
+    if (!rx_.open(local_port_, local_ip_, recv_timeout_ms_, recv_buf_bytes_, err)) {
       RCLCPP_FATAL(get_logger(), "UDP 打开失败：%s", err.c_str());
       throw std::runtime_error("UDP 打开失败");
     }
@@ -75,6 +76,22 @@ private:
                 local_ip_.empty() ? "0.0.0.0" : local_ip_.c_str(), local_port_,
                 cloud_topic_.c_str(), cloud_frame_.c_str(), cloud_scan_num_,
                 imu_topic_.c_str(), imu_frame_.c_str(), quat_order_str_.c_str());
+    RCLCPP_INFO(get_logger(),
+                "收包缓冲 SO_RCVBUF 请求 %d 字节，内核实际生效 %d 字节"
+                "（Linux 会翻倍并受 net.core.rmem_max 裁剪）",
+                recv_buf_bytes_, rx_.recvBufBytes());
+  }
+
+  // 参数非法时不是「悄悄改成一个能跑的值」：静默回退会让用户以为配置生效了，
+  // 实际行为与配置不符，排障时极难发现。这里一律 FATAL 打印后抛异常，
+  // 由 main 捕获并以非 0 退出码结束进程。
+  [[noreturn]] void fatalParam(const std::string& msg) {
+    RCLCPP_FATAL(get_logger(), "参数非法：%s", msg.c_str());
+    throw std::runtime_error("参数非法：" + msg);
+  }
+
+  void checkParam(bool ok, const std::string& msg) {
+    if (!ok) fatalParam(msg);
   }
 
   void declareParams() {
@@ -100,12 +117,24 @@ private:
     poll_period_ms_ = declare_parameter<int>("poll_period_ms", 2);
     recv_timeout_ms_ = declare_parameter<int>("recv_timeout_ms", 1);
     diag_period_s_ = declare_parameter<double>("diag_period_s", 5.0);
+    // 雷达约 180 KB/s，内核默认 rmem（约 200 KB）在调度抖动时会溢出丢包。
+    // 0 表示不设置、沿用系统默认；默认请求 8 MiB。
+    recv_buf_bytes_ = declare_parameter<int>("recv_buf_bytes", kDefaultRecvBufBytes);
 
-    if (cloud_scan_num_ < 1) {
-      RCLCPP_WARN(get_logger(), "cloud_scan_num=%d 不合法，已改为 1", cloud_scan_num_);
-      cloud_scan_num_ = 1;
-    }
-    if (poll_period_ms_ < 1) poll_period_ms_ = 1;
+    checkParam(local_port_ >= 1 && local_port_ <= 65535,
+               "local_port=" + std::to_string(local_port_) + "，应在 1..65535 之间");
+    checkParam(quat_order_str_ == "wxyz" || quat_order_str_ == "xyzw",
+               "quaternion_order=\"" + quat_order_str_ + "\"，只接受 wxyz 或 xyzw");
+    checkParam(cloud_scan_num_ >= 1 && cloud_scan_num_ <= 65535,
+               "cloud_scan_num=" + std::to_string(cloud_scan_num_) +
+                   "，应在 1..65535 之间（点云 ring 字段为 UINT16，上限 65535）");
+    checkParam(poll_period_ms_ >= 1,
+               "poll_period_ms=" + std::to_string(poll_period_ms_) + "，应 >= 1");
+    checkParam(range_min_ < range_max_,
+               "range_min=" + std::to_string(range_min_) + " 应小于 range_max=" +
+                   std::to_string(range_max_));
+    checkParam(recv_buf_bytes_ >= 0,
+               "recv_buf_bytes=" + std::to_string(recv_buf_bytes_) + "，应 >= 0（0 表示用系统默认）");
 
     params_.quat_order = (quat_order_str_ == "xyzw") ? QuatOrder::kXyzw : QuatOrder::kWxyz;
     params_.use_system_timestamp = use_system_timestamp_;
@@ -181,9 +210,13 @@ private:
   }
 
   void handleCloud(const std::vector<std::uint8_t>& frame) {
-    std::vector<PointXYZI> pts;
+    // ring = 这条扫描线在整圈中的序号（1 基，与官方 SDK 的 ring 从 1 起算一致）。
+    // 协议里一个点云报文就是一条扫描线，单包内没有"第几条线"字段（官方单包内
+    // 每点 ring 写死为 1），只能由拼帧顺序给出：本帧第 k 条线（k 从 0 起）→ k+1。
+    std::vector<PointXYZIT> pts;
     double stamp = 0.0;
-    if (!decodePointCloud(frame, params_, wallNowSec(), pts, stamp, dstats_)) return;
+    const std::uint16_t ring = static_cast<std::uint16_t>(pending_scans_ + 1);
+    if (!decodePointCloud(frame, params_, wallNowSec(), pts, stamp, dstats_, ring)) return;
 
     if (pending_scans_ == 0) pending_stamp_ = stamp;
     pending_.insert(pending_.end(), pts.begin(), pts.end());
@@ -196,30 +229,63 @@ private:
     }
   }
 
-  void publishCloud(const std::vector<PointXYZI>& pts, double stamp) {
+  // PointCloud2 字段布局（point_step = 24）：
+  //   偏移 0   x          FLOAT32
+  //   偏移 4   y          FLOAT32
+  //   偏移 8   z          FLOAT32
+  //   偏移 12  intensity  FLOAT32
+  //   偏移 16  time       FLOAT32  绝对秒（帧时间戳 + 该点相对偏移）
+  //   偏移 20  ring       UINT16   该扫描线在整圈中的 1 基序号
+  //   偏移 22  2 字节 padding
+  // padding 不是可选的：环号只占 2 字节，若把 point_step 压成 22，下一个点的 x
+  // 就落在 2 mod 4 的地址上，任何按 float 读下一点的下游都会读到未对齐数据。
+  // 取 24（4 的倍数）后每点起点仍 4 字节对齐；下游按字段名/偏移读取，会跳过 padding。
+  static constexpr std::uint32_t kPointStep = 24;
+
+  void publishCloud(const std::vector<PointXYZIT>& pts, double stamp) {
     sensor_msgs::msg::PointCloud2 msg;
     msg.header.stamp = toRosTime(stamp);
     msg.header.frame_id = cloud_frame_;
     msg.height = 1;
     msg.width = static_cast<std::uint32_t>(pts.size());
-    msg.fields.resize(4);
-    const char* names[4] = {"x", "y", "z", "intensity"};
-    for (int i = 0; i < 4; ++i) {
-      msg.fields[static_cast<std::size_t>(i)].name = names[i];
-      msg.fields[static_cast<std::size_t>(i)].offset = static_cast<std::uint32_t>(i) * 4;
-      msg.fields[static_cast<std::size_t>(i)].datatype = sensor_msgs::msg::PointField::FLOAT32;
-      msg.fields[static_cast<std::size_t>(i)].count = 1;
-    }
-    msg.point_step = 16;
-    msg.row_step = msg.point_step * msg.width;
-    msg.is_dense = false;  // 已剔除无效点，下标不再连续
-    msg.data.resize(msg.row_step);
 
+    struct FieldSpec {
+      const char* name;
+      std::uint32_t offset;
+      std::uint8_t datatype;
+    };
+    const FieldSpec specs[] = {
+        {"x", 0, sensor_msgs::msg::PointField::FLOAT32},
+        {"y", 4, sensor_msgs::msg::PointField::FLOAT32},
+        {"z", 8, sensor_msgs::msg::PointField::FLOAT32},
+        {"intensity", 12, sensor_msgs::msg::PointField::FLOAT32},
+        {"time", 16, sensor_msgs::msg::PointField::FLOAT32},
+        {"ring", 20, sensor_msgs::msg::PointField::UINT16},
+    };
+    constexpr std::size_t kFieldCount = sizeof(specs) / sizeof(specs[0]);
+    msg.fields.resize(kFieldCount);
+    for (std::size_t i = 0; i < kFieldCount; ++i) {
+      msg.fields[i].name = specs[i].name;
+      msg.fields[i].offset = specs[i].offset;
+      msg.fields[i].datatype = specs[i].datatype;
+      msg.fields[i].count = 1;
+    }
+
+    msg.point_step = kPointStep;
+    msg.row_step = kPointStep * msg.width;
+    msg.is_dense = false;  // 已剔除无效点，下标不再连续
+    msg.data.assign(static_cast<std::size_t>(msg.row_step), 0);  // padding 字节保持 0
+
+    // 逐字段 memcpy：msg.data 缓冲区本身不保证 4 字节对齐，不能直接按 float* 写。
     std::size_t off = 0;
-    for (const PointXYZI& p : pts) {
-      const float v[4] = {p.x, p.y, p.z, p.intensity};
-      std::memcpy(&msg.data[off], v, sizeof(v));
-      off += sizeof(v);
+    for (const PointXYZIT& p : pts) {
+      std::memcpy(&msg.data[off + 0], &p.x, sizeof(p.x));
+      std::memcpy(&msg.data[off + 4], &p.y, sizeof(p.y));
+      std::memcpy(&msg.data[off + 8], &p.z, sizeof(p.z));
+      std::memcpy(&msg.data[off + 12], &p.intensity, sizeof(p.intensity));
+      std::memcpy(&msg.data[off + 16], &p.time, sizeof(p.time));
+      std::memcpy(&msg.data[off + 20], &p.ring, sizeof(p.ring));
+      off += kPointStep;
     }
 
     cloud_pub_->publish(msg);
@@ -252,10 +318,13 @@ private:
   void logDiagnostics() {
     const ParseStats& ps = parser_.stats();
     RCLCPP_INFO(get_logger(),
-                "收到 %lu 帧 序号缺口 %lu | 点云已发 %lu（累计 %lu 点）IMU 已发 %lu | "
-                "校验错 CRC %lu 帧尾 %lu 长度 %lu | 重同步 %lu 字节 | 长度不符提示 %lu",
+                "收到 %lu 帧 序号缺口 %lu 重复包 %lu 乱序 %lu | 点云已发 %lu（累计 %lu 点）"
+                "IMU 已发 %lu | 校验错 CRC %lu 帧尾 %lu 长度 %lu | 重同步 %lu 字节 | "
+                "长度不符提示 %lu | 逐点时间步长异常 %lu | SO_RCVBUF 实际 %d 字节",
                 static_cast<unsigned long>(ps.frames_ok),
                 static_cast<unsigned long>(ps.seq_gaps),
+                static_cast<unsigned long>(ps.duplicates),
+                static_cast<unsigned long>(ps.out_of_order),
                 static_cast<unsigned long>(clouds_published_),
                 static_cast<unsigned long>(dstats_.points_out),
                 static_cast<unsigned long>(imus_published_),
@@ -263,10 +332,24 @@ private:
                 static_cast<unsigned long>(ps.bad_tail),
                 static_cast<unsigned long>(ps.bad_size),
                 static_cast<unsigned long>(ps.resync_bytes),
-                static_cast<unsigned long>(dstats_.size_hint));
+                static_cast<unsigned long>(dstats_.size_hint),
+                static_cast<unsigned long>(dstats_.time_increment_invalid),
+                rx_.recvBufBytes());
     if (filtered_ > 0) {
       RCLCPP_INFO(get_logger(), "已丢弃来自非指定来源的数据 %lu 条",
                   static_cast<unsigned long>(filtered_));
+    }
+
+    // 累计值每轮都打印，告警只看「新增」缺口，避免刷屏。
+    if (ps.seq_gaps > last_seq_gaps_) {
+      RCLCPP_WARN(get_logger(),
+                  "本周期新增序号缺口 %lu（累计 %lu）：可能正在丢包。优先确认收包缓冲是否够大——"
+                  "当前 SO_RCVBUF 实际生效 %d 字节（请求 recv_buf_bytes=%d），"
+                  "可调大到 16 MiB / 32 MiB 后重启；其次检查 poll_period_ms 是否被调度延迟、"
+                  "本机 CPU 是否过载。若缺口只在启动瞬间出现一次，通常是进程启动晚于雷达。",
+                  static_cast<unsigned long>(ps.seq_gaps - last_seq_gaps_),
+                  static_cast<unsigned long>(ps.seq_gaps), rx_.recvBufBytes(), recv_buf_bytes_);
+      last_seq_gaps_ = ps.seq_gaps;
     }
 
     if (ps.frames_ok == 0 && ps.bad_crc + ps.bad_size + ps.bad_tail > 0) {
@@ -281,6 +364,15 @@ private:
                   "整包长度与本驱动预期不同（累计 %lu 次）。若点云形状明显不对，"
                   "请把 udp_probe 报告的实际长度反馈回来核对固件版本。",
                   static_cast<unsigned long>(dstats_.size_hint));
+    }
+    // time_increment 是逐点时间唯一的来源；它无效时 time 退化成帧时间戳，
+    // 去畸变会算成"整条线同一时刻"，必须让用户看见。
+    if (dstats_.time_increment_invalid > 0 && !warned_time_increment_) {
+      warned_time_increment_ = true;
+      RCLCPP_WARN(get_logger(),
+                  "报文里的 time_increment 非正或非有限（累计 %lu 次），逐点 time 会退化为"
+                  "帧时间戳本身。要用逐点时间去畸变，先核对固件输出的该字段。",
+                  static_cast<unsigned long>(dstats_.time_increment_invalid));
     }
   }
 
@@ -301,6 +393,7 @@ private:
   bool publish_tf_{true};
   int poll_period_ms_{2};
   int recv_timeout_ms_{1};
+  int recv_buf_bytes_{kDefaultRecvBufBytes};
   double diag_period_s_{5.0};
 
   DecodeParams params_;
@@ -314,21 +407,27 @@ private:
   rclcpp::TimerBase::SharedPtr poll_timer_;
   rclcpp::TimerBase::SharedPtr diag_timer_;
 
-  std::vector<PointXYZI> pending_;
+  std::vector<PointXYZIT> pending_;
   std::size_t pending_scans_{0};
   double pending_stamp_{0.0};
   std::uint64_t clouds_published_{0};
   std::uint64_t imus_published_{0};
   std::uint64_t filtered_{0};
+  std::uint64_t last_seq_gaps_{0};  // 上一轮诊断时的 seq_gaps，用于只报新增缺口
+  bool warned_time_increment_{false};  // time_increment 无效只告警一次，避免刷屏
 };
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
+  int rc = 0;
   try {
     rclcpp::spin(std::make_shared<UnilidarDriverNode>());
   } catch (const std::exception& e) {
+    // 参数校验失败等致命错误必须让进程以非 0 退出，否则启动脚本/CI
+    // 只看退出码时会误以为驱动正常起来了。
     std::fprintf(stderr, "驱动退出：%s\n", e.what());
+    rc = 1;
   }
   rclcpp::shutdown();
-  return 0;
+  return rc;
 }

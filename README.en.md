@@ -170,7 +170,7 @@ active-suspension-lidar-preview/
 
 ### unilidar_driver — Unitree L1 LiDAR driver
 
-Point cloud and IMU used to depend on the official `unitree_lidar_sdk` prebuilt
+Point cloud and IMU used to depend on the official `libunitree_lidar_sdk.a` prebuilt
 static library, which hides the parsing logic and cannot be modified. This
 package reimplements the Unitree L1 UDP packet parsing and geometry conversion
 from scratch, publishing standard `/unilidar/cloud` (PointCloud2) and
@@ -344,7 +344,7 @@ mkdir -p ~/ws/src && cd ~/ws/src
 git clone https://github.com/qi-neo/active-suspension-lidar-preview
 # To compare against the official node, also clone the official SDK
 # (the in-repo driver does not depend on it)
-# git clone https://github.com/unitreerobotics/unitree_lidar_sdk
+# git clone https://github.com/unitreerobotics/unilidar_sdk
 # The driver also has a standalone repository (with a write-up of the driver design);
 # the contents are identical, use whichever suits you:
 # git clone https://github.com/qi-neo/unilidar-driver
@@ -368,11 +368,12 @@ ros2 topic echo /suspension/road_profile --once
 ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```
 
-All three C++ packages ship offline checks that confirm the pipeline without any hardware:
+All three C++ packages (the historical `suspension_preview` aside) ship offline checks that confirm the pipeline without any hardware:
 
 ```bash
-ros2 run unilidar_driver decoder_selftest         # packet parsing, 63 checks
+ros2 run unilidar_driver decoder_selftest         # packet parsing, 135 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
+ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
 ros2 run suspension_control_v3 control_selftest    # control and safety logic, 443 checks
 ```
 

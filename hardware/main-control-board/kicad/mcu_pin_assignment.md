@@ -3,13 +3,13 @@
 | 引脚 | 名称(本工程) | 网络 | 功能说明 |
 |---|---|---|---|
 | 1 | VDD | 3V3 | 电源 |
-| 2 | PA0_TIM2_CH1 | SERVO3_PWM | 舵机总线 |
-| 8 | PA6_TIM3_CH1 | SERVO1_PWM | 舵机总线 |
-| 9 | PA7_TIM3_CH2 | SERVO2_PWM | 舵机总线 |
+| 2 | PA0_TIM2_CH1 | SERVO3_PWM | PWM 舵机信号（经串阻+TVS） |
+| 8 | PA6_TIM3_CH1 | SERVO1_PWM | PWM 舵机信号（经串阻+TVS） |
+| 9 | PA7_TIM3_CH2 | SERVO2_PWM | PWM 舵机信号（经串阻+TVS） |
 | 10 | PB0_ESTOP_GATE | ESTOP_GATE | 硬件急停/看门狗 |
 | 11 | PB1_WDI | WDI | 硬件急停/看门狗 |
 | 13 | VSS | GND | 电源 |
-| 29 | PA8_TIM1_CH1 | SERVO0_PWM | 舵机总线 |
+| 29 | PA8_TIM1_CH1 | SERVO0_PWM | PWM 舵机信号（经串阻+TVS） |
 | 30 | PA9_USART1_TX | USART1_TX | 香橙派隔离链路 / SWD |
 | 31 | PA10_USART1_RX | USART1_RX | 香橙派隔离链路 / SWD |
 | 34 | PA13_SWDIO | SWDIO | 香橙派隔离链路 / SWD |
