@@ -336,6 +336,69 @@ Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_
 `tf2_ros`. The `unilidar_driver` package additionally needs `tf2` and `tf2_ros`, and does **not**
 depend on the Unitree Lidar SDK.
 
+## Interface reference
+
+All interface contracts in one place. Most "only shows up on real hardware" bugs here trace back to a
+mismatch in an *implicit* agreement between the two ends: QoS, `frame_id`, units, or CRC coverage.
+
+**Layers**
+
+| Layer | Interface | Transport | Code |
+|-------|-----------|-----------|------|
+| Physical | LiDAR uplink | UDP (`local_port`, default **6201**) | `unilidar_driver/udp_receiver.hpp` |
+| Physical | Actuator downlink | UART (default `/dev/ttyS0` @ 115200, up to 921600) | `suspension_preview_v2/serial_port.hpp` |
+| Comms | Inter-node data | ROS2 topics + custom messages + QoS | see below |
+| Abstract | Actuator driver | `ISuspensionDriver` | `suspension_preview_v2/suspension_driver.hpp` |
+| Abstract | Command channel | `ICommandSink` | `suspension_control_v3/command_sink.hpp` |
+| Abstract | Profile output | `IProfileSink` | `suspension_preview_v2/profile_sink.hpp` |
+
+**Topics (defaults)**
+
+| Topic | Type | Direction | QoS | Parameter |
+|-------|------|-----------|-----|-----------|
+| `/unilidar/cloud` | `sensor_msgs/PointCloud2` | driver → preview | SensorDataQoS | `cloud_topic` |
+| `/unilidar/imu` | `sensor_msgs/Imu` | driver → preview / control / calibration | SensorDataQoS | `imu_topic` |
+| `/suspension/road_profile` | `msg/RoadProfile` | preview → control | SensorDataQoS | `publish_topic` / `profile_topic` |
+| `/suspension/road_obstacles` | `msg/RoadObstacles` | preview → control | depth 10 | `obstacles_topic` |
+| `/suspension/control_status` | `msg/ControlStatus` | control → monitoring | depth 10 | `status_topic` |
+| `/odom` | `nav_msgs/Odometry` | odometry → control | SensorDataQoS | `speed_topic` |
+| `/suspension/actuator_position` | `std_msgs/Int32MultiArray` | feedback → control | SensorDataQoS | `actuator_position_topic` |
+| `/suspension/emergency_stop` | `std_msgs/Bool` | external → control + driver | depth 10 | fixed |
+| `/suspension/reset` | `std_msgs/Bool` | external → control | depth 10 | fixed |
+| `/suspension/mode` | `std_msgs/Int32` | external → driver node | depth 10 | fixed |
+| `/suspension/target_height` | `std_msgs/Int32MultiArray` | external → driver node | depth 10 | fixed |
+
+> QoS is part of the contract, not an option. The LiDAR publishes `BEST_EFFORT`, so every
+> subscriber downstream must use `rclcpp::SensorDataQoS()`. With the default `RELIABLE` the symptom
+> is "the topic has data but the callback never fires" — the most common integration failure here.
+
+**Serial frame (0xAA55, little-endian)**
+
+```
+offset:  0      1      2     3     4-5        6 .. 6+2N-1      last 2 bytes
+        ┌──────┬──────┬─────┬─────┬──────────┬───────────────┬────────────┐
+        │ 0xAA │ 0x55 │ id  │ seq │ count    │ N x int16     │ CRC16      │
+        └──────┴──────┴─────┴─────┴──────────┴───────────────┴────────────┘
+        └────────── CRC16 covers 6 + 2N bytes ──────────┘
+```
+
+CRC16-CCITT-FALSE (poly `0x1021`, init `0xFFFF`) covers **header through payload end, excluding the
+CRC field itself**. Payload unit is **mm** (int16); invalid samples are `0x7FFF`; payload is capped at
+`kMaxPayloadPoints = 2048`. Command ids: `0x01` left track, `0x02` right track, `0x10` set mode,
+`0x11` set target height, `0x12` emergency stop.
+
+**Contracts**
+
+| Item | Convention |
+|------|------------|
+| Length unit | ROS messages use **metres** (float); serial frames use **millimetres** (int16) |
+| Wheel order | `0=front-left 1=front-right 2=rear-left 3=rear-right` |
+| Height reference | relative to the calibration zero; **positive = raise** |
+| Invalid sample | `NaN` + mask `kInvalid=0` internally; `0x7FFF` on the wire |
+| Attitude sign | `roll>0` = right side down; `pitch>0` = front down; positive output raises that corner |
+| Frames | `unilidar_lidar` / `unilidar_imu` → `base_link`; control validates `header.frame_id` against `expected_frame` |
+| Quaternion | `sensor_msgs/Imu` convention (x fwd / y left / z up); `quaternion_order` defaults to `xyzw`; **must be unit** |
+
 ## Key parameters
 
 | Parameter | v2 | Note (vs v1) |

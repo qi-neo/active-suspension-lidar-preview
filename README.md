@@ -41,13 +41,14 @@
     - [suspension_preview_v2](#suspension_preview_v2--接口化版本)
     - [suspension_control_v3](#suspension_control_v3--闭环控制与安全状态机)
     - [car_balancer](#car_balancer--早期姿态平衡包)
-6. [关键参数](#6-关键参数)
-7. [实测结果](#7-实测结果)
-8. [下行带宽](#8-下行带宽)
-9. [常见问题](#9-常见问题)
-10. [质量保障](#10-质量保障)
-11. [许可证](#11-许可证)
-12. [English Abstract](#12-english-abstract)
+6. [接口参考 / Interface Reference](#6-接口参考--interface-reference)
+7. [关键参数](#7-关键参数)
+8. [实测结果](#8-实测结果)
+9. [下行带宽](#9-下行带宽)
+10. [常见问题](#10-常见问题)
+11. [质量保障](#11-质量保障)
+12. [许可证](#12-许可证)
+13. [English Abstract](#13-english-abstract)
 
 ## 1. 项目简介
 
@@ -361,7 +362,154 @@ ros2 run car_balancer test_imu_node
 两个入口都无法运行，现已修复。另一条 `balancer_node` 指向的模块未随包提供，已移除该入口。
 问题记录见 `docs/review/01-code-review-v1.md`。
 
-## 6. 关键参数
+## 6. 接口参考 / Interface Reference
+
+本章汇总系统对外/对内的全部接口契约。**联调前请逐条对齐**——本项目多数"只有真机联调才暴露"的问题，根因都是接口两侧隐含约定不一致：QoS 不匹配、frame_id 不一致、单位不一致、CRC 覆盖范围不一致。
+
+### 6.1 接口分层
+
+| 层 | 接口 | 载体 | 代码位置 |
+|---|------|------|----------|
+| 物理 | 雷达数据上行 | UDP（`local_port` 默认 **6201**） | `unilidar_driver/udp_receiver.hpp` |
+| 物理 | 作动器下行 | 串口 UART（默认 `/dev/ttyS0` @ 115200，可配到 921600） | `suspension_preview_v2/serial_port.hpp` |
+| 通信 | 节点间数据 | ROS2 话题 + 自定义消息 + QoS 约定 | 见 6.2 / 6.3 |
+| 抽象 | 作动器驱动 | `ISuspensionDriver` | `suspension_preview_v2/suspension_driver.hpp` |
+| 抽象 | 命令通道 | `ICommandSink` | `suspension_control_v3/command_sink.hpp` |
+| 抽象 | 剖面输出 | `IProfileSink` | `suspension_preview_v2/profile_sink.hpp` |
+
+### 6.2 ROS2 话题接口
+
+| 话题（默认） | 消息类型 | 方向 | QoS | 配置参数 |
+|---|---|---|---|---|
+| `/unilidar/cloud` | `sensor_msgs/PointCloud2` | 驱动 → 预瞄 | SensorDataQoS | `cloud_topic` |
+| `/unilidar/imu` | `sensor_msgs/Imu` | 驱动 → 预瞄 / 控制 / 标定 | SensorDataQoS | `imu_topic` |
+| `/suspension/road_profile` | `msg/RoadProfile` | 预瞄 → 控制 | SensorDataQoS | `publish_topic` / `profile_topic` |
+| `/suspension/road_obstacles` | `msg/RoadObstacles` | 预瞄 → 控制 | depth 10 | `obstacles_topic` |
+| `/suspension/control_status` | `msg/ControlStatus` | 控制 → 监控 | depth 10 | `status_topic` |
+| `/odom` | `nav_msgs/Odometry` | 里程计 → 控制 | SensorDataQoS | `speed_topic` |
+| `/suspension/actuator_position` | `std_msgs/Int32MultiArray` | 位置反馈 → 控制 | SensorDataQoS | `actuator_position_topic` |
+| `/suspension/emergency_stop` | `std_msgs/Bool` | 外部 → 控制 + 驱动节点 | depth 10 | 固定，不可配 |
+| `/suspension/reset` | `std_msgs/Bool` | 外部 → 控制 | depth 10 | 固定，不可配 |
+| `/suspension/mode` | `std_msgs/Int32` | 外部 → 驱动节点 | depth 10 | 固定，不可配 |
+| `/suspension/target_height` | `std_msgs/Int32MultiArray` | 外部 → 驱动节点 | depth 10 | 固定，不可配 |
+
+> **QoS 是接口的一部分，不是可选项。** 雷达侧以 `BEST_EFFORT` 发布，下游（预瞄、控制）一律用 `rclcpp::SensorDataQoS()` 订阅。下游若误用默认 `RELIABLE`，症状是"明明 `ros2 topic echo` 有数据，节点回调却从不触发"——这是本项目最常见的接入故障。
+> 反过来，状态/命令类话题用 depth 10 的可靠队列：丢一帧状态无碍，丢一条急停命令不行。
+
+### 6.3 自定义消息
+
+| 消息 | 关键字段 | 用途 |
+|------|----------|------|
+| `RoadProfile.msg` | `header`、`spacing`、`wheel_dist`、`preview_dist`、`left/right_height[]`、`left/right_valid[]`、`quality` | 路面高程剖面，预瞄主输出 |
+| `Obstacle.msg` | `x_m`、`lateral_m`、`height_m`、`half_width_m` | 单个非地面障碍 |
+| `RoadObstacles.msg` | `header`、`Obstacle[] obstacles` | 语义预瞄输入（抑制该侧前馈） |
+| `ControlStatus.msg` | `state`、`mode`、`faults`、`commanded_mm[]`、`roll/pitch_deg`、`profile_quality`、`reject_reason`、`lookahead_m`、`feedforward_fir`、`saturated` / `rate_limited`、位置反馈组（`has_position_feedback` / `actual_mm` / `max_position_error_mm`）、诊断计数 | 闭环状态与联调诊断主出口 |
+
+`ControlStatus` 是**排障第一入口**：剖面被拒看 `reject_reason`，前馈取样看 `lookahead_m` + `sample_position_m` + `feedforward_fir`，行程不够看 `saturated` / `lqi_windup_clamped`，下行堵了看 `command_last_sent_age_ms` / `command_coalesced`。
+
+### 6.4 串口协议接口（0xAA55）
+
+帧格式（小端）：
+
+```
+偏移:  0      1      2     3     4-5        6 .. 6+2N-1      末尾 2 字节
+      ┌──────┬──────┬─────┬─────┬──────────┬───────────────┬────────────┐
+      │ 0xAA │ 0x55 │ id  │ seq │ count    │ N × int16     │ CRC16      │
+      │      │      │     │     │ (u16)    │ 负载 (mm)     │ (u16)      │
+      └──────┴──────┴─────┴─────┴──────────┴───────────────┴────────────┘
+      └──────────── CRC16 覆盖范围：6 + 2N 字节 ───────────┘
+```
+
+| 项 | 值 |
+|---|---|
+| 帧头 | `0xAA 0x55`（`kHead0/kHead1`） |
+| 帧头字节数 | 6（帧头 2 + id + seq + count 2） |
+| CRC | CRC16-CCITT-FALSE，poly `0x1021`，init `0xFFFF` |
+| CRC 覆盖范围 | **帧头（偏移 0）到负载末尾**，共 `6 + 2N` 字节，**不含 CRC 自身那两个字节** |
+| 负载单位 | 毫米（int16），无效点填 `0x7FFF` |
+| 单帧负载上限 | `kMaxPayloadPoints = 2048`（轮迹默认 100 格，留 20 倍余量） |
+
+命令 id：
+
+| id | 常量 | 含义 | 负载 |
+|---|---|------|------|
+| `0x01` | `kIdLaneLeft` | 左轮迹剖面 | N × int16 (mm) |
+| `0x02` | `kIdLaneRight` | 右轮迹剖面 | N × int16 (mm) |
+| `0x10` | `kIdSetMode` | 设置模式 | `SuspensionMode` |
+| `0x11` | `kIdSetTarget` | 设置目标高度 | 四轮高度 (mm) |
+| `0x12` | `kIdEStop` | 急停 | — |
+
+解码状态机（`DecodeStatus`，接收端必须按此分支）：
+
+| 状态 | 含义 | 接收端动作 |
+|---|---|---|
+| `kOk` | 完整帧且 CRC 通过 | 取帧，`consumed` 指向下一帧（支持粘包） |
+| `kNeedMore` | 半包/截断 | **保留数据等更多字节**，`consumed=0` |
+| `kNoHeader` | 找不到帧头 | 丢弃垃圾（末尾可能的半个帧头除外） |
+| `kBadLength` | `count` 超上限（被噪声改坏） | 跳过 **1 字节**继续重同步 |
+| `kBadCrc` | 帧完整但 CRC 不匹配 | 丢帧重同步 |
+
+### 6.5 软件抽象接口
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `IProfileSink` | `send(frame)` / `name()` | 一切"把剖面送出去"的实现（ROS 话题 / 串口 / 文件回放 / CAN）。`CompositeProfileSink` 可同时分发多个 |
+| `ISuspensionDriver` | `connect` / `set_mode` / `set_target_height(单轮 & 四轮)` / `emergency_stop` / `last_error` | 作动器驱动抽象；`SerialSuspensionDriver` 复用 6.4 帧格式 |
+| 〃 可选能力 | `has_position_feedback()` / `get_position()` | **非纯虚**，默认"不支持"——既有驱动不用改就能编译。有反馈才能做"指令 vs 实际"堵转校验 |
+| `ICommandSink` | `submit(cmd)` / `request_emergency_stop()` / `emergency_stop_delivered()` / `is_async()` / `flush(timeout)` / `stats()` | 把串口写移出控制线程 |
+
+命令通道两种实现：
+
+| 实现 | 行为 | 适用 |
+|---|---|---|
+| `make_direct_command_sink` | 同步，直接调驱动器 | 纯软件联调、既有测试 |
+| `make_async_command_sink` | 后台线程写，`submit()` 非阻塞只投递最新值（旧值被覆盖 = **coalescing**），急停走优先路径插队 | 实机 200 Hz 回路 |
+
+### 6.6 接口契约：单位、顺序、符号、无效值
+
+这几条是"接口两侧的隐含约定"，写错不会编译报错，只会让车莫名其妙地动：
+
+| 契约项 | 约定 |
+|---|---|
+| 长度单位 | ROS 消息用**米**（float）；串口帧用**毫米**（int16）。跨界必换 |
+| 四轮顺序 | `0=左前 1=右前 2=左后 3=右后`（`kFrontLeft/kFrontRight/kRearLeft/kRearRight`） |
+| 高度基准 | 相对标定零点，**正 = 升高** |
+| 无效值 | 内部 `NaN` + 掩码 `kInvalid=0`；串口 `0x7FFF` |
+| 掩码语义 | `0` 无效 / `1` 实测 / `2` 插值 / `3` 多帧融合（控制侧生成，**不回传串口**） |
+| 姿态符号 | `roll>0` 车身右侧下沉（修正=抬右压左）；`pitch>0` 前部下沉（修正=抬前压后）；输出正值=该角升高 |
+| 坐标系 | 雷达 `unilidar_lidar` / `unilidar_imu` → 车体 `base_link`；控制侧按 `expected_frame` 校验 `header.frame_id` |
+| 四元数 | 与 `sensor_msgs/Imu` 一致：x 前 / y 左 / z 上；`quaternion_order` 默认 `xyzw` |
+| 剖面时间 | `stamp_sec` 为采集时刻；使用前需按 `profile_age_s` 做帧龄补偿（见 6.7） |
+
+### 6.7 接口边界与易错点
+
+以下每条都对应代码里的一处**显式设计取舍**，注释即原因：
+
+1. **QoS 不匹配**：雷达 `BEST_EFFORT`，下游必须 `SensorDataQoS`，否则"有数据但收不到"。
+2. **frame_id 不一致**：v3 按 `header.frame_id == expected_frame` 校验剖面，不一致会被**静默拒收**；`RosTopicSink` 的坐标系以构造参数为准，不信任调用方传入的字符串。
+3. **CRC 覆盖范围**：必须两端一致（帧头→负载末尾，不含 CRC 自身）。代码里写死该范围，就是为了避免"编码端覆盖 A、解码端覆盖 B"这种只有真机联调才暴露的问题。
+4. **长度字段最易被噪声改坏**：`count` 是 u16，65535 点意味着解析器要等 131 KB 才肯判 CRC——一个坏字节就能让它永远停在中途，后续真帧全丢。所以设硬上限 2048，超限按坏帧处理并逐字节重同步。
+5. **半包与坏帧必须分开**：旧接口对两者都返回 `false + consumed=0`，接收端只能原地重试，一个坏帧就能堵死接收缓冲。
+6. **重同步单位是 1 字节，不是整帧**：伪帧头后面可能就藏着真帧头。
+7. **四元数必须是单位四元数**：非单位时 roll/pitch **都不自归一化**（`|q|=2` 时 `(0.3, 0.2)` 会变成 `(0.999, 0.918)`）；`asin` 入参需钳到 `[-1,1]`，否则一个 NaN 姿态会顺着 `isfinite` 检查污染整条链路。
+8. **有效性数组比高度数组短 → 整帧丢弃**：高度与掩码对不上说明发布方有 bug，截救不回来。
+9. **位置反馈"读失败" ≠ 堵转**：`get_position()` 返回 false 只表示"本拍无反馈"，不据此判故障，否则一次通信丢包就会误降级。
+10. **200 Hz 控制线程不能直接写串口**：一次写阻塞就顶住整个回路，控制律少算几拍、安全判据计时也被拖慢。"软件 200 Hz" ≠ "物理每 5 ms 算一次"。
+11. **帧龄补偿**：剖面锚定在采集时刻的车体原点，车在帧龄内已前进 `车速 × 帧龄`，取样位置必须把这个距离加回去，否则高速长帧龄时取到的是"过去的路面"。
+12. **`command_coalesced` 增长是下行带宽不足的信号**，不是 bug——它说明命令还没发出就被新值覆盖了。
+13. **`max_step_dt` 封顶不能低于名义控制周期**：否则每拍都被钳制，累计时间推进慢于真实时间，降级/链路超时这些**基于时长**的判据会成比例地延迟触发。
+
+### 6.8 接口自检
+
+| 手段 | 覆盖 |
+|---|---|
+| `protocol_selftest` | 协议编解码、CRC、坏帧/半包重同步、粘包 |
+| `control_selftest` | 控制侧自检（含 `msg_convert` 的四元数与剖面字段映射） |
+| `offline_demo` | 不接硬件跑通整条链路 |
+| `ros2 topic hz/echo` | 验证各话题实际带宽与 QoS 匹配 |
+| PC 串口自发自收 | 发 `0x10/0x11/0x12` 验证 MCU 端 CRC 复算与响应 |
+
+## 7. 关键参数
 
 | 参数 | v2 | 说明（v1 对比） |
 |------|----|------|
@@ -373,7 +521,7 @@ ros2 run car_balancer test_imu_node
 | 串口 | `serial_port` / `baud_rate` | 可配到 921600；v1 写死 `/dev/ttyS0` @115200 |
 | 参数方式 | YAML + launch | 运行时生效；v1 为宏定义需重编译 |
 
-## 7. 实测结果
+## 8. 实测结果
 
 实车 A/B 测试（主动对比被动，数据取自试验记录原始 xlsx；各工况为不同路段独立采集）：
 
@@ -409,7 +557,7 @@ ros2 run car_balancer test_imu_node
 
 论文原文为 PDF（已脱敏），文字版见 `docs/paper/`。
 
-## 8. 下行带宽
+## 9. 下行带宽
 
 每帧发送左右两条轮迹，各 100 点：
 
@@ -420,7 +568,7 @@ ros2 run car_balancer test_imu_node
 
 v1 在 115200 bps 下的上限与雷达 10–20 Hz 的输出正好对冲，这是 v2 改用 int16 与提高波特率选项的原因。
 
-## 9. 常见问题
+## 10. 常见问题
 
 <details>
 <summary>收不到点云，节点启动后没有输出</summary>
@@ -479,7 +627,7 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 
 </details>
 
-## 10. 质量保障
+## 11. 质量保障
 
 CI 分两个 workflow（`.github/workflows/`），共四条独立检查，任何一条红了 PR 就合不了：
 
@@ -504,13 +652,13 @@ CI 分两个 workflow（`.github/workflows/`），共四条独立检查，任何
 
 失败时不用登录 Actions：两个 workflow 都会在 job 结束后自动把日志尾部贴成 PR 评论。
 
-## 11. 许可证
+## 12. 许可证
 
 [MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
 
 版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
-## 12. English Abstract
+## 13. English Abstract
 
 <details>
 <summary>点击展开英文摘要</summary>
