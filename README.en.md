@@ -68,6 +68,29 @@ stall torque **15 / 17 kg·cm** · stall current **1.6 / 2.5 A** · metal gears 
 ⚠️ These are **PWM** servos, not bus servos — and four stalled channels can pull ~10 A, so the servo rail
 needs its own supply with headroom.
 
+**Orange Pi AI Pro (8T):** SoC **Huawei Ascend 310B** — 4-core 64-bit ARM application processor
++ DaVinci AI core + integrated GPU · **8 TOPS INT8** · LPDDR4X 8/16 GB @3200 Mbps · storage
+32 MB SPI flash, MicroSD, eMMC module (32–256 GB), M.2 2280 SATA/NVMe SSD · Gigabit Ethernet,
+Wi-Fi 5 dual-band, BT 4.2/BLE · 2× HDMI 2.0 (4K@60), MIPI DSI, 2× MIPI CSI · USB: 2× USB 3.0 HOST,
+1× USB-C 3.0 HOST, 1× **Micro USB debug console (via on-board CH343P)** · 40-pin header with 26 GPIO
+supporting **GPIO / UART / I2C / SPI / I2S / PWM** · **USB-C PD 20 V, 65 W** · 107 × 68 mm, 82 g ·
+Ubuntu / openEuler.
+
+**Serial port — matters directly for this project.** The board uses **uart0 as the debug console**,
+which is **`/dev/ttyS0`** — the very port this project sends actuator frames on. uart0 TX/RX are routed
+to *two* places: 40-pin **pin 8 (TXD) / pin 10 (RXD)**, and the on-board **CH343P → Micro USB**.
+The vendor requires **one or the other, never both**. GPIO on the 40-pin header is **3.3 V**;
+pins **27/28 are I2C-only at 1.8 V**.
+
+> ⚠️ Consequence: uart0 is both console and downlink. If you watch boot logs over Micro USB while
+> running control, console characters interleave into the `0xAA55` stream and CRC fails repeatedly.
+> Disable the console on uart0 before real runs, and never reuse pins 8/10 as GPIO.
+
+**About the MCU:** the Ascend 310B integrates ARM *application* cores + a DaVinci AI core + GPU, but
+there is **no independent real-time MCU** on the board (the CH343P is only a USB-UART bridge). Deterministic
+200 Hz control therefore cannot be guaranteed on the Linux side — which is exactly why the
+[`hardware/main-control-board/`](hardware/main-control-board) P0 board adds an external **STM32G4**.
+
 ## System architecture
 
 ```mermaid
@@ -391,7 +414,7 @@ The prototype has only **two data links** (one Ethernet, one UART) plus **two po
 |------|----------|-----------|----------|----------------|--------|
 | Board ↔ UniLiDAR L1 | Ethernet RJ45 | 100/1000BASE-TX | UDP + private packets | LiDAR `192.168.1.62:6101`; host `192.168.1.2:6201` | `local_ip` / `local_port` / `source_ip` |
 | L1 power | DC | 6 W (**confirm voltage on the cable label**; not published on the vendor page) | — | isolate from actuator power, add reverse-polarity + TVS protection | `hardware/sensors-interface/` |
-| Board ↔ actuator controller | UART (`/dev/ttyS0` on the 40-pin header) | TTL (**verify level on your hardware**) | custom `0xAA55` frame | 115200 8N1 (up to 921600); raw mode, no hardware flow control, write-all + `tcdrain` | `serial_port` / `baud_rate` |
+| Board ↔ actuator controller | UART (40-pin **pin 8 TXD / pin 10 RXD** = `/dev/ttyS0`) | **3.3 V TTL** | custom `0xAA55` frame | 115200 8N1 (up to 921600); raw mode, no hardware flow control, write-all + `tcdrain` | `serial_port` / `baud_rate` |
 | Actuator controller ↔ 4 × **RDS3115 mg** | 3-pin JR plug (red VCC / black GND / yellow PWM) | PWM pulse width | **500~2500 µs, neutral 1500 µs, 50~330 Hz** | order `0=front-left 1=front-right 2=rear-left 3=rear-right` | wrapped under `ISuspensionDriver` |
 | Servo power | DC | 5 V / 6.8 V | — | stall **2.5 A per channel**, budget ≥10 A for four, **isolate from logic power** | — |
 
@@ -403,8 +426,12 @@ Run `ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex` before an
 ⚠️ Quaternion order is not fixed by the vendor; default `xyzw` — with the LiDAR level and static,
 `w` should be ≈ ±1 and the rest ≈ 0.
 
-**Actuator downlink — UART / `0xAA55`.** `/dev/ttyS0` at 115200 8N1 (up to 921600). Confirm the
-**logic level** (3.3 V vs 5 V, and whether RS485/level shifting is needed) before powering up.
+**Actuator downlink — UART / `0xAA55`.** `/dev/ttyS0` at 115200 8N1 (up to 921600), on 40-pin
+**pin 8 (TXD) / pin 10 (RXD)** at **3.3 V TTL**. If the controller side is 5 V logic, add level
+shifting — 3.3 V out is usually accepted by a 5 V input, but 5 V fed back **will damage the board**.
+⚠️ uart0 is *also* the on-board debug console (via CH343P → Micro USB). The vendor requires choosing
+**one** of the two: disable the console on uart0 when running control, or console output (login prompt,
+kernel messages) will corrupt the `0xAA55` stream and fail CRC. Do not reuse pins 8/10 as GPIO.
 v2 frames are `int16` mm + CRC16; v1 used `float32` + an 8-bit checksum — **not compatible**.
 Serial permission: `sudo usermod -aG dialout $USER`, then re-login (do not `chmod 777`).
 At 115200 bps the frame size collides head-on with a 10–20 Hz LiDAR rate, which is why v2 switched to
