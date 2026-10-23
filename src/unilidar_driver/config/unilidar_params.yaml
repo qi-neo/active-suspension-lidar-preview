@@ -2,7 +2,18 @@
 # 默认话题名与仓库内 v2 预瞄节点、v3 控制节点的订阅保持一致，可直接替换官方节点。
 unilidar_driver_node:
   ros__parameters:
-    # ---- 网络 ----
+    # ---- 传输层 ----
+    # serial：L1 原生 TTL UART 经 CH340 类模块转 USB（实物默认路径）。
+    #   官方 SDK 默认波特率 2,000,000 bps，设备名通常 /dev/ttyUSB0；
+    #   打不开时先确认用户已加入 dialout 组。
+    # udp：L1 以太网口 192.168.1.62:6101 -> 本机 6201（备选路径）。
+    #   此时下面「网络」小节的 local_ip / local_port / source_ip 与
+    #   recv_buf_bytes 才生效；serial 时它们被忽略。
+    transport: "serial"
+    serial_device: "/dev/ttyUSB0"
+    serial_baud: 2000000
+
+    # ---- 网络（仅 transport=udp 时生效）----
     # 本机监听地址。留空则监听所有网卡，排查阶段建议先留空
     local_ip: ""
     local_port: 6201
@@ -39,7 +50,7 @@ unilidar_driver_node:
     recv_timeout_ms: 1          # 单次 recv 超时
     diag_period_s: 5.0          # 诊断日志周期
 
-    # ---- 收包缓冲 ----
+    # ---- 收包缓冲（仅 transport=udp 时生效）----
     # 请求的 SO_RCVBUF 字节数，0 表示沿用系统默认。雷达约 180 KB/s，
     # 内核默认 rmem 只有约 200 KB，调度抖动时会溢出丢包，所以默认请求 8 MiB。
     # 注意：Linux 会按 net.core.rmem_max 裁剪并把请求值翻倍，诊断日志里的

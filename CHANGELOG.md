@@ -13,6 +13,25 @@
 时间域 FIR、把"测什么"从凭感觉补用例改成按覆盖率指路、以及把 CI 补齐为
 构建 + 内存检查 + 覆盖率三道门禁。
 
+### 驱动：串口接收路径落地（`unilidar_driver`）
+
+L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2,000,000 bps
+转 USB 接入（`/dev/ttyUSB0`）——此前仓库内驱动副本只有 UDP 接收，与实物
+链路不符。本轮把独立仓库 `qi-neo/unilidar-driver` 的实现同步进来：
+
+- 新增 `serial_receiver`（POSIX termios：`O_NONBLOCK` + `cfmakeraw` +
+  `CLOCAL` + 关硬件流控 + `VMIN=0/VTIME=0`；打开前 `isatty`、打开后
+  `tcflush`；读契约 0 = 无数据 / -1 = 出错，与 `udp_receiver` 一致）。
+  报文定界复用 `packet_parser`（串口是字节流，解析器本就按无边界字节流
+  设计），协议层零改动
+- 节点新增 `transport` 参数（`serial` 默认 / `udp` 备选）与
+  `serial_device`、`serial_baud`；诊断日志按传输层分别给出排障建议
+- 新增 `serial_receiver_selftest`：PTY 主从对虚拟串口，63 项断言，覆盖
+  整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU
+  帧与各类打开失败路径。本机（macOS）实测全过
+- 离线自检总数 843 → **906** 项（驱动 135 + 63），README 中英同步；
+  UDP 从"唯一实现"改为"备选路径"，CH340 串口成为文档中的实物默认链路
+
 ### CI 与文档
 
 - **sanitizer 拆成独立 workflow**（`.github/workflows/sanitizer.yml`）：GitHub 的

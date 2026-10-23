@@ -21,6 +21,7 @@ add_library(unilidar_driver_core STATIC
   src/packet_parser.cpp
   src/frame_decoder.cpp
   src/udp_receiver.cpp
+  src/serial_receiver.cpp
 )
 set_target_properties(unilidar_driver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(unilidar_driver_core PUBLIC
@@ -36,6 +37,10 @@ target_link_libraries(decoder_selftest unilidar_driver_core)
 add_executable(udp_probe examples/udp_probe.cpp)
 target_link_libraries(udp_probe unilidar_driver_core)
 
+# 串口接收自检：PTY 主从对模拟虚拟串口，不需要真雷达也不需要真串口
+add_executable(serial_receiver_selftest examples/serial_receiver_selftest.cpp)
+target_link_libraries(serial_receiver_selftest unilidar_driver_core)
+
 # ROS 节点：只做参数、收包与发布的接线
 add_executable(unilidar_driver_node src/unilidar_driver_node.cpp)
 target_link_libraries(unilidar_driver_node unilidar_driver_core)
@@ -47,6 +52,7 @@ install(TARGETS
   unilidar_driver_node
   decoder_selftest
   udp_probe
+  serial_receiver_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config

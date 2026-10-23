@@ -20,11 +20,11 @@
 > **要点**
 >
 > - 实车 A/B 测试（三次不同路段独立采集）：越障工况俯仰角波动降约 29%、Z 轴加速度干扰降约 38%；常规路面工况横滚/俯仰波动降约 12–21%（路面输入不完全一致，详见「实测结果」）
-> - 自研宇树 L1 的 UDP 报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
+> - 自研宇树 L1 的报文解析与几何换算（串口/UDP 双传输，串口为实物默认路径），不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，再 `colcon test` 跑注册进 CTest 的自检，并跑四组离线自检（v3 控制 443 项、驱动解析 135 项、
-> v2 纯函数 196 项、虚拟水平面 69 项，共 843 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，再 `colcon test` 跑注册进 CTest 的自检，并跑五组离线自检（v3 控制 443 项、驱动报文解析 135 项、驱动串口接收 63 项、
+> v2 纯函数 196 项、虚拟水平面 69 项，共 906 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
 > 不需要 ROS 和硬件就能确认这套代码是完整可跑的（443 项检查）。
@@ -203,17 +203,21 @@ L1 (TTL UART) ──► CH340 转接模块 ──► USB ──► 香橙派 USB
 > 优先怀疑波特率与转接芯片（可换 CP2102 / FT232 对照），而不是雷达本身。
 
 **备选路径：以太网 UDP。** 若采用「串口转 UDP 转接板」或带网口的 L1，数据会以 UDP 送达：
-雷达 `192.168.1.62:6101` → 主机 `192.168.1.2:6201`。此时用 `local_ip` / `local_port` / `source_ip` 配置。
+雷达 `192.168.1.62:6101` → 主机 `192.168.1.2:6201`。此时把驱动 `transport` 参数设为
+`udp`，并用 `local_ip` / `local_port` / `source_ip` 配置。
 
-> ⚠️ **与仓库驱动的差异（重要）**：`unilidar_driver` 当前只实现了 **UDP 接收**（`udp_receiver.hpp`），
-> 没有串口接收实现。若实物走 CH340 串口，需要补一条串口收数路径——
-> 好在 `packet_parser` 本就按「无边界字节流」设计（注释已说明串口可能在任意位置开始接收），
-> 协议/解析层与传输层是解耦的，补一个 serial receiver 即可复用现有解析，不必改协议层。
+> ✅ **两条路径驱动都已实现。** `unilidar_driver` 用 `transport` 参数切换：
+> **`serial`（默认）** 经 `serial_receiver.hpp` 走 `/dev/ttyUSB0` @ 2 Mbps，
+> 即上面的实物链路；`udp` 走 `udp_receiver.hpp`。串口接收有 63 项离线自检
+> （`serial_receiver_selftest`，PTY 虚拟串口，覆盖整帧直达、跨写拆包、
+> 垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧与打开失败路径）。
+> `packet_parser` 按「无边界字节流」设计（串口可能在任意位置开始接收），
+> 两条路径喂给解析器的都是字节流，协议/解析层零改动。
 
-- **报文处理链**：私有 UDP 报文 → `packet_parser`（流式定界，UDP 可能丢包/提前截断）→ `frame_decoder` → 标准 `PointCloud2` + `Imu`。
+- **报文处理链**：私有报文 → `packet_parser`（流式定界，UDP 可能丢包/提前截断、串口可能半帧残留）→ `frame_decoder` → 标准 `PointCloud2` + `Imu`。
 - **节奏**：雷达约 180 Hz 出扫描线，`cloud_scan_num=18` 合成约 **10 Hz** 点云，与预瞄节点输入节奏匹配。
 - **坐标系**：`unilidar_lidar` / `unilidar_imu` → `base_link`。
-- **先跑探针再跑驱动**（UDP 备选路径）：`ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex`，核对本机 IP/端口与包长分布。
+- **先跑探针再跑驱动**（仅 UDP 备选路径）：`ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex`，核对本机 IP/端口与包长分布。串口路径先用 `serial_receiver_selftest` 自检，再 `ls /dev/ttyUSB*` + `dialout` 权限上实物。
 - ⚠️ **四元数顺序**：官方未定死，默认 `xyzw`。雷达静止水平放置时正确顺序下 `w ≈ ±1`、其余 ≈ 0——接线通电后第一件事就是验这个。
 
 **2) 舵机下行 —— UART / `0xAA55`**
@@ -312,8 +316,9 @@ flowchart TB
 `suspension_preview_v2` 提供，闭环控制与运动学解耦由 `suspension_control_v3` 提供。四路舵机的
 实物驱动对接在 `ISuspensionDriver` 之下，具体指令需按实际作动器的协议确认。
 
-图中 L1 → 驱动那条边是**实物链路**（USB 串口经 CH340，2 Mbps）；`unilidar_driver` 当前实现的是
-UDP 接收，串口接收待补，详见「[接线与物理接口](#接线与物理接口)」。
+图中 L1 → 驱动那条边是**实物链路**（USB 串口经 CH340，2 Mbps）；`unilidar_driver` 的
+`serial` 传输（`transport` 默认值）正是为这条链路实现的，UDP 为备选，详见
+「[接线与物理接口](#接线与物理接口)」。
 
 ### 预瞄节点数据流
 
@@ -367,7 +372,8 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 除历史包 `suspension_preview`（v1）外，各包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
 
 ```bash
-ros2 run unilidar_driver decoder_selftest    # 报文解析，135 项检查
+ros2 run unilidar_driver decoder_selftest           # 报文解析与解码，135 项检查
+ros2 run unilidar_driver serial_receiver_selftest   # 串口接收（PTY 虚拟串口），63 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
 ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
 ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，443 项检查
@@ -415,7 +421,7 @@ ros2 launch unitree_lidar_ros2 launch.py
 ```
 active-suspension-lidar-preview/
 ├── src/
-│   ├── unilidar_driver/             宇树 L1 雷达驱动：自研 UDP 协议解析，发布点云与 IMU
+│   ├── unilidar_driver/             宇树 L1 雷达驱动：自研报文解析（串口/UDP 双传输），发布点云与 IMU
 │   ├── suspension_preview/          初版预瞄节点（C++）
 │   ├── suspension_preview_v2/       v2 接口化版本：核心库 + 两个节点 + 离线示例
 │   ├── suspension_control_v3/       v3 闭环控制：输入校验 + 安全状态机 + 控制器 + 离线自检
@@ -430,14 +436,17 @@ active-suspension-lidar-preview/
 ### unilidar_driver — 宇树 L1 激光雷达驱动
 
 点云与 IMU 原本依赖官方 `libunitree_lidar_sdk.a` 的预编译静态库，看不到也改不了
-解析逻辑。这个包自行实现了 Unitree L1 的 UDP 报文解析与几何换算，发布标准
+解析逻辑。这个包自行实现了 Unitree L1 的报文解析与几何换算，发布标准
 `/unilidar/cloud`（PointCloud2）与 `/unilidar/imu`（Imu）话题，可直接顶替
-官方节点，其他包零改动。
+官方节点，其他包零改动。传输层双路径：**`serial`（默认）** 走 CH340 转 USB 的
+`/dev/ttyUSB0` @ 2 Mbps（L1 原生 TTL UART，官方 SDK 默认接法），`udp` 走以太网
+备选路径；两条路径共用同一套 `packet_parser` 定界。
 
 报文定界只用「帧尾标识 + CRC32」，不拿整包长度当判据——官方协议头文件里的
 字节数注释与其自身字段并不一致（3D 点云整包注释 1036，按字段实算 1044），
-硬编码长度会把新固件的包整批判坏。配套的 `udp_probe` 探针用来在真机上核对
-真实包长与 CRC 是否成立。解析核心不依赖 ROS，可在任意机器上编译自检。
+硬编码长度会把新固件的包整批判坏。UDP 备选路径可用配套的 `udp_probe` 探针在
+真机上核对真实包长与 CRC 是否成立；串口路径可用 `serial_receiver_selftest`
+（PTY 虚拟串口，63 项检查）离线验证。解析核心不依赖 ROS，可在任意机器上编译自检。
 
 相对官方节点还修掉一处 QoS 不兼容：官方按 RELIABLE 发布，而 v3 控制节点用
 `SensorDataQoS`（BEST_EFFORT）订阅，两者不兼容会表现为「明明在发却收不到」。
@@ -600,7 +609,7 @@ ros2 run car_balancer test_imu_node
 
 | 层 | 接口 | 载体 | 代码位置 |
 |---|------|------|----------|
-| 物理 | 雷达数据上行 | UDP（`local_port` 默认 **6201**；实物走 CH340 串口 `/dev/ttyUSB0` @ 2 Mbps，串口接收待补） | `unilidar_driver/udp_receiver.hpp` |
+| 物理 | 雷达数据上行 | 串口（`transport=serial` 默认：CH340 转 USB，`/dev/ttyUSB0` @ 2,000,000 bps）或 UDP（`transport=udp`，`local_port` 默认 **6201**） | `unilidar_driver/serial_receiver.hpp` / `udp_receiver.hpp` |
 | 物理 | 作动器下行 | 串口 UART（默认 `/dev/ttyS0` @ 115200，可配到 921600） | `suspension_preview_v2/serial_port.hpp` |
 | 通信 | 节点间数据 | ROS2 话题 + 自定义消息 + QoS 约定 | 见 6.2 / 6.3 |
 | 抽象 | 作动器驱动 | `ISuspensionDriver` | `suspension_preview_v2/suspension_driver.hpp` |

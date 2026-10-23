@@ -20,13 +20,13 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > **Highlights**
 >
 > - On-vehicle A/B testing (three runs on independently collected road sections): on the obstacle-crossing run, pitch fluctuation down ~29% and Z-axis acceleration disturbance down ~38%; on ordinary-road runs, roll/pitch fluctuation down ~12–21% (road inputs were not identical across runs — see "Experimental results")
-> - Self-written UDP packet parser and geometry conversion for the Unitree L1 — no link against the official static library, usable as a drop-in replacement for the official node
+> - Self-written packet parser and geometry conversion for the Unitree L1 (dual transport: serial and UDP, serial being the physical default) — no link against the official static library, usable as a drop-in replacement for the official node
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes four offline self-test groups (v3 control: 443 checks, driver parsing: 135
-> checks, v2 pure functions: 196 checks, level calibration: 69 checks — 843 in total). **Tags before v3.1.0 do
-> not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> executes five offline self-test groups (v3 control: 443 checks, driver packet parsing: 135
+> checks, driver serial receive: 63 checks, v2 pure functions: 196 checks, level calibration: 69
+> checks — 906 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
@@ -130,9 +130,9 @@ Dashed nodes are hardware; everything else is implemented in this repository: pa
 closed-loop control and kinematic decoupling from `suspension_control_v3`. Driving the physical servos happens
 behind `ISuspensionDriver`; the actual command set depends on the actuator protocol in use.
 
-The L1 → driver edge shows the **physical link** (USB serial via CH340 at 2 Mbps); `unilidar_driver`
-currently implements UDP receive only — the serial receiver is pending, see
-[Wiring and physical interfaces](#wiring-and-physical-interfaces).
+The L1 → driver edge shows the **physical link** (USB serial via CH340 at 2 Mbps); the driver's
+`serial` transport (the `transport` default) is implemented exactly for it, with UDP as the
+alternative — see [Wiring and physical interfaces](#wiring-and-physical-interfaces).
 
 ### Preview node data flow
 
@@ -156,7 +156,7 @@ emergency stop when input data goes bad.
 ```
 active-suspension-lidar-preview/
 ├── src/
-│   ├── unilidar_driver/              Unitree L1 driver: own UDP protocol parsing, publishes cloud + IMU
+│   ├── unilidar_driver/              Unitree L1 driver: own packet parsing (serial/UDP dual transport), publishes cloud + IMU
 │   ├── suspension_preview/           First-generation preview node (C++)
 │   ├── suspension_preview_v2/        v2: core library + two nodes + offline demo
 │   ├── suspension_control_v3/        v3: input validation + safety state machine + controller + self-test
@@ -172,18 +172,22 @@ active-suspension-lidar-preview/
 
 Point cloud and IMU used to depend on the official `libunitree_lidar_sdk.a` prebuilt
 static library, which hides the parsing logic and cannot be modified. This
-package reimplements the Unitree L1 UDP packet parsing and geometry conversion
+package reimplements the Unitree L1 packet parsing and geometry conversion
 from scratch, publishing standard `/unilidar/cloud` (PointCloud2) and
 `/unilidar/imu` (Imu) topics as a drop-in replacement for the official node —
-no other package needs to change.
+no other package needs to change. Transport is dual-path: **`serial` (default)**
+uses CH340-to-USB `/dev/ttyUSB0` @ 2 Mbps (the L1's native TTL UART, the official
+SDK's default wiring), `udp` uses the Ethernet alternative; both feed the same
+`packet_parser`.
 
 Frames are delimited by tail marker + CRC32 only, never by total packet length:
 the byte counts in the official protocol header disagree with its own field
 definitions (3D point packet documented 1036 B, computed from fields 1044 B),
-and hardcoding a length would reject every packet from a newer firmware. The
-bundled `udp_probe` tool checks the real packet length and CRC validity on
-target hardware. The parsing core does not depend on ROS and can be built and
-self-tested on any machine.
+and hardcoding a length would reject every packet from a newer firmware. On the
+UDP alternative the bundled `udp_probe` tool checks the real packet length and
+CRC validity on target hardware; on the serial path `serial_receiver_selftest`
+(63 checks over a PTY virtual port) verifies reception offline. The parsing core
+does not depend on ROS and can be built and self-tested on any machine.
 
 It also fixes a QoS incompatibility present in the official node: that node
 publishes as RELIABLE, while `suspension_control_v3` subscribes with
@@ -371,7 +375,8 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 All three C++ packages (the historical `suspension_preview` aside) ship offline checks that confirm the pipeline without any hardware:
 
 ```bash
-ros2 run unilidar_driver decoder_selftest         # packet parsing, 135 checks
+ros2 run unilidar_driver decoder_selftest           # packet parsing and decoding, 135 checks
+ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 63 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
 ros2 run suspension_control_v3 control_selftest    # control and safety logic, 443 checks
@@ -440,14 +445,17 @@ Unitree SDK. Wiring: `L1 (TTL UART) → CH340 adapter → USB → board → /dev
 > chip (compare with a CP2102 or FT232) before blaming the LiDAR.
 
 **Alternative: Ethernet UDP.** With a serial-to-UDP adapter board or a networked L1 variant, data
-arrives as UDP: LiDAR `192.168.1.62:6101` → host `192.168.1.2:6201`, configured via
-`local_ip` / `local_port` / `source_ip`.
+arrives as UDP: LiDAR `192.168.1.62:6101` → host `192.168.1.2:6201`. Set the driver's `transport`
+parameter to `udp` and configure it via `local_ip` / `local_port` / `source_ip`.
 
-> ⚠️ **Gap vs the driver (important):** `unilidar_driver` currently implements **UDP receive only**
-> (`udp_receiver.hpp`) — there is no serial receiver. With the CH340 path you need to add one.
-> Fortunately `packet_parser` is already designed for a boundary-less byte stream (its comments note
-> serial may start mid-frame), so protocol/parsing is decoupled from transport: a serial receiver can
-> reuse the existing parser without touching the protocol layer.
+> ✅ **Both transports are implemented.** `unilidar_driver` switches with the `transport` parameter:
+> **`serial` (default)** goes through `serial_receiver.hpp` on `/dev/ttyUSB0` @ 2 Mbps — the
+> physical link above; `udp` goes through `udp_receiver.hpp`. The serial receiver has 63 offline
+> checks (`serial_receiver_selftest`, a PTY virtual serial port covering whole-frame delivery,
+> split writes, junk/fake-header resynchronisation, the no-data contract, multiple frames per
+> write, IMU frames and open-failure paths). `packet_parser` is designed for a boundary-less byte
+> stream (serial may start mid-frame), so both paths feed the same parser with zero protocol-layer
+> changes.
 
 Frames: `unilidar_lidar` / `unilidar_imu` → `base_link`.
 ⚠️ Quaternion order is not fixed by the vendor; default `xyzw` — with the LiDAR level and static,
@@ -494,7 +502,7 @@ mismatch in an *implicit* agreement between the two ends: QoS, `frame_id`, units
 
 | Layer | Interface | Transport | Code |
 |-------|-----------|-----------|------|
-| Physical | LiDAR uplink | UDP (`local_port`, default **6201**); physical rig uses CH340 serial `/dev/ttyUSB0` @ 2 Mbps — serial receiver pending | `unilidar_driver/udp_receiver.hpp` |
+| Physical | LiDAR uplink | Serial (`transport=serial`, default: CH340-to-USB, `/dev/ttyUSB0` @ 2,000,000 bps) or UDP (`transport=udp`, `local_port`, default **6201**) | `unilidar_driver/serial_receiver.hpp` / `udp_receiver.hpp` |
 | Physical | Actuator downlink | UART (default `/dev/ttyS0` @ 115200, up to 921600) | `suspension_preview_v2/serial_port.hpp` |
 | Comms | Inter-node data | ROS2 topics + custom messages + QoS | see below |
 | Abstract | Actuator driver | `ISuspensionDriver` | `suspension_preview_v2/suspension_driver.hpp` |
