@@ -336,6 +336,46 @@ Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_
 `tf2_ros`. The `unilidar_driver` package additionally needs `tf2` and `tf2_ros`, and does **not**
 depend on the Unitree Lidar SDK.
 
+## Wiring and physical interfaces
+
+The prototype has only **two data links** (one Ethernet, one UART) plus **two power rails**.
+
+| Link | Physical | Electrical | Protocol | Key parameters | Config |
+|------|----------|-----------|----------|----------------|--------|
+| Board ↔ UniLiDAR L1 | Ethernet RJ45 | 100/1000BASE-TX | UDP + private packets | LiDAR `192.168.1.62:6101`; host `192.168.1.2:6201` | `local_ip` / `local_port` / `source_ip` |
+| L1 power | DC | 12 V (reverse-polarity + TVS protection) | — | keep isolated from actuator power | `hardware/sensors-interface/` |
+| Board ↔ actuator controller | UART (`/dev/ttyS0` on the 40-pin header) | TTL (**verify level on your hardware**) | custom `0xAA55` frame | 115200 8N1 (up to 921600); raw mode, no hardware flow control, write-all + `tcdrain` | `serial_port` / `baud_rate` |
+| Actuator controller ↔ 4 × digital servo | servo bus (**confirm on hardware**, see below) | TTL half-duplex / RS485 / PWM | vendor protocol | order `0=front-left 1=front-right 2=rear-left 3=rear-right` | wrapped under `ISuspensionDriver` |
+
+**UniLiDAR L1 — Ethernet, not serial.** The driver only uses POSIX sockets and does not depend on the
+Unitree SDK. Private UDP packets go through `packet_parser` (stream framing; UDP can drop or truncate)
+→ `frame_decoder` → `PointCloud2` + `Imu`. The LiDAR emits ~180 scan lines/s; `cloud_scan_num=18`
+yields ~**10 Hz** point clouds. Frames: `unilidar_lidar` / `unilidar_imu` → `base_link`.
+Run `ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex` before anything else.
+⚠️ Quaternion order is not fixed by the vendor; default `xyzw` — with the LiDAR level and static,
+`w` should be ≈ ±1 and the rest ≈ 0.
+
+**Actuator downlink — UART / `0xAA55`.** `/dev/ttyS0` at 115200 8N1 (up to 921600). Confirm the
+**logic level** (3.3 V vs 5 V, and whether RS485/level shifting is needed) before powering up.
+v2 frames are `int16` mm + CRC16; v1 used `float32` + an 8-bit checksum — **not compatible**.
+Serial permission: `sudo usermod -aG dialout $USER`, then re-login (do not `chmod 777`).
+At 115200 bps the frame size collides head-on with a 10–20 Hz LiDAR rate, which is why v2 switched to
+`int16` and offers higher baud rates.
+
+**Servo bus — not fixed in this repo; identify yours:**
+
+| Servo type | Wiring | How to tell |
+|------------|--------|-------------|
+| Bus servo (TTL half-duplex) | `VCC / GND / DATA`, all servos share one bus | single-wire half-duplex, needs direction control |
+| Bus servo (RS485) | `VCC / GND / A / B` + transceiver, 120 Ω termination | differential pair |
+| PWM servo | one `PWM / VCC / GND` per channel | 50 Hz, ~1–2 ms pulse width |
+
+**Wiring checklist:** L1 at 12 V with the host on the same subnet · `udp_probe` receives packets of the
+expected length · UART device present, baud matches the far end, user in `dialout` · **GND shared**
+between board and actuator controller (a floating ground is the usual cause of "works intermittently")
+· actuator power isolated from logic/compute power · verify wheel order and direction one channel at a
+time before driving · emergency stop independent of software.
+
 ## Interface reference
 
 All interface contracts in one place. Most "only shows up on real hardware" bugs here trace back to a
