@@ -19,38 +19,6 @@
       "y": 0
     },
     {
-      "ref": "U2",
-      "name": "MAX485",
-      "lib": "P0lib:MAX485",
-      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-      "x": 55,
-      "y": -45
-    },
-    {
-      "ref": "U3",
-      "name": "MAX485",
-      "lib": "P0lib:MAX485",
-      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-      "x": 55,
-      "y": -15
-    },
-    {
-      "ref": "U4",
-      "name": "MAX485",
-      "lib": "P0lib:MAX485",
-      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-      "x": 55,
-      "y": 15
-    },
-    {
-      "ref": "U5",
-      "name": "MAX485",
-      "lib": "P0lib:MAX485",
-      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-      "x": 55,
-      "y": 45
-    },
-    {
       "ref": "U6",
       "name": "SI8640",
       "lib": "P0lib:ISO4",
@@ -85,33 +53,65 @@
     {
       "ref": "J1",
       "name": "SERVO0",
-      "lib": "P0lib:CONN4",
-      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "lib": "P0lib:CONN3",
+      "footprint": "Connector_JST:JST_GH_1x03_P1.25mm",
       "x": 110,
+      "y": -45
+    },
+    {
+      "ref": "RS1",
+      "name": "220",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": 75,
       "y": -45
     },
     {
       "ref": "J2",
       "name": "SERVO1",
-      "lib": "P0lib:CONN4",
-      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "lib": "P0lib:CONN3",
+      "footprint": "Connector_JST:JST_GH_1x03_P1.25mm",
       "x": 110,
+      "y": -15
+    },
+    {
+      "ref": "RS2",
+      "name": "220",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": 75,
       "y": -15
     },
     {
       "ref": "J3",
       "name": "SERVO2",
-      "lib": "P0lib:CONN4",
-      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "lib": "P0lib:CONN3",
+      "footprint": "Connector_JST:JST_GH_1x03_P1.25mm",
       "x": 110,
+      "y": 15
+    },
+    {
+      "ref": "RS3",
+      "name": "220",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": 75,
       "y": 15
     },
     {
       "ref": "J4",
       "name": "SERVO3",
-      "lib": "P0lib:CONN4",
-      "footprint": "Connector_JST:JST_GH_1x04_P1.25mm",
+      "lib": "P0lib:CONN3",
+      "footprint": "Connector_JST:JST_GH_1x03_P1.25mm",
       "x": 110,
+      "y": 45
+    },
+    {
+      "ref": "RS4",
+      "name": "220",
+      "lib": "P0lib:R",
+      "footprint": "Resistor_SMD:R_0805_2012Metric",
+      "x": 75,
       "y": 45
     },
     {
@@ -293,10 +293,6 @@
         "U6.GND_A",
         "U6.GND_B",
         "U7.GND",
-        "U2.GND",
-        "U3.GND",
-        "U4.GND",
-        "U5.GND",
         "U8.GND",
         "SW1.1",
         "D1.K",
@@ -309,10 +305,10 @@
         "C4.1",
         "C5.1",
         "C6.1",
-        "J1.2",
-        "J2.2",
-        "J3.2",
-        "J4.2",
+        "J1.GND",
+        "J2.GND",
+        "J3.GND",
+        "J4.GND",
         "TP1.2"
       ]
     },
@@ -337,10 +333,6 @@
         "U1.VDD",
         "U6.VCC_A",
         "U6.VCC_B",
-        "U2.VCC",
-        "U3.VCC",
-        "U4.VCC",
-        "U5.VCC",
         "U8.VDD",
         "R4.1",
         "C1.2",
@@ -366,14 +358,10 @@
       "net": "SERVO_V+",
       "nodes": [
         "Q1.D",
-        "J1.1",
-        "J2.1",
-        "J3.1",
-        "J4.1",
-        "J1.1",
-        "J2.1",
-        "J3.1",
-        "J4.1"
+        "J1.VCC",
+        "J2.VCC",
+        "J3.VCC",
+        "J4.VCC"
       ]
     },
     {
@@ -419,147 +407,59 @@
       ]
     },
     {
-      "net": "SERVO0_TX",
+      "net": "SERVO0_PWM",
       "nodes": [
-        "U2.DI",
-        "U1.PA2_USART2_TX"
+        "U1.PA8_TIM1_CH1",
+        "RS1.1"
       ]
     },
     {
-      "net": "SERVO0_RX",
+      "net": "SERVO0_SIG",
       "nodes": [
-        "U2.RO",
-        "U1.PA3_USART2_RX"
+        "RS1.2",
+        "J1.PWM"
       ]
     },
     {
-      "net": "SERVO0_DIR",
+      "net": "SERVO1_PWM",
       "nodes": [
-        "U2.DE",
-        "U2.nRE",
-        "U1.PA4_SERVO0_DIR"
+        "U1.PA6_TIM3_CH1",
+        "RS2.1"
       ]
     },
     {
-      "net": "SERVO0_A",
+      "net": "SERVO1_SIG",
       "nodes": [
-        "U2.A",
-        "J1.3"
+        "RS2.2",
+        "J2.PWM"
       ]
     },
     {
-      "net": "SERVO0_B",
+      "net": "SERVO2_PWM",
       "nodes": [
-        "U2.B",
-        "J1.4"
+        "U1.PA7_TIM3_CH2",
+        "RS3.1"
       ]
     },
     {
-      "net": "SERVO1_TX",
+      "net": "SERVO2_SIG",
       "nodes": [
-        "U3.DI",
-        "U1.PB10_USART3_TX"
+        "RS3.2",
+        "J3.PWM"
       ]
     },
     {
-      "net": "SERVO1_RX",
+      "net": "SERVO3_PWM",
       "nodes": [
-        "U3.RO",
-        "U1.PB11_USART3_RX"
+        "U1.PA0_TIM2_CH1",
+        "RS4.1"
       ]
     },
     {
-      "net": "SERVO1_DIR",
+      "net": "SERVO3_SIG",
       "nodes": [
-        "U3.DE",
-        "U3.nRE",
-        "U1.PB12_SERVO1_DIR"
-      ]
-    },
-    {
-      "net": "SERVO1_A",
-      "nodes": [
-        "U3.A",
-        "J2.3"
-      ]
-    },
-    {
-      "net": "SERVO1_B",
-      "nodes": [
-        "U3.B",
-        "J2.4"
-      ]
-    },
-    {
-      "net": "SERVO2_TX",
-      "nodes": [
-        "U4.DI",
-        "U1.PA0_UART4_TX"
-      ]
-    },
-    {
-      "net": "SERVO2_RX",
-      "nodes": [
-        "U4.RO",
-        "U1.PA1_UART4_RX"
-      ]
-    },
-    {
-      "net": "SERVO2_DIR",
-      "nodes": [
-        "U4.DE",
-        "U4.nRE",
-        "U1.PA5_SERVO2_DIR"
-      ]
-    },
-    {
-      "net": "SERVO2_A",
-      "nodes": [
-        "U4.A",
-        "J3.3"
-      ]
-    },
-    {
-      "net": "SERVO2_B",
-      "nodes": [
-        "U4.B",
-        "J3.4"
-      ]
-    },
-    {
-      "net": "SERVO3_TX",
-      "nodes": [
-        "U5.DI",
-        "U1.PC12_UART5_TX"
-      ]
-    },
-    {
-      "net": "SERVO3_RX",
-      "nodes": [
-        "U5.RO",
-        "U1.PD2_UART5_RX"
-      ]
-    },
-    {
-      "net": "SERVO3_DIR",
-      "nodes": [
-        "U5.DE",
-        "U5.nRE",
-        "U1.PC11_SERVO3_DIR"
-      ]
-    },
-    {
-      "net": "SERVO3_A",
-      "nodes": [
-        "U5.A",
-        "J4.3"
-      ]
-    },
-    {
-      "net": "SERVO3_B",
-      "nodes": [
-        "U5.B",
-        "J4.4"
+        "RS4.2",
+        "J4.PWM"
       ]
     },
     {

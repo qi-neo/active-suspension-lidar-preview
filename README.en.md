@@ -46,11 +46,27 @@ the "disturb first, compensate later" delay at its source.
 
 | Component | Model / Spec | Role |
 |-----------|--------------|------|
-| LiDAR | UniLiDAR (Unitree) | Point cloud and IMU source |
+| LiDAR | **UniLiDAR L1** (Unitree 4D LiDAR) | Point cloud and IMU source |
 | Onboard computer | Orange Pi AI Pro (8 TOPS) | Point cloud processing and real-time control |
-| Actuator | Digital servo ×4 | Independent four-wheel adjustment |
+| Actuator | **RDS3115 mg** digital servo ×4 | Independent four-wheel adjustment |
 | Prototype vehicle | 400 × 300 × 200 mm | Stable operation at 3–8 km/h |
 | Test bench | Conveyor-belt single-wheel rig | Emulates varying speed and road surface |
+
+**UniLiDAR L1 (vendor specs):** FOV **360° × 90°** · range 30 m @90%/15 m @10% reflectivity (L1 RM;
+20 m/10 m for L1 PM) · accuracy **±2.0 cm** · minimum range **0.05 m** · **21600 pts/s** effective
+(43200 sampled) · scan **11 Hz** circumferential / **180 Hz** vertical · IMU 3-axis accel + 3-axis gyro ·
+4D data (3D position + 1D intensity) · interface **TTL UART** · ≥100 Klux ambient light immunity ·
+Class 1 eye safety · 6 W · 75×75×65 mm · 230 g.
+⚠️ The vendor lists **TTL UART**, while this repo's driver reads **UDP Ethernet** (`192.168.1.62:6101` →
+host `:6201`): the L1 is native UART and reaches Ethernet through the net/breakout path used here.
+Supply voltage is **not** published on the vendor page — confirm it on the cable before powering up.
+
+**RDS3115 mg servo:** control **PWM** · pulse **500~2500 µs**, **neutral 1500 µs** · 180° across the range ·
+3 µs dead band · 50~330 Hz · counter-clockwise · 5 V / 6.8 V · idle 4/5 mA · no-load 0.16 / 0.14 s per 60° ·
+stall torque **15 / 17 kg·cm** · stall current **1.6 / 2.5 A** · metal gears · 3 wires
+(red VCC, black/brown GND, yellow/white signal) on a 3-pin JR plug.
+⚠️ These are **PWM** servos, not bus servos — and four stalled channels can pull ~10 A, so the servo rail
+needs its own supply with headroom.
 
 ## System architecture
 
@@ -336,6 +352,37 @@ Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_
 `tf2_ros`. The `unilidar_driver` package additionally needs `tf2` and `tf2_ros`, and does **not**
 depend on the Unitree Lidar SDK.
 
+### Visualisation in Rviz2
+
+Confirm the raw data is sane before tuning preview or control:
+
+```bash
+ros2 launch unilidar_driver unilidar_driver.launch.py
+rviz2   # Fixed Frame = unilidar_lidar; add PointCloud2 → /unilidar/cloud, Imu → /unilidar/imu
+
+# Or, for comparison, the official Unitree SDK (cloned separately; this repo does not depend on it)
+git clone https://github.com/unitreerobotics/unilidar_sdk.git
+cd unilidar_sdk/unitree_lidar_ros2 && colcon build
+source install/setup.bash && ros2 launch unitree_lidar_ros2 launch.py
+```
+
+Check: does the cloud form a full ring (360°×90°)? Any returns inside 0.05 m? Is `w` ≈ ±1 with the
+LiDAR level and static? If the official node displays but this driver does not, suspect **QoS or frame
+framing**, not the hardware — compare real packet lengths with `udp_probe` first.
+
+### Driver defaults vs L1 vendor specs
+
+The defaults are chosen to "just run"; several differ from what the L1 can actually do. Review before
+running on hardware:
+
+| Parameter | Default | L1 vendor spec | Recommendation |
+|-----------|---------|----------------|----------------|
+| `range_max` | `100.0` m | 20–30 m (model and reflectivity dependent) | **Set ≤30 m.** The default far exceeds real range and disables useful range gating |
+| `range_min` | `0.0` m | 0.05 m minimum range | Set 0.05–0.1 m to drop unreliable near returns |
+| `cloud_scan_num` | `18` | 180 Hz vertical, 11 Hz circumferential | 18 → ~10 Hz clouds, close to 11 Hz; try 16 for ~11 Hz |
+| `quaternion_order` | `xyzw` | not fixed by vendor | With the LiDAR level and static, `w` should be ≈ ±1; otherwise use `wxyz` |
+| `local_port` | `6201` | LiDAR 6101 / host 6201 | Match the LiDAR's target address |
+
 ## Wiring and physical interfaces
 
 The prototype has only **two data links** (one Ethernet, one UART) plus **two power rails**.
@@ -343,9 +390,10 @@ The prototype has only **two data links** (one Ethernet, one UART) plus **two po
 | Link | Physical | Electrical | Protocol | Key parameters | Config |
 |------|----------|-----------|----------|----------------|--------|
 | Board ↔ UniLiDAR L1 | Ethernet RJ45 | 100/1000BASE-TX | UDP + private packets | LiDAR `192.168.1.62:6101`; host `192.168.1.2:6201` | `local_ip` / `local_port` / `source_ip` |
-| L1 power | DC | 12 V (reverse-polarity + TVS protection) | — | keep isolated from actuator power | `hardware/sensors-interface/` |
+| L1 power | DC | 6 W (**confirm voltage on the cable label**; not published on the vendor page) | — | isolate from actuator power, add reverse-polarity + TVS protection | `hardware/sensors-interface/` |
 | Board ↔ actuator controller | UART (`/dev/ttyS0` on the 40-pin header) | TTL (**verify level on your hardware**) | custom `0xAA55` frame | 115200 8N1 (up to 921600); raw mode, no hardware flow control, write-all + `tcdrain` | `serial_port` / `baud_rate` |
-| Actuator controller ↔ 4 × digital servo | servo bus (**confirm on hardware**, see below) | TTL half-duplex / RS485 / PWM | vendor protocol | order `0=front-left 1=front-right 2=rear-left 3=rear-right` | wrapped under `ISuspensionDriver` |
+| Actuator controller ↔ 4 × **RDS3115 mg** | 3-pin JR plug (red VCC / black GND / yellow PWM) | PWM pulse width | **500~2500 µs, neutral 1500 µs, 50~330 Hz** | order `0=front-left 1=front-right 2=rear-left 3=rear-right` | wrapped under `ISuspensionDriver` |
+| Servo power | DC | 5 V / 6.8 V | — | stall **2.5 A per channel**, budget ≥10 A for four, **isolate from logic power** | — |
 
 **UniLiDAR L1 — Ethernet, not serial.** The driver only uses POSIX sockets and does not depend on the
 Unitree SDK. Private UDP packets go through `packet_parser` (stream framing; UDP can drop or truncate)
@@ -362,19 +410,25 @@ Serial permission: `sudo usermod -aG dialout $USER`, then re-login (do not `chmo
 At 115200 bps the frame size collides head-on with a 10–20 Hz LiDAR rate, which is why v2 switched to
 `int16` and offers higher baud rates.
 
-**Servo bus — not fixed in this repo; identify yours:**
+**Servo side — confirmed: PWM servos (RDS3115 mg).** Three wires per servo: `red=VCC`,
+`black(brown)=GND`, `yellow(white)=PWM`, on a 3-pin JR-style plug. The controller drives **4 independent
+PWM channels**: frequency 50~330 Hz (50 Hz = 20 ms period is typical), pulse width **500~2500 µs**,
+**neutral 1500 µs**, 180° across the range, 3 µs dead band.
 
-| Servo type | Wiring | How to tell |
-|------------|--------|-------------|
-| Bus servo (TTL half-duplex) | `VCC / GND / DATA`, all servos share one bus | single-wire half-duplex, needs direction control |
-| Bus servo (RS485) | `VCC / GND / A / B` + transceiver, 120 Ω termination | differential pair |
-| PWM servo | one `PWM / VCC / GND` per channel | 50 Hz, ~1–2 ms pulse width |
+**The software↔mechanics conversion must be calibrated on a rig.** The `0xAA55` frame carries a target
+**height in mm**, but the servo only understands **pulse width**. The chain is
+`height mm → rocker angle ° → pulse width µs`, and the transmission ratio comes from the linkage —
+it cannot be derived from code. Measure several (height ↔ pulse width) pairs with the linkage in place,
+fit a linear map, and write it into the controller; re-calibrate whenever the linkage changes.
 
-**Wiring checklist:** L1 at 12 V with the host on the same subnet · `udp_probe` receives packets of the
-expected length · UART device present, baud matches the far end, user in `dialout` · **GND shared**
-between board and actuator controller (a floating ground is the usual cause of "works intermittently")
-· actuator power isolated from logic/compute power · verify wheel order and direction one channel at a
-time before driving · emergency stop independent of software.
+**Wiring checklist:** L1 voltage confirmed from the cable label, host on the same subnet · `udp_probe`
+receives packets of the expected length · UART device present, baud matches the far end, user in
+`dialout` · **GND shared** between board and actuator controller (a floating ground is the usual cause
+of "works intermittently")
+· servo PWM frequency and pulse range written to the controller (500~2500 µs), **verified unloaded
+before fitting the linkage** · rig-calibrate the `height mm ↔ pulse width` map and record the ratio
+· servo supply (5/6.8 V, ≥10 A headroom) isolated from logic/compute power · verify wheel order and
+direction one channel at a time before driving · emergency stop independent of software.
 
 ## Interface reference
 

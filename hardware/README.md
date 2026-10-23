@@ -12,7 +12,7 @@ UniLiDAR L1 (点云+IMU) ──以太网──> 香橙派 AI Pro (Linux, 8 TOPS)
         香橙派 控制线程 200Hz
             │  串口下行帧 0xAA 0x55 | id | seq | count | N×int16 | CRC16
             ▼  (id: 0x10 设模式 / 0x11 设高度 / 0x12 急停)
-      4 路数字舵机（TTL/RS485 总线）
+      4 路 RDS3115 舵机（PWM 500~2500 μs）
 ```
 
 软件层已暴露两个真实痛点（见 `src/suspension_control_v3` 与 `suspension_preview_v2`）：
@@ -26,7 +26,7 @@ UniLiDAR L1 (点云+IMU) ──以太网──> 香橙派 AI Pro (Linux, 8 TOPS)
 
 | 优先级 | 板子 | 目录 | 解决痛点 |
 |--------|------|------|----------|
-| **P0** | 主控 + 执行一体化板 | [`main-control-board/`](main-control-board/) | 搬 200Hz 控制到 MCU + 4 路隔离舵机总线 + 硬件急停；消 `command_sink` 阻塞，把 `safety_state_machine` 的 Emergency 做成硬件 |
+| **P0** | 主控 + 执行一体化板 | [`main-control-board/`](main-control-board/) | 搬 200Hz 控制到 MCU + **4 路 PWM 舵机驱动** + 硬件急停；消 `command_sink` 阻塞，把 `safety_state_machine` 的 Emergency 做成硬件 |
 | **P1** | 电源 / EMC 板 | [`power-emc-board/`](power-emc-board/) | 舵机大电流干扰算力/传感；集中供电 + 反接/保险丝/共模扼流 |
 | **P1** | 硬件急停 / 看门狗板 | [`estop-watchdog-board/`](estop-watchdog-board/) | 心跳丢失即切舵机电源，fail-safe（硅级实现 `link_lost_timeout_s`） |
 | **P2** | 传感器 / L1 接口板 | [`sensors-interface/`](sensors-interface/) | IMU/轮速信号调理 + 减振；L1 转接/安装板 |
