@@ -57,8 +57,9 @@ the "disturb first, compensate later" delay at its source.
 (43200 sampled) · scan **11 Hz** circumferential / **180 Hz** vertical · IMU 3-axis accel + 3-axis gyro ·
 4D data (3D position + 1D intensity) · interface **TTL UART** · ≥100 Klux ambient light immunity ·
 Class 1 eye safety · 6 W · 75×75×65 mm · 230 g.
-⚠️ The vendor lists **TTL UART**, while this repo's driver reads **UDP Ethernet** (`192.168.1.62:6101` →
-host `:6201`): the L1 is native UART and reaches Ethernet through the net/breakout path used here.
+✅ The vendor's **TTL UART** interface matches the hardware: the rig connects the L1 to the board over
+**USB serial via a CH340 adapter** (`/dev/ttyUSB0`, 2 Mbps). Ethernet UDP (`192.168.1.62:6101` → host
+`:6201`) is an **alternative** needing a serial-to-UDP adapter or a networked L1 variant.
 Supply voltage is **not** published on the vendor page — confirm it on the cable before powering up.
 
 **RDS3115 mg servo:** control **PWM** · pulse **500~2500 µs**, **neutral 1500 µs** · 180° across the range ·
@@ -102,7 +103,7 @@ flowchart TB
     end
     subgraph S2["Driver & processing · Orange Pi AI Pro"]
         direction LR
-        DR["unilidar_driver<br/>UDP packet parsing"]
+        DR["unilidar_driver<br/>packet parsing"]
         F["Sensor fusion<br/>timestamp alignment"]
         P["Road height extraction<br/>PCL"]
         A["Attitude estimation<br/>complementary filter"]
@@ -112,7 +113,7 @@ flowchart TB
         K["Kinematic decoupling<br/>hysteresis PWM"]
         D["4 × digital servo"]
     end
-    L --> DR
+    L -->|"USB serial · CH340 · 2 Mbps"| DR
     DR --> F
     W --> F
     F --> P
@@ -128,6 +129,10 @@ Dashed nodes are hardware; everything else is implemented in this repository: pa
 `unilidar_driver`, perception and processing from `suspension_preview_v2`,
 closed-loop control and kinematic decoupling from `suspension_control_v3`. Driving the physical servos happens
 behind `ISuspensionDriver`; the actual command set depends on the actuator protocol in use.
+
+The L1 → driver edge shows the **physical link** (USB serial via CH340 at 2 Mbps); `unilidar_driver`
+currently implements UDP receive only — the serial receiver is pending, see
+[Wiring and physical interfaces](#wiring-and-physical-interfaces).
 
 ### Preview node data flow
 
@@ -408,21 +413,42 @@ running on hardware:
 
 ## Wiring and physical interfaces
 
-The prototype has only **two data links** (one Ethernet, one UART) plus **two power rails**.
+The prototype has only **two data links** (one USB serial via CH340, one UART) plus **two power rails**.
 
 | Link | Physical | Electrical | Protocol | Key parameters | Config |
 |------|----------|-----------|----------|----------------|--------|
-| Board ↔ UniLiDAR L1 | Ethernet RJ45 | 100/1000BASE-TX | UDP + private packets | LiDAR `192.168.1.62:6101`; host `192.168.1.2:6201` | `local_ip` / `local_port` / `source_ip` |
+| Board ↔ UniLiDAR L1 | **USB (via CH340 adapter)** | **TTL UART → USB** | private / MavLink frames | `/dev/ttyUSB0`, **2,000,000 bps**; needs `dialout` | see Ethernet UDP alternative below |
 | L1 power | DC | 6 W (**confirm voltage on the cable label**; not published on the vendor page) | — | isolate from actuator power, add reverse-polarity + TVS protection | `hardware/sensors-interface/` |
 | Board ↔ actuator controller | UART (40-pin **pin 8 TXD / pin 10 RXD** = `/dev/ttyS0`) | **3.3 V TTL** | custom `0xAA55` frame | 115200 8N1 (up to 921600); raw mode, no hardware flow control, write-all + `tcdrain` | `serial_port` / `baud_rate` |
 | Actuator controller ↔ 4 × **RDS3115 mg** | 3-pin JR plug (red VCC / black GND / yellow PWM) | PWM pulse width | **500~2500 µs, neutral 1500 µs, 50~330 Hz** | order `0=front-left 1=front-right 2=rear-left 3=rear-right` | wrapped under `ISuspensionDriver` |
 | Servo power | DC | 5 V / 6.8 V | — | stall **2.5 A per channel**, budget ≥10 A for four, **isolate from logic power** | — |
 
-**UniLiDAR L1 — Ethernet, not serial.** The driver only uses POSIX sockets and does not depend on the
-Unitree SDK. Private UDP packets go through `packet_parser` (stream framing; UDP can drop or truncate)
-→ `frame_decoder` → `PointCloud2` + `Imu`. The LiDAR emits ~180 scan lines/s; `cloud_scan_num=18`
-yields ~**10 Hz** point clouds. Frames: `unilidar_lidar` / `unilidar_imu` → `base_link`.
-Run `ros2 run unilidar_driver udp_probe --port 6201 --seconds 5 --hex` before anything else.
+**UniLiDAR L1 — USB serial (CH340 adapter), not Ethernet.** The L1's native interface is **TTL UART**
+(the vendor spec sheet lists "TTL UART" too), and USB serial is the **default** mode of the official
+Unitree SDK. Wiring: `L1 (TTL UART) → CH340 adapter → USB → board → /dev/ttyUSB0`.
+
+- **Device**: usually `/dev/ttyUSB0` on Linux (`ls /dev/ttyUSB*`); pin it with a udev rule when several
+  USB-serial devices are present.
+- **Baud rate: `2,000,000`** (official SDK default) — needed for IMU at 100–1000 Hz plus aggregated scans.
+- **Permission**: `sudo usermod -aG dialout $USER`, then re-login (do not `chmod 777`).
+- **Power**: 6 W; the vendor page does not publish the voltage — confirm it on the cable before powering up.
+
+> ⚠️ **CH340 at 2 Mbps needs verifying.** CH340 is specced up to 2 Mbps, but on Linux it uses the
+> `ch341` driver, and support for such a non-standard baud rate is not reliable across all versions.
+> If the device enumerates but no data arrives (or frames are mostly bad), suspect the baud rate / adapter
+> chip (compare with a CP2102 or FT232) before blaming the LiDAR.
+
+**Alternative: Ethernet UDP.** With a serial-to-UDP adapter board or a networked L1 variant, data
+arrives as UDP: LiDAR `192.168.1.62:6101` → host `192.168.1.2:6201`, configured via
+`local_ip` / `local_port` / `source_ip`.
+
+> ⚠️ **Gap vs the driver (important):** `unilidar_driver` currently implements **UDP receive only**
+> (`udp_receiver.hpp`) — there is no serial receiver. With the CH340 path you need to add one.
+> Fortunately `packet_parser` is already designed for a boundary-less byte stream (its comments note
+> serial may start mid-frame), so protocol/parsing is decoupled from transport: a serial receiver can
+> reuse the existing parser without touching the protocol layer.
+
+Frames: `unilidar_lidar` / `unilidar_imu` → `base_link`.
 ⚠️ Quaternion order is not fixed by the vendor; default `xyzw` — with the LiDAR level and static,
 `w` should be ≈ ±1 and the rest ≈ 0.
 
@@ -448,10 +474,11 @@ PWM channels**: frequency 50~330 Hz (50 Hz = 20 ms period is typical), pulse wid
 it cannot be derived from code. Measure several (height ↔ pulse width) pairs with the linkage in place,
 fit a linear map, and write it into the controller; re-calibrate whenever the linkage changes.
 
-**Wiring checklist:** L1 voltage confirmed from the cable label, host on the same subnet · `udp_probe`
-receives packets of the expected length · UART device present, baud matches the far end, user in
-`dialout` · **GND shared** between board and actuator controller (a floating ground is the usual cause
-of "works intermittently")
+**Wiring checklist:** L1 voltage confirmed from the cable label · CH340 adapter on a board USB port and
+`ls /dev/ttyUSB*` shows the device · baud rate set to **2,000,000** and user in `dialout` (pin the name
+with a udev rule) · data arrives steadily (on the UDP alternative, `udp_probe` sees packets of the
+expected length) · **GND shared** between board and actuator controller (a floating ground is the usual
+cause of "works intermittently")
 · servo PWM frequency and pulse range written to the controller (500~2500 µs), **verified unloaded
 before fitting the linkage** · rig-calibrate the `height mm ↔ pulse width` map and record the ratio
 · servo supply (5/6.8 V, ≥10 A headroom) isolated from logic/compute power · verify wheel order and
@@ -466,7 +493,7 @@ mismatch in an *implicit* agreement between the two ends: QoS, `frame_id`, units
 
 | Layer | Interface | Transport | Code |
 |-------|-----------|-----------|------|
-| Physical | LiDAR uplink | UDP (`local_port`, default **6201**) | `unilidar_driver/udp_receiver.hpp` |
+| Physical | LiDAR uplink | UDP (`local_port`, default **6201**); physical rig uses CH340 serial `/dev/ttyUSB0` @ 2 Mbps — serial receiver pending | `unilidar_driver/udp_receiver.hpp` |
 | Physical | Actuator downlink | UART (default `/dev/ttyS0` @ 115200, up to 921600) | `suspension_preview_v2/serial_port.hpp` |
 | Comms | Inter-node data | ROS2 topics + custom messages + QoS | see below |
 | Abstract | Actuator driver | `ISuspensionDriver` | `suspension_preview_v2/suspension_driver.hpp` |
