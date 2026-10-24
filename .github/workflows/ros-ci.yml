@@ -125,7 +125,7 @@ jobs:
       # 放得下（macOS 队列只有约 512 B，主端写在从端读之前会阻塞，那是
       # 本机自检才需要 pushAndPump 边写边读的原因）。这一步在独立仓库
       # unilidar-driver 的 core job 里也跑（双编译器 × ASan），两边都门住。
-      - name: 驱动串口接收自检（63 项）
+      - name: 驱动串口接收自检（64 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh

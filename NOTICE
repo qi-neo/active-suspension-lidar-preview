@@ -83,7 +83,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
       ROS 适配层：参数、QoS、TF、PointCloud2 组装、诊断
 
   src/unilidar_driver/examples/decoder_selftest.cpp
-      63 项断言的离线自检
+      135 项断言的离线自检
+
+  src/unilidar_driver/examples/serial_receiver_selftest.cpp
+      64 项断言的串口接收自检（PTY 虚拟串口；macOS 为 63 项，
+      B2000000 是 Linux 扩展常量）
 
   src/unilidar_driver/examples/udp_probe.cpp
       实测定界探针

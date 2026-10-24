@@ -25,8 +25,8 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
 > executes five offline self-test groups (v3 control: 443 checks, driver packet parsing: 135
-> checks, driver serial receive: 63 checks, v2 pure functions: 196 checks, level calibration: 69
-> checks — 906 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> checks, driver serial receive: 64 checks, v2 pure functions: 196 checks, level calibration: 69
+> checks — 907 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
@@ -186,7 +186,8 @@ definitions (3D point packet documented 1036 B, computed from fields 1044 B),
 and hardcoding a length would reject every packet from a newer firmware. On the
 UDP alternative the bundled `udp_probe` tool checks the real packet length and
 CRC validity on target hardware; on the serial path `serial_receiver_selftest`
-(63 checks over a PTY virtual port) verifies reception offline. The parsing core
+(64 checks over a PTY virtual port on Linux; 63 on macOS, where `B2000000` is
+missing) verifies reception offline. The parsing core
 does not depend on ROS and can be built and self-tested on any machine.
 
 It also fixes a QoS incompatibility present in the official node: that node
@@ -376,7 +377,7 @@ All three C++ packages (the historical `suspension_preview` aside) ship offline 
 
 ```bash
 ros2 run unilidar_driver decoder_selftest           # packet parsing and decoding, 135 checks
-ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 63 checks
+ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 64 checks (63 on macOS)
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
 ros2 run suspension_control_v3 control_selftest    # control and safety logic, 443 checks

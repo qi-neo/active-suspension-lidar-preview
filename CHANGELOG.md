@@ -26,10 +26,13 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
   设计），协议层零改动
 - 节点新增 `transport` 参数（`serial` 默认 / `udp` 备选）与
   `serial_device`、`serial_baud`；诊断日志按传输层分别给出排障建议
-- 新增 `serial_receiver_selftest`：PTY 主从对虚拟串口，63 项断言，覆盖
+- 新增 `serial_receiver_selftest`：PTY 主从对虚拟串口，64 项断言（Linux 平台；
+  macOS 本机 63 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps
+  断言），覆盖
   整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU
   帧与各类打开失败路径。本机（macOS）实测全过
-- 离线自检总数 843 → **906** 项（驱动 135 + 63），README 中英同步；
+- 离线自检总数 843 → **907** 项（驱动 135 + 64；串口 64 为 Linux 平台数，
+  macOS 本机 63），README 中英同步；
   UDP 从"唯一实现"改为"备选路径"，CH340 串口成为文档中的实物默认链路
 
 ### CI 与文档
@@ -40,10 +43,16 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
   接收 63 项」，但 `ros-ci.yml` 里根本没有这一步（vendored 副本的 CMakeLists
   早已注册 `serial_receiver_selftest`，却没有任何步骤调用它——与当年
   「install(TARGETS) 装了却没人跑」是同一类问题）。两处都补上：`ros-ci.yml`
-  新增「驱动串口接收自检（63 项）」步骤；`sanitizer.yml` 新增同款
+  新增「驱动串口接收自检（64 项）」步骤；`sanitizer.yml` 新增同款
   ASan + UBSan 步骤（termios/PTY 路径同样要过 sanitizer，与独立仓库
   `unilidar-driver` 的 core job 双编译器 × ASan 互为双保险）。本机对
-  vendored 副本按 CI 同款命令实测：ASan/UBSan 下 63 项全过
+  vendored 副本按 CI 同款命令实测：ASan/UBSan 下 macOS 63 项全过（Linux 为
+  64 项，见下条）
+- **串口自检数字按 CI 平台计 64 项**：波特率表里的 2 Mbps 断言依赖
+  `B2000000`，它是 Linux 扩展常量，macOS 的 termios 没有、跳过该项——同一份
+  `serial_receiver_selftest` 在 CI（Linux）实跑 64 项、本机（macOS）63 项。
+  文档与 CI 步骤名统一按 CI 平台 64 项计并注明平台差异；驱动总数 906 → **907**
+  项，README 中英、包级 README（与独立仓库同源同步）、NOTICE 同步
 - **sanitizer 拆成独立 workflow**（`.github/workflows/sanitizer.yml`）：GitHub 的
   workflow 徽章只能对应整个 workflow，没有"单个 job 的徽章"；混在 `ros-ci.yml`
   里时 README 只能放一个总徽章，看不出 ASan 这一项到底绿没绿。拆开后 ASan 徽章

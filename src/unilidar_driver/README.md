@@ -35,7 +35,7 @@ src/unilidar_driver/
 ├── src/                    以上五个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
 │   ├── decoder_selftest.cpp        离线自检，135 项断言
-│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），63 项断言
+│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
 │   └── udp_probe.cpp               实测定界探针
 ├── launch/unilidar_driver.launch.py
 └── config/unilidar_params.yaml
@@ -70,7 +70,7 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/src/frame_decoder.cpp src/unilidar_driver/src/udp_receiver.cpp \
   -o /tmp/decoder_selftest && /tmp/decoder_selftest
 
-# 串口接收：PTY 主从对模拟虚拟串口，63 项断言，不需要真雷达也不需要真串口
+# 串口接收：PTY 主从对模拟虚拟串口，64 项断言（macOS 63），不需要真雷达也不需要真串口
 clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/examples/serial_receiver_selftest.cpp \
   src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
@@ -212,8 +212,9 @@ L1 (TTL UART) ──CH340 转接模块──> USB ──> /dev/ttyUSB0 @ 2,000,0
 - 打不开串口时按节点启动日志的排查顺序：设备是否存在（`ls /dev/ttyUSB*`）、
   用户是否在 `dialout` 组、波特率、TX/RX 交叉与共地。
 
-串口接收有 63 项离线自检（`serial_receiver_selftest`）：用 PTY 主从对造
-虚拟串口，走与 `/dev/ttyUSB0` 完全相同的 termios 代码路径，覆盖整帧直达、
+串口接收有 64 项离线自检（`serial_receiver_selftest`，Linux 平台；macOS 本机
+为 63 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps 断言）：
+用 PTY 主从对造虚拟串口，走与 `/dev/ttyUSB0` 完全相同的 termios 代码路径，覆盖整帧直达、
 跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、以及各类
 打开失败路径——不需要真雷达，也不需要真串口。
 
@@ -244,7 +245,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
 | 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 135 项断言全过 |
-| `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，63 项断言全过：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、设备不存在/非终端/坏波特率/未打开即读；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
+| `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，64 项断言全过（Linux；macOS 本机 63 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、设备不存在/非终端/坏波特率/未打开即读；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 逐点时间与环号语义 | 对照官方 `parseFromPacketToPointCloud` 源码与官方 README 示例（`ringNum = 18`、首条线 `ring = 1`）核对；离线自检覆盖单调性、步长、两种时间戳基准、拼帧后 ring 分布。**真机数据仍待确认** |
 | `PointCloud2` time/ring 字段 | 核心库输出由离线自检覆盖；`point_step = 24` 与字段偏移按字节手算，节点发布路径**本机无 ROS 未编译**（只用最小 ROS 桩头文件做过语法/模板实例化检查），待 CI 的 `ros` job 与实机确认 |

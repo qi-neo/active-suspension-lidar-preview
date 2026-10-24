@@ -113,7 +113,7 @@ jobs:
       # 与 /dev/ttyUSB0 完全相同的 termios 路径，这段代码同样要过 sanitizer——
       # 断言只验"值对不对"，验不出"写没写错地方"。与独立仓库 unilidar-driver
       # 的 core job（双编译器 × ASan）互为双保险
-      - name: 驱动串口接收自检（ASan + UBSan）
+      - name: 驱动串口接收自检（ASan + UBSan；64 项）
         run: |
           set -e
           cd src/active-suspension-lidar-preview
