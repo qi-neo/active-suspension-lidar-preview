@@ -132,6 +132,18 @@ jobs:
           . install/setup.sh
           ros2 run unilidar_driver serial_receiver_selftest
 
+      # 压力灌入：PTY 主端按 2 Mbps 灌 3 秒合成报文，同时掺垃圾与伪帧头、
+      # 每 2 秒一次 100 ms 读暂停，核验零丢失/零误判/缓冲有界。这一步把
+      # 「CH340 需实测」缩小到只剩物理层误码率；packet_parser 坏帧恢复路径
+      # 的 pos 重置 bug（每次注入丢一整帧）正是它最先发现的，与接收自检
+      # 互为攻防。独立仓库 core job 里同样跑（双编译器 × ASan）。
+      - name: 驱动串口压力自检（14 项，2 Mbps 灌入 3 s）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run unilidar_driver serial_stress_selftest --seconds 3 --quiet
+
       # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
       # install(TARGETS) 里装了可执行，却没有任何步骤调用它
       - name: v2 纯函数自检（196 项）

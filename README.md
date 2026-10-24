@@ -23,8 +23,8 @@
 > - 自研宇树 L1 的报文解析与几何换算（串口/UDP 双传输，串口为实物默认路径），不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，再 `colcon test` 跑注册进 CTest 的自检，并跑五组离线自检（v3 控制 443 项、驱动报文解析 135 项、驱动串口接收 64 项、
-> v2 纯函数 196 项、虚拟水平面 69 项，共 907 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，再 `colcon test` 跑注册进 CTest 的自检，并跑六组离线自检（v3 控制 443 项、驱动报文解析 135 项、驱动串口接收 64 项、驱动串口压力 14 项、
+> v2 纯函数 196 项、虚拟水平面 69 项，共 921 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
 > 不需要 ROS 和硬件就能确认这套代码是完整可跑的（443 项检查）。
@@ -212,6 +212,10 @@ L1 (TTL UART) ──► CH340 转接模块 ──► USB ──► 香橙派 USB
 > （`serial_receiver_selftest`，Linux 平台；macOS 本机为 63 项——`B2000000` 是
 > Linux 扩展常量，没有它的平台跳过 2 Mbps 断言。PTY 虚拟串口，覆盖整帧直达、跨写拆包、
 > 垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧与打开失败路径）。
+> 另有 14 项**压力自检**（`serial_stress_selftest`）：PTY 主端按 2 Mbps 灌入
+> 合成报文，同时掺垃圾与伪帧头、周期性读暂停，断言灌入帧数 == 解出帧数、
+> 零 CRC/帧尾/序号误判、缓冲与内存有界——本机 60 秒实测灌入 126,636 帧
+> 全部解出。`packet_parser` 一个真 bug（坏帧后丢整帧）就是它最先抓到的。
 > `packet_parser` 按「无边界字节流」设计（串口可能在任意位置开始接收），
 > 两条路径喂给解析器的都是字节流，协议/解析层零改动。
 
@@ -375,6 +379,7 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```bash
 ros2 run unilidar_driver decoder_selftest           # 报文解析与解码，135 项检查
 ros2 run unilidar_driver serial_receiver_selftest   # 串口接收（PTY 虚拟串口），64 项检查（macOS 63）
+ros2 run unilidar_driver serial_stress_selftest     # 串口压力（2 Mbps 灌入，默认 60 s），14 项检查
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
 ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
 ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，443 项检查
@@ -447,7 +452,8 @@ active-suspension-lidar-preview/
 字节数注释与其自身字段并不一致（3D 点云整包注释 1036，按字段实算 1044），
 硬编码长度会把新固件的包整批判坏。UDP 备选路径可用配套的 `udp_probe` 探针在
 真机上核对真实包长与 CRC 是否成立；串口路径可用 `serial_receiver_selftest`
-（PTY 虚拟串口，64 项检查；macOS 本机 63 项）离线验证。解析核心不依赖 ROS，可在任意机器上编译自检。
+（PTY 虚拟串口，64 项检查；macOS 本机 63 项）与 `serial_stress_selftest`
+（2 Mbps 满码率灌入，14 项检查）离线验证。解析核心不依赖 ROS，可在任意机器上编译自检。
 
 相对官方节点还修掉一处 QoS 不兼容：官方按 RELIABLE 发布，而 v3 控制节点用
 `SensorDataQoS`（BEST_EFFORT）订阅，两者不兼容会表现为「明明在发却收不到」。

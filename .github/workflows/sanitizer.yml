@@ -127,6 +127,23 @@ jobs:
             -o /tmp/asan_serial_receiver
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_receiver
 
+      # 压力灌入同样过 sanitizer：3 秒 2 Mbps 灌入 + 垃圾注入 + 读暂停，
+      # 校验缓冲边界写入与 erase 后的越界访问。packet_parser 的 pos 重置
+      # bug 就是压力测试最先发现的，插桩版要能守住这条路径
+      - name: 驱动串口压力自检（ASan + UBSan；14 项，2 Mbps 灌入 3 s）
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/serial_stress_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/serial_receiver.cpp \
+            -o /tmp/asan_serial_stress
+          ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_stress --seconds 3 --quiet
+
   # 失败后回传日志：必须是独立 job（needs: [sanitize]）。在 sanitize 自己的步骤里
   # 回传时它还没结束，拿不到完整日志；这里 job 已结束，可以下载到全部输出。
   # 动机：开发机没有 ROS/Docker，Actions 网页日志要认证，跑挂了只能看"红"。

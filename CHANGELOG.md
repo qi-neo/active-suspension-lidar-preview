@@ -35,6 +35,29 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
   macOS 本机 63），README 中英同步；
   UDP 从"唯一实现"改为"备选路径"，CH340 串口成为文档中的实物默认链路
 
+### 驱动：2 Mbps 压力自检与 `packet_parser` 坏帧修复（`unilidar_driver`）
+
+继续同步独立仓库 `qi-neo/unilidar-driver` 的本轮改动：
+
+- 新增 `serial_stress_selftest`（14 项断言）：PTY 主端按 2 Mbps 灌入合成
+  报文，同时掺三种干扰——整秒边界注入 16 B 垃圾 + 12 B 伪帧头、每 2 秒
+  一次 100 ms 读暂停（瞬态背压）、帧必然跨写。断言灌入帧数 == 解出帧数、
+  `bad_crc`/`bad_tail`/`seq_gaps`/`duplicates` 全 0、缓冲与 RSS 有界、
+  实际速率不低于目标 80%。CI 以 `--seconds 3` 运行；本机 60 秒满量实测
+  灌入 126,636 帧全部解出（点云 113,972 / IMU 12,664），缓冲峰值
+  2,064 B，RSS 峰值 1.7 MB。至此「CH340 需实测」缩小到只剩物理层误码率
+- **修复 `packet_parser` 坏帧后丢整帧**：`pull()` 的扫描游标 `pos` 原在
+  for 循环外声明，`bad_size`/`bad_tail`/`bad_crc` 分支 `erase(pos + 1)`
+  后 `continue` 时未重置 `pos`，下一轮从旧位置扫描而内容已前移，跳过真
+  帧头——每次坏帧后再丢一整帧。**该 bug 由压力自检最先发现**：此前
+  135 项报文自检与 64 项串口自检全绿，但它们的坏帧用例后面都不接好帧，
+  走不到恢复路径。修复为每轮从 0 开扫；回归 135 + 64 + 14 项全绿
+- 测试基建抽取为 `selftest_fixture.hpp`（PTY 主从对、帧构造、边写边读），
+  与 `serial_receiver_selftest` 共用；重构后断言逐条核对一条不差
+- 离线自检总数 907 → **921** 项（新增驱动串口压力 14 项），README 中英、
+  包级 README（与独立仓库同源同步）更新；`ros-ci.yml` 与 `sanitizer.yml`
+  各新增「驱动串口压力自检」步骤
+
 ### CI 与文档
 
 - **CI 门禁与文档口径对齐**（核验 10-23 推送后的 CI 日志时发现）：`ros-ci.yml`

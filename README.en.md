@@ -24,9 +24,10 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes five offline self-test groups (v3 control: 443 checks, driver packet parsing: 135
-> checks, driver serial receive: 64 checks, v2 pure functions: 196 checks, level calibration: 69
-> checks — 907 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> executes six offline self-test groups (v3 control: 443 checks, driver packet parsing: 135
+> checks, driver serial receive: 64 checks, driver serial stress: 14 checks, v2 pure
+> functions: 196 checks, level calibration: 69
+> checks — 921 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
@@ -187,7 +188,9 @@ and hardcoding a length would reject every packet from a newer firmware. On the
 UDP alternative the bundled `udp_probe` tool checks the real packet length and
 CRC validity on target hardware; on the serial path `serial_receiver_selftest`
 (64 checks over a PTY virtual port on Linux; 63 on macOS, where `B2000000` is
-missing) verifies reception offline. The parsing core
+missing) verifies reception offline, and `serial_stress_selftest` (14 checks)
+feeds 2 Mbps through the same termios path with junk injected and periodic read
+pauses. The parsing core
 does not depend on ROS and can be built and self-tested on any machine.
 
 It also fixes a QoS incompatibility present in the official node: that node
@@ -378,6 +381,7 @@ All three C++ packages (the historical `suspension_preview` aside) ship offline 
 ```bash
 ros2 run unilidar_driver decoder_selftest           # packet parsing and decoding, 135 checks
 ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 64 checks (63 on macOS)
+ros2 run unilidar_driver serial_stress_selftest     # serial stress (2 Mbps feed, 60 s default), 14 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
 ros2 run suspension_control_v3 control_selftest    # control and safety logic, 443 checks
@@ -451,10 +455,16 @@ parameter to `udp` and configure it via `local_ip` / `local_port` / `source_ip`.
 
 > ✅ **Both transports are implemented.** `unilidar_driver` switches with the `transport` parameter:
 > **`serial` (default)** goes through `serial_receiver.hpp` on `/dev/ttyUSB0` @ 2 Mbps — the
-> physical link above; `udp` goes through `udp_receiver.hpp`. The serial receiver has 63 offline
+> physical link above; `udp` goes through `udp_receiver.hpp`. The serial receiver has 64 offline
 > checks (`serial_receiver_selftest`, a PTY virtual serial port covering whole-frame delivery,
 > split writes, junk/fake-header resynchronisation, the no-data contract, multiple frames per
-> write, IMU frames and open-failure paths). `packet_parser` is designed for a boundary-less byte
+> write, IMU frames and open-failure paths; 63 on macOS — the 2 Mbps assertion needs the Linux-only
+> `B2000000` termios constant). On top of that, `serial_stress_selftest` adds 14 checks: a PTY
+> master feeding 2 Mbps of synthetic frames with junk and fake headers injected and periodic read
+> pauses, asserting frames fed == frames decoded, zero CRC/tail/sequence false alarms and bounded
+> buffers and memory — 60 s locally decoded all 126,636 fed frames. A real `packet_parser` bug
+> (losing a whole frame after a bad one) was first caught by it.
+> `packet_parser` is designed for a boundary-less byte
 > stream (serial may start mid-frame), so both paths feed the same parser with zero protocol-layer
 > changes.
 

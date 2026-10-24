@@ -36,6 +36,8 @@ src/unilidar_driver/
 ├── examples/
 │   ├── decoder_selftest.cpp        离线自检，135 项断言
 │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
+│   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
+│   ├── selftest_fixture.hpp        两个串口自检共用的测试基建
 │   └── udp_probe.cpp               实测定界探针
 ├── launch/unilidar_driver.launch.py
 └── config/unilidar_params.yaml
@@ -76,6 +78,13 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
   src/unilidar_driver/src/serial_receiver.cpp \
   -o /tmp/serial_receiver_selftest && /tmp/serial_receiver_selftest
+
+# 串口压力：2 Mbps 灌入 + 垃圾/伪帧头注入 + 读暂停，14 项断言；--seconds 控制时长
+clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
+  src/unilidar_driver/examples/serial_stress_selftest.cpp \
+  src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
+  src/unilidar_driver/src/serial_receiver.cpp \
+  -o /tmp/serial_stress_selftest && /tmp/serial_stress_selftest --seconds 60
 ```
 
 ## 逐点时间与环号（运动去畸变的前置）
@@ -218,10 +227,19 @@ L1 (TTL UART) ──CH340 转接模块──> USB ──> /dev/ttyUSB0 @ 2,000,0
 跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、以及各类
 打开失败路径——不需要真雷达，也不需要真串口。
 
-> ⚠️ **CH340 在 2 Mbps 下需实测。** CH340 标称支持到 2 Mbps，但 Linux 走
-> `ch341` 驱动，对这类非常规波特率的支持并非各版本都稳。能识别设备但收不到
-> 数据 / 大量坏帧时，优先怀疑波特率与转接芯片（换 CP2102 / FT232 对照），
-> 而不是雷达本身。
+在此之上还有 14 项**压力自检**（`serial_stress_selftest`）：PTY 主端按 2 Mbps
+灌入合成报文（默认 60 秒），同时掺三种干扰——整秒边界注入 16 B 垃圾 + 12 B
+伪帧头、每 2 秒一次 100 ms 读暂停（瞬态背压）、帧必然跨写。断言灌入帧数 ==
+解出帧数、`bad_crc`/`bad_tail`/`seq_gaps`/`duplicates` 全 0、缓冲与 RSS 有界、
+实际速率不低于目标 80%。本机 60 秒实测：灌入 126,636 帧全部解出，缓冲峰值
+2,064 B，RSS 峰值 1.7 MB。`packet_parser` 坏帧恢复路径的丢帧 bug 就是它最先
+抓到的（见仓库根 CHANGELOG）。
+
+> ⚠️ **CH340 在 2 Mbps 下的物理层需实测。** 协议层已由上面的压力自检全覆盖，
+> 实物接上后只剩 USB 转串口模块与线材的误码待验证：诊断日志里 `CRC` 计数
+> 持续为 0 即通过。CH340 标称支持到 2 Mbps，但 Linux 走 `ch341` 驱动，对这类
+> 非常规波特率的支持并非各版本都稳。能识别设备但收不到数据 / 大量坏帧时，
+> 优先怀疑波特率与转接芯片（换 CP2102 / FT232 对照），而不是雷达本身。
 
 ## 相对官方节点的修正
 
@@ -246,6 +264,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
 | 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 135 项断言全过 |
 | `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，64 项断言全过（Linux；macOS 本机 63 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、设备不存在/非终端/坏波特率/未打开即读；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
+| 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：60 秒灌入 126,636 帧 = 解出 126,636 帧，`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB；CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 逐点时间与环号语义 | 对照官方 `parseFromPacketToPointCloud` 源码与官方 README 示例（`ringNum = 18`、首条线 `ring = 1`）核对；离线自检覆盖单调性、步长、两种时间戳基准、拼帧后 ring 分布。**真机数据仍待确认** |
 | `PointCloud2` time/ring 字段 | 核心库输出由离线自检覆盖；`point_step = 24` 与字段偏移按字节手算，节点发布路径**本机无 ROS 未编译**（只用最小 ROS 桩头文件做过语法/模板实例化检查），待 CI 的 `ros` job 与实机确认 |

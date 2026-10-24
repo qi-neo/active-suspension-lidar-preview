@@ -37,9 +37,13 @@ bool PacketParser::seek_header(std::size_t& pos) {
 }
 
 PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out_type) {
-  std::size_t pos = 0;
-
   for (;;) {
+    // 每轮从 0 开始扫。erase(pos + 1) 之后缓冲内容整体前移，上一轮的
+    // pos 在新缓冲里已不指向原字节——若沿用旧值会跳过真正的帧头。
+    // （duplicate 分支曾单独重置过一次，其余三个 continue 分支漏了；
+    //  压力自检用「16 B 垃圾 + 伪帧头 + 好帧」抓到过丢整帧，见
+    //  serial_stress_selftest 的对应断言。）
+    std::size_t pos = 0;
     if (!seek_header(pos)) {
       // 帧头没出现。保留最后 3 字节，它们可能是下一个帧头的前缀。
       const std::size_t keep = std::min<std::size_t>(buf_.size(), 3);
@@ -149,7 +153,6 @@ PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out
       // 重复包不增加 frames_ok，也不能混进点云（否则同一扫描线被计两次）。
       stats_.resync_bytes += pos;  // 帧头之前若还有垃圾字节，仍按重同步计
       buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(pos + frame_len));
-      pos = 0;
       continue;
     }
 
