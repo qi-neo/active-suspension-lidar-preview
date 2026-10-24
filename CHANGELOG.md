@@ -34,6 +34,16 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
 
 ### CI 与文档
 
+- **CI 门禁与文档口径对齐**（核验 10-23 推送后的 CI 日志时发现）：`ros-ci.yml`
+  的控制自检步骤名还写着旧数「428 项」，而场景 41 异步通道进来后实跑已是
+  443——步骤名改回 443；更要紧的是 README 声称 CI 跑五组自检、含「驱动串口
+  接收 63 项」，但 `ros-ci.yml` 里根本没有这一步（vendored 副本的 CMakeLists
+  早已注册 `serial_receiver_selftest`，却没有任何步骤调用它——与当年
+  「install(TARGETS) 装了却没人跑」是同一类问题）。两处都补上：`ros-ci.yml`
+  新增「驱动串口接收自检（63 项）」步骤；`sanitizer.yml` 新增同款
+  ASan + UBSan 步骤（termios/PTY 路径同样要过 sanitizer，与独立仓库
+  `unilidar-driver` 的 core job 双编译器 × ASan 互为双保险）。本机对
+  vendored 副本按 CI 同款命令实测：ASan/UBSan 下 63 项全过
 - **sanitizer 拆成独立 workflow**（`.github/workflows/sanitizer.yml`）：GitHub 的
   workflow 徽章只能对应整个 workflow，没有"单个 job 的徽章"；混在 `ros-ci.yml`
   里时 README 只能放一个总徽章，看不出 ASan 这一项到底绿没绿。拆开后 ASan 徽章

@@ -106,7 +106,7 @@ jobs:
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（428 项）
+      - name: v3 控制与安全逻辑自检（443 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
@@ -119,6 +119,18 @@ jobs:
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run unilidar_driver decoder_selftest
+
+      # 串口接收：PTY 主从对造虚拟串口，不依赖真雷达也不依赖真串口。
+      # 容器里同样能跑——Linux PTY 从端输入队列约 4 KB，一帧整包 1044 B
+      # 放得下（macOS 队列只有约 512 B，主端写在从端读之前会阻塞，那是
+      # 本机自检才需要 pushAndPump 边写边读的原因）。这一步在独立仓库
+      # unilidar-driver 的 core job 里也跑（双编译器 × ASan），两边都门住。
+      - name: 驱动串口接收自检（63 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run unilidar_driver serial_receiver_selftest
 
       # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
       # install(TARGETS) 里装了可执行，却没有任何步骤调用它

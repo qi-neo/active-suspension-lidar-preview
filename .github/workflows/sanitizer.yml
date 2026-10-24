@@ -109,6 +109,24 @@ jobs:
             -o /tmp/asan_param_selftest
           /tmp/asan_param_selftest
 
+      # 驱动侧串口接收：PTY 主从对虚拟串口 + ASan/UBSan。SerialReceiver 走的是
+      # 与 /dev/ttyUSB0 完全相同的 termios 路径，这段代码同样要过 sanitizer——
+      # 断言只验"值对不对"，验不出"写没写错地方"。与独立仓库 unilidar-driver
+      # 的 core job（双编译器 × ASan）互为双保险
+      - name: 驱动串口接收自检（ASan + UBSan）
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/serial_receiver_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/serial_receiver.cpp \
+            -o /tmp/asan_serial_receiver
+          ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_receiver
+
   # 失败后回传日志：必须是独立 job（needs: [sanitize]）。在 sanitize 自己的步骤里
   # 回传时它还没结束，拿不到完整日志；这里 job 已结束，可以下载到全部输出。
   # 动机：开发机没有 ROS/Docker，Actions 网页日志要认证，跑挂了只能看"红"。
