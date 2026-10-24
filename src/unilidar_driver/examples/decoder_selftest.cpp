@@ -648,7 +648,11 @@ static void test_buffer_guard() {
 //     "cloud size = 5205, ringNum = 18 ... ring = 1" 即第一条线的点 ring 从 1
 //     起算（1 基），拼帧后 ringNum 等于已拼入的线数；
 //   - 帧时间戳：系统时间戳模式 = 本机此刻 - scan_period，硬件模式 = 报文 stamp。
-// 本驱动的 time 输出绝对秒（帧时间戳 + 偏移），ring 由调用方按拼帧顺序给。
+// 本驱动的 time 输出**相对本线起始时刻的偏移秒数**（不是绝对 Unix 时间：
+// FLOAT32 存绝对时间在 1.7e9 量级的量化步长是 128 秒，一条线 300 个点会全部
+// 塌成同一个值，去畸变失效）。ring 由调用方按拼帧顺序给。
+// 拼帧侧（节点）按各线时间戳之差把每条线平移到相对整圈起始，语义见
+// unilidar_driver_node.cpp 的 handleCloud。
 // ---------------------------------------------------------------------------
 static void test_point_time_and_ring() {
   std::printf("[9] 逐点时间与环号\n");
@@ -742,9 +746,12 @@ static void test_point_time_and_ring() {
             "时间基准：系统时间戳模式应解码成功");
       check(std::fabs(stamp - 49.9) < 1e-5, "时间基准：系统时间戳应回退一个扫描周期");
       if (pts.size() == 10) {
-        check(std::fabs(pts[0].time - 49.9) < 1e-5, "时间基准：系统模式第 0 个点绝对时间应为帧起始");
-        check(std::fabs(pts[9].time - (49.9 + 0.018)) < 1e-5,
-              "时间基准：系统模式末点绝对时间应为帧起始 + 9*time_increment");
+        // time 是相对本帧起始时刻的偏移，不是绝对时间：基准变了也要从 0 起算。
+        check(std::fabs(pts[0].time) < 1e-9, "时间基准：系统模式第 0 个点偏移应为 0");
+        check(std::fabs(pts[9].time - 0.018) < 1e-5,
+              "时间基准：系统模式末点偏移应为 9*time_increment（与绝对基准无关）");
+        check(std::fabs((stamp + pts[9].time) - (49.9 + 0.018)) < 1e-5,
+              "时间基准：系统模式 stamp + 偏移 应还原出绝对时刻");
       }
     }
 
@@ -759,10 +766,13 @@ static void test_point_time_and_ring() {
             "时间基准：硬件时间戳模式应解码成功");
       check(std::fabs(stamp - 1000.5) < 1e-3, "时间基准：硬件时间戳应取报文 stamp");
       if (pts.size() == 10) {
-        check(std::fabs(pts[0].time - 1000.5) < 1e-3,
-              "时间基准：硬件模式第 0 个点绝对时间应为帧起始");
+        // 与系统模式一样是相对偏移：无论绝对基准是 49.9 还是 1000.5，
+        // 首点偏移都应为 0，这正是"绝对时间存 float 会塌掉"的反例。
+        check(std::fabs(pts[0].time) < 1e-9, "时间基准：硬件模式第 0 个点偏移应为 0");
         check(std::fabs((pts[9].time - pts[0].time) - 0.018) < 1e-3,
               "时间基准：硬件模式相邻点间隔仍应为 time_increment");
+        check(std::fabs((stamp + pts[9].time) - (1000.5 + 0.018)) < 1e-3,
+              "时间基准：硬件模式 stamp + 偏移 应还原出绝对时刻");
       }
     }
   }
@@ -843,7 +853,9 @@ static void test_point_time_and_ring() {
     {
       DecodeParams params;
       params.use_system_timestamp = false;
-      std::vector<PointXYZIT> all;
+      // time 是相对各线自己起始时刻的偏移，拼帧时要像节点那样按"本线 - 首线"
+      // 平移，才能比较跨线的绝对先后。这里直接记 absolute = stamp + 偏移。
+      std::vector<double> all;
       bool ok = true;
       for (int k = 0; k < scan_num; ++k) {
         const auto frame = make_line(static_cast<uint32_t>(k), n, inc, 0.01f,
@@ -854,12 +866,14 @@ static void test_point_time_and_ring() {
         if (!decodePointCloud(frame, params, 0.0, line, stampk, stk, static_cast<std::uint16_t>(k + 1))) {
           ok = false;
         }
-        all.insert(all.end(), line.begin(), line.end());
+        for (const PointXYZIT& p : line) {
+          all.push_back(stampk + static_cast<double>(p.time));
+        }
       }
       check(ok, "拼帧：18 条线都应解码成功");
       bool ordered = !all.empty();
       for (std::size_t i = 1; i < all.size(); ++i) {
-        if (!(all[i].time > all[i - 1].time)) ordered = false;
+        if (!(all[i] > all[i - 1])) ordered = false;
       }
       check(ordered, "拼帧：硬件时间戳模式下时间应严格递增");
     }
@@ -868,7 +882,7 @@ static void test_point_time_and_ring() {
     {
       DecodeParams params;  // 默认 use_system_timestamp = true
       const float scan_period = 0.01f;
-      std::vector<PointXYZIT> all;
+      std::vector<double> all;
       double cross_gap = 0.0;
       for (int k = 0; k < scan_num; ++k) {
         const auto frame = make_line(static_cast<uint32_t>(k), n, inc, scan_period, 0, 0);
@@ -877,12 +891,16 @@ static void test_point_time_and_ring() {
         double stampk = 0.0;
         decodePointCloud(frame, params, 100.0 + 0.02 * k, line, stampk, stk,
                          static_cast<std::uint16_t>(k + 1));
-        if (!all.empty() && !line.empty()) cross_gap = line.front().time - all.back().time;
-        all.insert(all.end(), line.begin(), line.end());
+        if (!all.empty() && !line.empty()) {
+          cross_gap = (stampk + static_cast<double>(line.front().time)) - all.back();
+        }
+        for (const PointXYZIT& p : line) {
+          all.push_back(stampk + static_cast<double>(p.time));
+        }
       }
       bool ordered = !all.empty();
       for (std::size_t i = 1; i < all.size(); ++i) {
-        if (!(all[i].time > all[i - 1].time)) ordered = false;
+        if (!(all[i] > all[i - 1])) ordered = false;
       }
       check(ordered, "拼帧：系统时间戳模式下时间应严格递增");
       check(std::fabs(cross_gap - 0.011) < 2e-4,
@@ -912,7 +930,7 @@ static void test_point_time_and_ring() {
       for (const PointXYZIT& p : pts) {
         if (std::fabs(p.time) > 1e-9) same = false;
       }
-      check(same, "时间步长异常：time_increment=0 时所有点应退化为帧时间戳");
+      check(same, "时间步长异常：time_increment=0 时所有点偏移应退化为 0");
       check(st.time_increment_invalid == 1, "时间步长异常：应计入 time_increment_invalid");
     }
     {
@@ -959,6 +977,149 @@ static void test_point_time_and_ring() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 10. 两个已修 P0 缺陷的回归用例
+//
+// 这两个 bug 的共同点：既有 135 项自检全绿却一个都没抓到。原因是测试只覆盖了
+// "典型长度、典型数量级"，而缺陷恰好藏在边界上——极短报文、真实 Unix 时间量级。
+// 所以这里补的是**边界 + 真实量级**，不是再补几个正常用例。
+// ---------------------------------------------------------------------------
+static void test_p0_regressions() {
+  std::printf("[10] P0 缺陷回归\n");
+
+  // 10.1 数据段短于 DataInfo（16 B）的报文不得越界读序号
+  //
+  // packet_size 的合法下界是 kHeaderSize + kTailSize = 24，此时数据段长度为 0，
+  // 但解析序号用的 DataInfo 有 16 字节。修复前 pull() 无条件 memcpy 16 字节，
+  // 24..39 字节的包会越过缓冲末尾读 4..16 字节——ASan 报 container-overflow。
+  // 数据来自网络/串口，这条是实打实的内存安全问题。
+  // 这类短包是协议允许的（官方对数据段长度为 0 的包连 CRC 都不校验），
+  // 不能拒掉，只能跳过序号跟踪后照常交付。
+  {
+    // 构造数据段长度小于 DataInfo（16 B）的合法包。
+    // CRC 必须是对的：只有数据段长度为 0（total == 24）的包官方才不校验，
+    // total > 24 时 CRC 覆盖真实数据段，随便填 0 会被 bad_crc 拒掉，
+    // 那样测的就不是越界读了。所以统一走 seal() 生成正确 CRC。
+    // body 多分配 1 字节，避免空 vector 的 data() 为 nullptr 导致
+    // memcpy(dst, nullptr, 0) 的未定义行为。
+    auto make_short = [](std::size_t total) {
+      const std::size_t body_size = total - kHeaderSize - kTailSize;
+      std::vector<std::uint8_t> body(body_size + 1, 0);
+      return seal<LidarPointDataPacket>(kTypeAck, body.data(), body_size);
+    };
+
+    for (std::size_t total : {std::size_t{24}, std::size_t{28}, std::size_t{32},
+                              std::size_t{39}, std::size_t{40}}) {
+      PacketParser parser;
+      std::vector<std::uint8_t> out;
+      std::uint32_t type = 0;
+      const auto pkt = make_short(total);
+      parser.append(pkt.data(), pkt.size());
+      const bool got = parser.pull(out, type) == PullStatus::kFrameReady;
+      check(got && out.size() == total,
+            "P0 回归：数据段不足 DataInfo 的 " + std::to_string(total) +
+                " 字节包应照常交付且长度一致");
+    }
+
+    // 上面只验证了"包还能交付"。越界读本身要靠这一段用**可观测行为**抓住，
+    // 不能指望 ASan：libc++ 的 container-overflow 标注在 -O1 及以上会被优化掉
+    // （实测 -O0 能报、-O1/-O2 不报），而 CI 的 sanitizer job 正是 -O1。
+    //
+    // 原理：24 字节包没有数据段，帧尾紧跟在帧头后面，于是 DataInfo 的 seq
+    // （偏移 12..15）恰好落在帧尾的 crc32 字段上。越界读会**把帧尾的 crc32
+    // 当成 seq 记进序号状态**。这里把 crc32 故意写成 42（数据段长度为 0 的包
+    // 官方不校验 CRC，可以随便填），再紧跟一个 seq = 7 的正常包：
+    //   修复前：last = 42，下一条 seq = 7 的 delta 绕回 -> 误报 out_of_order；
+    //   修复后：短包跳过序号跟踪，下一条是同类型首包，无比较 -> out_of_order = 0。
+    // 这条断言不依赖优化级别，也不依赖 sanitizer。
+    {
+      std::vector<std::uint8_t> short24(24, 0);
+      FrameHeader head{};
+      std::memcpy(head.header, kHeaderMark, sizeof(kHeaderMark));
+      head.packet_type = kTypePointCloud3D;
+      head.packet_size = 24;
+      std::memcpy(short24.data(), &head, sizeof(head));
+      FrameTail tail{};
+      tail.crc32 = 42;  // 会被越界读误当成 DataInfo::seq
+      tail.msg_type_check = kTypePointCloud3D;
+      std::memcpy(tail.tail, kTailMark, sizeof(kTailMark));
+      std::memcpy(short24.data() + 24 - kTailSize, &tail, sizeof(tail));
+
+      LidarPointData body = makePointBody(7, 4, 0, 0);  // seq = 7
+      const auto good_cloud = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+
+      PacketParser parser;
+      parser.append(short24.data(), short24.size());
+      parser.append(good_cloud.data(), good_cloud.size());
+      std::vector<std::uint8_t> out;
+      std::uint32_t type = 0;
+      int got = 0;
+      while (parser.pull(out, type) == PullStatus::kFrameReady) ++got;
+
+      check(got == 2, "P0 回归：短包 + 正常包应解出 2 帧");
+      check(parser.stats().out_of_order == 0,
+            "P0 回归：不得把帧尾 crc32 当成 seq（越界读会误报 out_of_order）");
+      check(parser.stats().duplicates == 0, "P0 回归：短包不应被判为重复包");
+    }
+
+    // 短包之后紧跟一个正常包：序号跟踪被跳过不应影响后续解析
+    PacketParser parser;
+    std::vector<std::uint8_t> out;
+    std::uint32_t type = 0;
+    const auto short_pkt = make_short(24);
+    parser.append(short_pkt.data(), short_pkt.size());
+    std::vector<std::uint8_t> imu_body(sizeof(LidarImuData), 0);
+    const auto good = seal<LidarImuDataPacket>(kTypeImu, imu_body.data(), imu_body.size());
+    parser.append(good.data(), good.size());
+    int got = 0;
+    while (parser.pull(out, type) == PullStatus::kFrameReady) ++got;
+    check(got == 2, "P0 回归：短包之后紧跟的正常包仍应被解出（共 2 帧）");
+    check(parser.stats().seq_gaps == 0 && parser.stats().duplicates == 0,
+          "P0 回归：数据段不足时应跳过序号跟踪，不产生缺口/重复误报");
+  }
+
+  // 10.2 真实 Unix 时间量级下逐点时间必须可区分
+  //
+  // 修复前 PointXYZIT::time 存"绝对 Unix 秒"但字段是 FLOAT32：float 在 1.7e9
+  // 量级的量化步长是 128 秒，一条线 300 个点（总跨度 299 × 7.7 µs ≈ 2.3 ms）
+  // 会全部塌成同一个值，逐点时间与运动去畸变彻底失效，且不报任何错。
+  // 修复后 time 是相对帧起始的偏移，量化步长约 15 ns。
+  {
+    const uint32_t n = 300;
+    const float inc = 7.7e-6f;  // 官方示例数据的实测点间步长量级
+    LidarPointData body = makePointBody(0, n, 1700000000u, 0u);  // 真实 Unix 秒
+    body.scan_period = inc * static_cast<float>(n);
+    body.time_increment = inc;
+    const auto frame = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+
+    DecodeParams params;
+    params.use_system_timestamp = false;  // 用报文里的 1.7e9 硬件时间戳
+    DecodeStats st;
+    std::vector<PointXYZIT> pts;
+    double stamp = -1.0;
+    check(decodePointCloud(frame, params, 0.0, pts, stamp, st, 1), "P0 回归：真实时间戳帧应解码成功");
+
+    if (pts.size() == n) {
+      bool strictly_increasing = true;
+      for (std::size_t i = 1; i < pts.size(); ++i) {
+        if (!(pts[i].time > pts[i - 1].time)) strictly_increasing = false;
+      }
+      // 修复前这里会失败：300 个点的 time 完全相同
+      check(strictly_increasing, "P0 回归：1.7e9 量级下 300 个点的 time 必须严格递增（不得塌成同值）");
+
+      const double span = static_cast<double>(pts.back().time) - static_cast<double>(pts.front().time);
+      const double expect = static_cast<double>(n - 1) * static_cast<double>(inc);
+      check(std::fabs(span - expect) < 1e-6,
+            "P0 回归：首末点时间跨度应为 299 × 7.7 µs ≈ 2.3 ms（实测 " +
+                std::to_string(span) + " s）");
+
+      // 起点必须是 0 偏移：绝对时间一旦混入，首点就会是 1.7e9 而不是 0
+      check(std::fabs(pts.front().time) < 1e-9,
+            "P0 回归：首点偏移应为 0（若仍存绝对时间，这里会变成 1.7e9）");
+    }
+  }
+}
+
 int main() {
   std::printf("unilidar_driver 离线自检\n\n");
   test_crc_and_layout();
@@ -970,6 +1131,7 @@ int main() {
   test_imu();
   test_buffer_guard();
   test_point_time_and_ring();
+  test_p0_regressions();
 
   std::printf("\n检查项 %d，失败 %d -> %s\n", g_checks, g_failed,
               g_failed == 0 ? "全部通过" : "存在失败");

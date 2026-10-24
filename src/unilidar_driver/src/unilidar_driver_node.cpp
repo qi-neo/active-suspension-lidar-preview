@@ -284,6 +284,16 @@ private:
     if (!decodePointCloud(frame, params_, wallNowSec(), pts, stamp, dstats_, ring)) return;
 
     if (pending_scans_ == 0) pending_stamp_ = stamp;
+    // 解码器给的 time 是相对**本条线**起始时刻的偏移；发布的这一帧以第一条线的
+    // 起始时刻作 header.stamp，所以要把后续每条线整体平移 (本线 - 首线)，
+    // 使全帧的 time 都以 header.stamp 为基准。这样跨线时间仍然连续递增，
+    // 且 float 只在 0..0.2 s 的小量级上量化，精度才有意义。
+    const double line_shift = stamp - pending_stamp_;
+    if (line_shift != 0.0) {
+      for (PointXYZIT& p : pts) {
+        p.time = static_cast<float>(static_cast<double>(p.time) + line_shift);
+      }
+    }
     pending_.insert(pending_.end(), pts.begin(), pts.end());
     ++pending_scans_;
 
@@ -299,7 +309,7 @@ private:
   //   偏移 4   y          FLOAT32
   //   偏移 8   z          FLOAT32
   //   偏移 12  intensity  FLOAT32
-  //   偏移 16  time       FLOAT32  绝对秒（帧时间戳 + 该点相对偏移）
+  //   偏移 16  time       FLOAT32  相对 header.stamp 的偏移秒数（非绝对时间）
   //   偏移 20  ring       UINT16   该扫描线在整圈中的 1 基序号
   //   偏移 22  2 字节 padding
   // padding 不是可选的：环号只占 2 字节，若把 point_step 压成 22，下一个点的 x
@@ -460,7 +470,7 @@ private:
                     static_cast<unsigned long>(dstats_.size_hint));
       }
     }
-    // time_increment 是逐点时间唯一的来源；它无效时 time 退化成帧时间戳，
+    // time_increment 是逐点时间唯一的来源；它无效时 time 偏移全为 0，
     // 去畸变会算成"整条线同一时刻"，必须让用户看见。
     if (dstats_.time_increment_invalid > 0 && !warned_time_increment_) {
       warned_time_increment_ = true;

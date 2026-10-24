@@ -16,10 +16,13 @@
 
 namespace unilidar_driver {
 
+// 只有两种结果：缓冲不够（继续喂）或取到一帧。原先还有一个 kNoFrame
+// （"缓冲已处理完"），但 pull() 在任何一条路径上都不会返回它——缓冲耗尽时
+// 统一返回 kNeedMore。留着一个永远取不到的枚举值会让调用方误以为要处理
+// 第三种状态，故删除。
 enum class PullStatus {
   kNeedMore,    // 缓冲里的字节还不够组成一帧，继续喂
   kFrameReady,  // 取到一帧完整且校验通过的报文
-  kNoFrame,     // 缓冲已处理完，当前没有可用帧
 };
 
 struct ParseStats {

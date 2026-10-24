@@ -78,8 +78,13 @@ void resolveQuaternion(const float raw[4], QuatOrder order, float out[4]) {
 //
 // 依据三：appendOnePointCloud 还会给新拼入的每条线的每个点加上
 // (该包 stamp - 整圈起始 stamp) 的时间偏移，即同一圈内各点时间以圈起始时刻为
-// 基准、按各包时间戳连续。本驱动逐点输出绝对时间（各包时间戳 + j*time_increment），
-// 由节点用同一套时间戳拼帧，语义等价。
+// 基准、按各包时间戳连续。本驱动逐点输出**相对本线起始时刻的偏移**
+// （j * time_increment），节点拼帧时再按各线时间戳之差平移到相对整圈起始，
+// 与官方语义等价。
+//
+// 为什么不直接输出各包时间戳 + 偏移的绝对时间：见 frame_decoder.hpp 里
+// PointXYZIT::time 的说明——输出字段是 FLOAT32，绝对 Unix 时间存进 float
+// 会在 128 秒的量化步长上整条线塌成一个值，逐点时间与去畸变同时失效。
 //
 // 注意：官方系统时间戳模式下每条线的帧时间戳取的是"解码那一刻"的本机时间，
 // 同一轮循环里连解多包时这些时刻会非常接近；本驱动沿用同一语义，跨包的
@@ -89,9 +94,10 @@ void resolveQuaternion(const float raw[4], QuatOrder order, float out[4]) {
 namespace {
 
 // 给 PointXYZIT 填 time/ring；PointXYZI 没有这两个字段，这里是无操作重载。
+// 第一个参数是相对本帧起始时刻的偏移秒数，不是绝对时间。
 void setPointTime(PointXYZI& /*p*/, double /*time*/, std::uint16_t /*ring*/) {}
-void setPointTime(PointXYZIT& p, double time, std::uint16_t ring) {
-  p.time = static_cast<float>(time);
+void setPointTime(PointXYZIT& p, double time_offset, std::uint16_t ring) {
+  p.time = static_cast<float>(time_offset);
   p.ring = ring;
 }
 
@@ -206,11 +212,16 @@ bool decodePointCloudImpl(const std::vector<std::uint8_t>& frame, const DecodePa
     p.y = sin_theta * A + cos_theta * B;
     p.z = C + d.param.a_axis_dist;
     p.intensity = static_cast<float>(d.intensities[j]);
-    // time 用绝对秒 = 帧起始时刻 + 该点在报文内的相对偏移 j * time_increment。
+    // time 存的是**相对本帧起始时刻的偏移秒数**，不是绝对 Unix 时间。
+    // 直接按 j * time_step 算偏移，不经过"绝对时间相减"：绝对时间在 1.7e9 量级
+    // 上 double 的 ulp 都有 2.4e-7 s，相减会把 7.7 µs 量级的步长污染掉 3%。
     // 偏移只与下标 j 有关，即使前面的点被门限剔除也不会缩短/压缩时间轴。
-    const double point_time =
-        out_stamp + static_cast<double>(j) * static_cast<double>(time_step);
-    setPointTime(p, point_time, ring);
+    //
+    // 为什么不是绝对时间：输出字段是 FLOAT32，而 float 在 Unix 时间量级的
+    // 量化步长是 128 秒，一条线 300 个点（总跨度 2.3 ms）会全部塌成同一个值。
+    // 相对偏移下量化步长约 15 ns，相对 7.7 µs 步长有 500 倍余量。
+    const double time_offset = static_cast<double>(j) * static_cast<double>(time_step);
+    setPointTime(p, time_offset, ring);
     out.push_back(p);
   }
 

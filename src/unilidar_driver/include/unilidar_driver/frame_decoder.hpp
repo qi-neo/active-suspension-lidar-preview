@@ -19,13 +19,26 @@ struct PointXYZI {
 
 // 带逐点时间与环号的点。字段取名与 ROS PointCloud2 的字段名一致。
 //
-// time：绝对时间（Unix 秒）= 该帧时间戳 + 该点在报文内的相对偏移。
-//   相对偏移按官方 parseFromPacketToPointCloud 的语义取 j * time_increment
+// time：**相对偏移，不是绝对 Unix 时间**，单位为秒，基准是该点所属那一帧
+//   点云的起始时刻（PointCloud2 的 header.stamp）。
+//
+//   为什么不能存绝对时间：字段是 FLOAT32（配合 ROS 的 FLOAT32 字段），而
+//   float 在 Unix 时间量级（1.7e9）上的量化步长是 **128 秒**——不是 256 ns
+//   （256 ns 是 double 在同一量级的步长，早先的注释把两者搞混了）。也就是说
+//   把 1.7e9 存进 float 后，一条扫描线 300 个点（跨度仅 299 × 7.7 µs ≈ 2.3 ms）
+//   会全部塌成同一个值，逐点时间等于没有，运动去畸变彻底失效。这是实测确认的
+//   结果，不是理论担忧。
+//
+//   改成相对偏移后，取值范围 ~0..0.2 s（18 条线拼一圈的量级），float 在该区间
+//   的量化步长约 1.5e-8 s（15 ns），相对 7.7 µs 的点间步长有约 500 倍余量，
+//   精度足够。同时这也是 ROS/PCL 的通行约定：PointCloud2 的 t 字段本来就是
+//   "相对 header.stamp 的偏移"，Velodyne / Ouster / Livox 驱动都这么做，
+//   下游做去畸变时算 header.stamp + time 即可得到绝对时刻。
+//
+//   偏移按官方 parseFromPacketToPointCloud 的语义取 j * time_increment
 //   （从 0 起、每处理一个点加一次，含被剔除的无效点），推导见 frame_decoder.cpp。
-//   用 float 是配合 ROS 的 FLOAT32 字段：1.7e9 秒附近量化步长约 256 ns，
-//   对 7.7 µs 量级的点间步长（官方示例数据的实测值）足够。
-//   注意：不同报文重新从 0 起算相对偏移，跨包绝对时间由各包时间戳接续，
-//   不是"整圈内连续计数"。
+//   注意：不同报文重新从 0 起算，跨线的时间差由各线时间戳之差给出，
+//   节点拼帧时会把每条线平移到"相对整圈起始时刻"。
 //
 // ring：该点所属扫描线在整圈中的序号，1 基。协议里一个点云报文就是一条
 //   扫描线（官方默认 cloud_scan_num = 18 条拼成一圈），单包内没有"第几条线"
@@ -77,8 +90,9 @@ struct DecodeStats {
   std::uint64_t size_mismatch{0};       // 整包长度不足以读到所需字段
   std::uint64_t size_hint{0};           // 整包长度与本驱动预期值不同，提示核对固件
   std::uint64_t short_reads{0};         // 包比预期短，短于部分按零处理
-  // 报文的 time_increment 非正或非有限，逐点时间退化为帧时间戳本身
-  // （仍按官方公式算，只是步长为 0）。只在带 time/ring 的解码路径里计数。
+  // 报文的 time_increment 非正或非有限，逐点时间偏移退化为 0
+  // （仍按官方公式算，只是步长为 0，即整条线同一时刻）。
+  // 只在带 time/ring 的解码路径里计数。
   std::uint64_t time_increment_invalid{0};
 };
 
@@ -91,7 +105,8 @@ bool decodePointCloud(const std::vector<std::uint8_t>& frame, const DecodeParams
                       double now, std::vector<PointXYZI>& out, double& out_stamp,
                       DecodeStats& stats);
 
-// 同上，但额外输出逐点绝对时间 time 与环号 ring（见 PointXYZIT 的注释）。
+// 同上，但额外输出逐点时间偏移 time 与环号 ring（见 PointXYZIT 的注释）。
+// time 是相对 out_stamp（本条扫描线起始时刻）的偏移秒数，不是绝对时间。
 // ring 为这条扫描线在整圈中的 1 基序号，由调用方（节点按拼帧顺序）给出；
 // 默认 1 与官方参考实现里 point3d.ring = 1 的语义一致。
 // 该重载与上面的旧签名互不影响，旧路径（xyz + intensity）保持原样。

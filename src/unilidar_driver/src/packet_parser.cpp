@@ -18,6 +18,13 @@ void PacketParser::reset() {
 
 void PacketParser::append(const std::uint8_t* data, std::size_t len) {
   if (data == nullptr || len == 0) return;
+  // 单批数据本身就超过上限时，clear() 之后再 insert 仍然超限，上限形同虚设。
+  // 这种只能整批丢弃——保留任何一部分都无法凑出完整帧。
+  if (len > max_buffered_) {
+    stats_.buffer_overflow++;
+    buf_.clear();
+    return;
+  }
   if (buf_.size() + len > max_buffered_) {
     // 长时间没有解出合法帧（例如波特率不对或对面根本不是雷达），
     // 缓冲会一直涨。宁可丢掉这批数据重来，也不要把内存吃光。
@@ -126,27 +133,37 @@ PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out
     //   seq == last          -> 重复包（重传/回环），整包丢弃，不交给解码层；
     //   seq  > last + 1      -> 序号缺口，中间可能丢了包（seq_gaps 语义保持不变）；
     //   seq  < last          -> 乱序，包仍然交付，但顺序不可信（out_of_order）。
-    DataInfo info;
-    std::memcpy(&info, frame + kHeaderSize, sizeof(DataInfo));
-    SeqState& seq_state = seq_state_[head.packet_type];
+    //
+    // 读 seq 之前必须先确认数据段里真的有完整的 DataInfo。packet_size 的合法
+    // 下界是 kHeaderSize + kTailSize = 24，此时数据段长度为 0；而 DataInfo 有
+    // 16 字节。若不加这个判断，24..39 字节的包会让下面的 memcpy 越过缓冲末尾
+    // 读 4..16 个字节（堆越界读，ASan 报 container-overflow）。这类短包是协议
+    // 允许的（官方对数据段长度为 0 的包连 CRC 都不校验），不能靠 bad_size 拒掉，
+    // 只能在这里跳过序号跟踪：没有 seq 就不判断连续性，但帧本身照常交付。
+    const std::size_t data_bytes = frame_len - kHeaderSize - kTailSize;
     bool duplicate = false;
-    if (seq_state.have_last) {
-      // 用无符号回绕差值判断前后，避免 seq 从 0xFFFFFFFF 回到 0 时误报。
-      // delta < 2^31 视为「向前」（含正常 +1）；否则视为「倒退」。
-      const std::uint32_t delta = info.seq - seq_state.last;
-      if (delta == 0) {
-        duplicate = true;
-        stats_.duplicates++;
-      } else if (delta < 0x80000000u && delta > 1) {
-        stats_.seq_gaps++;
-      } else if (delta >= 0x80000000u) {
-        stats_.out_of_order++;
+    if (data_bytes >= sizeof(DataInfo)) {
+      DataInfo info;
+      std::memcpy(&info, frame + kHeaderSize, sizeof(DataInfo));
+      SeqState& seq_state = seq_state_[head.packet_type];
+      if (seq_state.have_last) {
+        // 用无符号回绕差值判断前后，避免 seq 从 0xFFFFFFFF 回到 0 时误报。
+        // delta < 2^31 视为「向前」（含正常 +1）；否则视为「倒退」。
+        const std::uint32_t delta = info.seq - seq_state.last;
+        if (delta == 0) {
+          duplicate = true;
+          stats_.duplicates++;
+        } else if (delta < 0x80000000u && delta > 1) {
+          stats_.seq_gaps++;
+        } else if (delta >= 0x80000000u) {
+          stats_.out_of_order++;
+        }
+        // delta == 1 是正常递增，无需计数
       }
-      // delta == 1 是正常递增，无需计数
+      // 重复包也更新 last：值相同，无副作用；后续包仍以它作为比较基准。
+      seq_state.have_last = true;
+      seq_state.last = info.seq;
     }
-    // 重复包也更新 last：值相同，无副作用；后续包仍以它作为比较基准。
-    seq_state.have_last = true;
-    seq_state.last = info.seq;
 
     if (duplicate) {
       // CRC 与帧尾都已校验通过，边界可信，可以直接跳过这一整包。
