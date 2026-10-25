@@ -152,7 +152,16 @@ public:
         return connected_;
     }
     bool set_target_height(int /*wheel*/, int /*mm*/) override { return connected_; }
-    bool set_target_pwm(int /*wheel_index*/, int /*pwm_us*/) override { return connected_; }
+    // PWM 直通通道（P0 板路径）。与 set_target_height 共用发送失败模拟：
+    // 两者走的是同一条物理链路，"帧没出去"不该只体现在高度通道上
+    bool set_target_pwm(int wheel, int pwm_us) override {
+        ++pwm_calls_;
+        if (wheel >= 0 &&
+            wheel < static_cast<int>(last_pwm_.size())) {
+            last_pwm_[static_cast<std::size_t>(wheel)] = pwm_us;
+        }
+        return connected_ && !send_fail_;
+    }
     bool set_target_height(
         const std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) override {
         last_cmd_ = mm;
@@ -200,7 +209,9 @@ public:
     bool feedback_{false};   // 是否支持位置反馈
     int mode_calls_{0};
     int cmd_calls_{0};
+    int pwm_calls_{0};
     int estop_calls_{0};
+    std::array<int, suspension_preview_v2::kSuspensionWheelCount> last_pwm_{};
 
 private:
     std::string err_;
@@ -3540,7 +3551,12 @@ public:
     bool is_connected() const override { return connected_; }
     bool set_mode(suspension_preview_v2::SuspensionMode) override { return true; }
     bool set_target_height(int, int) override { return true; }
-    bool set_target_pwm(int, int) override { return true; }
+    bool set_target_pwm(int wheel, int pwm_us) override {
+        ++pwm_calls;
+        if (fail.load()) return false;
+        if (wheel >= 0 && wheel < 4) last_pwm[static_cast<std::size_t>(wheel)] = pwm_us;
+        return true;
+    }
     bool set_target_height(
         const std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) override {
         ++calls;
@@ -3561,6 +3577,7 @@ public:
 
     std::atomic<int> calls{0};
     std::atomic<int> ok_calls{0};
+    std::atomic<int> pwm_calls{0};
     std::atomic<int> estop_calls{0};
     std::atomic<int> block_ms{0};     // >0：每次写阻塞这么久
     std::atomic<bool> fail{false};    // true：写失败
@@ -3568,6 +3585,7 @@ public:
     std::atomic<bool> connected_{false};
     std::atomic<bool> estop_ok{false};
     std::array<int, 4> last{{0, 0, 0, 0}};
+    std::array<int, 4> last_pwm{{0, 0, 0, 0}};
 
 private:
     std::string err_;
