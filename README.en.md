@@ -25,9 +25,9 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
 > executes eight offline self-test groups (v3 control: 443 checks, driver packet parsing: 202
-> checks, driver serial receive: 78 checks, driver UDP receive: 38 checks, driver serial stress: 14 checks, driver node
+> checks, driver serial receive: 81 checks, driver UDP receive: 38 checks, driver serial stress: 14 checks, driver node
 > loop: 65 checks, v2 pure functions: 196 checks, level calibration: 69
-> checks — 1105 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> checks — 1108 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
@@ -187,7 +187,7 @@ definitions (3D point packet documented 1036 B, computed from fields 1044 B),
 and hardcoding a length would reject every packet from a newer firmware. On the
 UDP alternative the bundled `udp_probe` tool checks the real packet length and
 CRC validity on target hardware; on the serial path `serial_receiver_selftest`
-(78 checks over a PTY virtual port on Linux; 77 on macOS, where `B2000000` is
+(81 checks over a PTY virtual port on Linux; 80 on macOS, where `B2000000` is
 missing) verifies reception offline, and `serial_stress_selftest` (14 checks)
 feeds 2 Mbps through the same termios path with junk injected and periodic read
 pauses; the UDP path is covered by `udp_receiver_selftest` (38 checks over a
@@ -382,7 +382,7 @@ All three C++ packages (the historical `suspension_preview` aside) ship offline 
 
 ```bash
 ros2 run unilidar_driver decoder_selftest           # packet parsing and decoding, 202 checks
-ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 78 checks (77 on macOS)
+ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 81 checks (80 on macOS)
 ros2 run unilidar_driver udp_receiver_selftest      # UDP receive (loopback socket, failure paths), 38 checks
 ros2 run unilidar_driver serial_stress_selftest     # serial stress (2 Mbps feed, 60 s default), 14 checks
 ros2 run unilidar_driver node_loop_selftest         # node main loop (latency and backpressure), 65 checks
@@ -459,18 +459,18 @@ parameter to `udp` and configure it via `local_ip` / `local_port` / `source_ip`.
 
 > ✅ **Both transports are implemented.** `unilidar_driver` switches with the `transport` parameter:
 > **`serial` (default)** goes through `serial_receiver.hpp` on `/dev/ttyUSB0` @ 2 Mbps — the
-> physical link above; `udp` goes through `udp_receiver.hpp`. The serial receiver has 78 offline
+> physical link above; `udp` goes through `udp_receiver.hpp`. The serial receiver has 81 offline
 > checks (`serial_receiver_selftest`, a PTY virtual serial port covering whole-frame delivery,
 > split writes, junk/fake-header resynchronisation, the no-data contract, multiple frames per
 > write, IMU frames and open-failure paths — empty device name, EACCES (with the dialout-group
-> hint) and unplug semantics, which differ by platform: after the PTY master is closed the slave
-> reads EOF (returns 0) on macOS but EIO (returns -1) on Linux, while a real USB-serial unplug
-> errors out on both; 77 on macOS — the 2 Mbps assertion needs the Linux-only
-> `B2000000` termios constant). The UDP receiver has 38 offline checks
-> (`udp_receiver_selftest`, a loopback socket covering the open contract, SO_RCVBUF/SO_RCVTIMEO
-> readback, invalid IP, duplicate bind, receive-before-open, timeout and close idempotency —
-> the failure paths the loopback integration script never exercises). On top of that,
-> `serial_stress_selftest` adds 14 checks: a PTY
+> hint), unplug semantics and the read-error branch after fd invalidation; unplugging the PTY
+> master reads back EOF (returns 0, empty err) on both platforms as measured, while a real
+> USB-serial unplug errors out on both — EOF is a PTY-only simulation semantic; 80 on macOS —
+> the 2 Mbps assertion needs the Linux-only `B2000000` termios constant). The UDP receiver has
+> 38 offline checks (`udp_receiver_selftest`, a loopback socket covering the open contract,
+> SO_RCVBUF/SO_RCVTIMEO readback, invalid IP, duplicate bind, receive-before-open, timeout and
+> close idempotency — the failure paths the loopback integration script never exercises). On top
+> of that, `serial_stress_selftest` adds 14 checks: a PTY
 > master feeding 2 Mbps of synthetic frames with junk and fake headers injected and periodic read
 > pauses, asserting frames fed == frames decoded, zero CRC/tail/sequence false alarms and bounded
 > buffers and memory — 60 s locally decoded all 126,636 fed frames. A real `packet_parser` bug
