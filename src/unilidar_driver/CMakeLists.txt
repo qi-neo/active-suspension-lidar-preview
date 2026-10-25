@@ -54,7 +54,7 @@ add_executable(node_loop_selftest examples/node_loop_selftest.cpp)
 target_link_libraries(node_loop_selftest unilidar_driver_core)
 
 # UDP 接收自检：收发两端都建在本机回环上，覆盖 UdpReceiver 的每条分支
-# （打开契约、IP 配错、端口被占、未打开即收、src_ip 回显、超时契约）。
+# （打开契约、IP 配错、bind 非本机地址、未打开即收、src_ip 回显、超时契约）。
 # 端口默认 46311，可用 UDP_SELFTEST_PORT 覆盖
 add_executable(udp_receiver_selftest examples/udp_receiver_selftest.cpp)
 target_link_libraries(udp_receiver_selftest unilidar_driver_core)
