@@ -13,6 +13,135 @@
 时间域 FIR、把"测什么"从凭感觉补用例改成按覆盖率指路、以及把 CI 补齐为
 构建 + 内存检查 + 覆盖率三道门禁。
 
+### 驱动：串口接收路径落地（`unilidar_driver`）
+
+L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2,000,000 bps
+转 USB 接入（`/dev/ttyUSB0`）——此前仓库内驱动副本只有 UDP 接收，与实物
+链路不符。本轮把独立仓库 `qi-neo/unilidar-driver` 的实现同步进来：
+
+- 新增 `serial_receiver`（POSIX termios：`O_NONBLOCK` + `cfmakeraw` +
+  `CLOCAL` + 关硬件流控 + `VMIN=0/VTIME=0`；打开前 `isatty`、打开后
+  `tcflush`；读契约 0 = 无数据 / -1 = 出错，与 `udp_receiver` 一致）。
+  报文定界复用 `packet_parser`（串口是字节流，解析器本就按无边界字节流
+  设计），协议层零改动
+- 节点新增 `transport` 参数（`serial` 默认 / `udp` 备选）与
+  `serial_device`、`serial_baud`；诊断日志按传输层分别给出排障建议
+- 新增 `serial_receiver_selftest`：PTY 主从对虚拟串口，64 项断言（Linux 平台；
+  macOS 本机 63 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps
+  断言），覆盖
+  整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU
+  帧与各类打开失败路径。本机（macOS）实测全过
+- 离线自检总数 843 → **907** 项（驱动 135 + 64；串口 64 为 Linux 平台数，
+  macOS 本机 63），README 中英同步；
+  UDP 从"唯一实现"改为"备选路径"，CH340 串口成为文档中的实物默认链路
+
+### 驱动：2 Mbps 压力自检与 `packet_parser` 坏帧修复（`unilidar_driver`）
+
+继续同步独立仓库 `qi-neo/unilidar-driver` 的本轮改动：
+
+- 新增 `serial_stress_selftest`（14 项断言）：PTY 主端按 2 Mbps 灌入合成
+  报文，同时掺三种干扰——整秒边界注入 16 B 垃圾 + 12 B 伪帧头、每 2 秒
+  一次 100 ms 读暂停（瞬态背压）、帧必然跨写。断言灌入帧数 == 解出帧数、
+  `bad_crc`/`bad_tail`/`seq_gaps`/`duplicates` 全 0、缓冲与 RSS 有界、
+  实际速率不低于目标 80%。CI 以 `--seconds 3` 运行；本机 60 秒满量实测
+  灌入 126,636 帧全部解出（点云 113,972 / IMU 12,664），缓冲峰值
+  2,064 B，RSS 峰值 1.7 MB。至此「CH340 需实测」缩小到只剩物理层误码率
+- **修复 `packet_parser` 坏帧后丢整帧**：`pull()` 的扫描游标 `pos` 原在
+  for 循环外声明，`bad_size`/`bad_tail`/`bad_crc` 分支 `erase(pos + 1)`
+  后 `continue` 时未重置 `pos`，下一轮从旧位置扫描而内容已前移，跳过真
+  帧头——每次坏帧后再丢一整帧。**该 bug 由压力自检最先发现**：此前
+  135 项报文自检与 64 项串口自检全绿，但它们的坏帧用例后面都不接好帧，
+  走不到恢复路径。修复为每轮从 0 开扫；回归 135 + 64 + 14 项全绿
+- 测试基建抽取为 `selftest_fixture.hpp`（PTY 主从对、帧构造、边写边读），
+  与 `serial_receiver_selftest` 共用；重构后断言逐条核对一条不差
+- 离线自检总数 907 → **921** 项（新增驱动串口压力 14 项），README 中英、
+  包级 README（与独立仓库同源同步）更新；`ros-ci.yml` 与 `sanitizer.yml`
+  各新增「驱动串口压力自检」步骤
+
+### 驱动：主循环抽出 `DriverLoop`，节点实时性与背压可离线实测
+
+继续同步独立仓库 `qi-neo/unilidar-driver` 的 6b089e4：
+
+- 节点里唯一"有行为"的只有「收包 → 定界 → 解码 → 拼帧」这一段，原先埋在
+  ROS 节点里，吞吐 / 单轮耗时 / 缓冲增长只能靠真机或 ROS 容器观测。现在抽成
+  不依赖 ROS 的 `DriverLoop`（发布作为回调注入），节点退化成薄壳：只提供
+  "从哪读"与"怎么发布"。节点与自检跑的是同一份循环代码，不存在两套逻辑
+  各自漂移
+- 新增 `node_loop_selftest`（28 项断言），三个场景：
+  - 正常节奏（2 Mbps + 2 ms 节拍）：零丢失、缓冲有界、没有一轮读满上限、
+    拼帧完整、单轮均值/p99 耗时度量。10 秒实测 2,639 帧灌入全部解出，
+    均值 0.026 ms / p99 0.065 ms / 最大 0.289 ms，缓冲峰值 1,022 B；
+  - 慢节拍（8 ms，模拟调度不及时）：仍零丢失、缓冲有界。**需说清的事实**：
+    PTY 从端队列（macOS 约 512 B / Linux 约 4 KB）才是唯一积压点且自带上限，
+    单线程生产者写不进去只能等下一拍，所以"消费慢于生产"不会让定界缓冲
+    无限增长；真机上这条队列是内核串口缓冲 + USB 缓冲，同样有界只是更大。
+    所以断言的是"节拍慢 4 倍仍不静默丢帧"，不去制造不会发生的溢出；
+  - 超载与恢复：单批 64 KB 灌进 16 KiB 上限，`append()` 整批丢弃并计入
+    `buffer_overflow`（丢帧可见、可诊断），随后逐帧续收 60 帧全部解出
+- 节点诊断新增实时性与背压一行：吞吐 Mbps、帧数、轮询次数、单轮均值/p99/
+  最大耗时、定界缓冲当前值与峰值、整批丢弃次数、读满单轮上限次数、读错误
+- 离线自检总数 937 → **965** 项（新增驱动节点主循环 28 项）；`ros-ci.yml`
+  与 `sanitizer.yml` 各新增对应步骤；包级 README 与源码按独立仓库同源覆盖
+
+### 驱动：四个 P0 级缺陷修复同步（`unilidar_driver`）
+
+继续同步独立仓库 `qi-neo/unilidar-driver` 的 13b8320。四个缺陷的共同点是
+原有 135 项自检全绿却一个都没抓到——用例只覆盖「典型长度、典型数量级」，
+缺陷恰好藏在边界上：
+
+- **逐点 `time` 用 float32 存绝对 Unix 时间，运动去畸变完全失效（静默）。**
+  `PointXYZIT::time` 是 FLOAT32 却填绝对 Unix 秒，float32 在 1.7e9 量级的
+  量化步长是 **128 秒**（代码注释里写的「约 256 ns」其实是 double 的步长，
+  两者被搞混了）。实测：一条扫描线 300 个点（跨度约 2.3 ms）全部塌成同一个
+  值、只有 1 个可区分值，下游去畸变会算成「整条线同一时刻」，且不报错不告警。
+  改为**相对帧起始的偏移秒数**（0..0.2 s，量化步长约 15 ns，对 7.7 µs 点间
+  步长有约 500 倍余量），与 PCL/Velodyne/Ouster/Livox 的约定一致；绝对时刻
+  仍等于 `header.stamp + time`。节点侧按「本线时间戳 − 首线时间戳」平移，
+  保证跨线连续递增
+- **`packet_parser` 数据段短于 `DataInfo` 时越界读（内存安全，外部输入可触发）。**
+  `packet_size` 合法下界 24（数据段长 0），而读序号的 `DataInfo` 有 16 字节；
+  `pull()` 校验通过后无条件 `memcpy`，24..39 字节的包会越过报文末尾读
+  4..16 字节。这类短包是协议允许的（数据段为 0 时官方连 CRC 都不校验），
+  不能靠 `bad_size` 拒掉。修复：读序号前先确认数据段足够，不足则跳过序号
+  跟踪但照常交付该帧
+- **`append()` 的缓冲上限在单批过大时形同虚设**：超限 `clear()` 后仍原样
+  `insert`，若 `len` 本身超限则清完再插依然超限。改为单批超限直接整批丢弃
+  并计入 `buffer_overflow`
+- **`PullStatus::kNoFrame` 是从未返回的死枚举**：缓冲耗尽统一返回
+  `kNeedMore`，留着会让调用方误以为要处理第三种状态，已删除
+- 新增自检段落 `[10] P0 缺陷回归`（16 项断言，报文自检 135 → **151**）。
+  越界读用例**不依赖 ASan**：libc++ 的 container-overflow 标注在 `-O1`
+  及以上会被优化掉，而 CI 的 sanitizer job 正是 `-O1`，故改用可观测行为判定
+- 离线自检总数 921 → **937** 项（报文解析 135 → 151），README 中英与
+  `ros-ci.yml` 步骤名同步；包级 README 与六个源码文件按独立仓库同源覆盖
+
+### CI 与文档
+
+- **CI 门禁与文档口径对齐**（核验 10-23 推送后的 CI 日志时发现）：`ros-ci.yml`
+  的控制自检步骤名还写着旧数「428 项」，而场景 41 异步通道进来后实跑已是
+  443——步骤名改回 443；更要紧的是 README 声称 CI 跑五组自检、含「驱动串口
+  接收 63 项」，但 `ros-ci.yml` 里根本没有这一步（vendored 副本的 CMakeLists
+  早已注册 `serial_receiver_selftest`，却没有任何步骤调用它——与当年
+  「install(TARGETS) 装了却没人跑」是同一类问题）。两处都补上：`ros-ci.yml`
+  新增「驱动串口接收自检（64 项）」步骤；`sanitizer.yml` 新增同款
+  ASan + UBSan 步骤（termios/PTY 路径同样要过 sanitizer，与独立仓库
+  `unilidar-driver` 的 core job 双编译器 × ASan 互为双保险）。本机对
+  vendored 副本按 CI 同款命令实测：ASan/UBSan 下 macOS 63 项全过（Linux 为
+  64 项，见下条）
+- **串口自检数字按 CI 平台计 64 项**：波特率表里的 2 Mbps 断言依赖
+  `B2000000`，它是 Linux 扩展常量，macOS 的 termios 没有、跳过该项——同一份
+  `serial_receiver_selftest` 在 CI（Linux）实跑 64 项、本机（macOS）63 项。
+  文档与 CI 步骤名统一按 CI 平台 64 项计并注明平台差异；驱动总数 906 → **907**
+  项，README 中英、包级 README（与独立仓库同源同步）、NOTICE 同步
+- **sanitizer 拆成独立 workflow**（`.github/workflows/sanitizer.yml`）：GitHub 的
+  workflow 徽章只能对应整个 workflow，没有"单个 job 的徽章"；混在 `ros-ci.yml`
+  里时 README 只能放一个总徽章，看不出 ASan 这一项到底绿没绿。拆开后 ASan 徽章
+  真正只反映 sanitizer 状态。两个 workflow 都保留"失败自动把日志贴回 PR"，
+  查看失败原因不需要登录 Actions
+- **README 新增「质量保障」章节**（中英）：四条门禁各跑什么、红了的含义、覆盖边界
+  （sanitizer 只覆盖不依赖 ROS/PCL 的纯逻辑层；覆盖率排除 `serial_port.cpp`），
+  以及两个真实案例（ASan 抓到堆越界写、覆盖率暴露口径打架）
+
 ### 新增
 
 - **预瞄前馈 FIR**（`use_preview_fir`，默认关闭）：前馈从单点比例改为
@@ -89,6 +218,132 @@
 - `TemporalProfileFuser::kMaxFrames` 由 private 改为 public：调用方需要知道
   "配再大的 `frames` 也只有这么多帧真被用上"
 - 中英文 README 同步更新；新增 CI 徽章与覆盖率说明
+
+
+### 安全修复（P0，来自一轮独立代码审查）
+
+- **姿态断流不再被静默忽略。** 原先 `attitude_age_ms` 只在 `submit_attitude()`
+  里更新，IMU 断流后该函数不再被调用，age 永远冻结、`attitude_.valid` 永远是 true，
+  控制器带着几秒前的姿态持续输出、状态机零故障位。现在每拍按 `now` 重算 age，
+  过期即置无效，并把"姿态是否可信"纳入状态机的健康度判据（原先只看剖面，
+  等于"眼睛瞎了但路还在更新"也判健康）。
+- **姿态保护改为单调。** 原先 20° 急停、>69° 反而因为被 `max_abs_attitude_rad`
+  当"坏数据"整帧拒收而绕过安全判定。现在"超物理上限"单独置 `attitude_implausible`，
+  状态机据此锁存姿态超限并进急停；`param_check` 增加"物理上限必须严格大于安全阈值"
+  的致命校验。
+- **没有可信姿态时不重算输出。** 反馈项唯一来源是 IMU，缺失时改为保持上一拍下发值，
+  而不是带着 `has_attitude=false` 继续算（那会让输出慢慢滑向零位）。
+- **硬件急停失败要重试。** 原先只在进入 Emergency 的那一拍调用一次，串口写失败一次
+  就再也不会急停。现在成功后不再重复、失败按 10 Hz 重试直到送达。
+- **补上 `base_link` 静态 TF。** 仓库里没有任何包发布 `base_link`，预瞄节点每次
+  `lookupTransform` 都失败、100% 丢帧（README 快速开始也没有这一步，开箱必然不通）。
+  节点新增 `publish_static_tf` / `lidar_frame` / `mount_x..yaw` 参数自动发布静态变换，
+  安装量默认全 0（单位变换）并在启动日志里明确告警"必须实测"。
+- **`estimate_cell` 的 `min_points<=0` 越界。** `size() < 0` 恒假后 `minmax_element`
+  会解引用空区间（YAML 填 0 即可触发），改为显式下限 1。
+- **`QUICKSTART` 的编译命令漏了 `param_check.cpp`**，按文档"五分钟上手"会链接失败。
+- **文档数字同步**：自检 395 -> 410 项；仓库级合计 596 -> 617 项。
+- **vendored 驱动同步**：`unilidar_driver` 副本与独立仓库对齐（CRC32 改为只覆盖
+  数据段、`quaternion_order` 默认 xyzw），并补上仓库根目录缺失的 `NOTICE`
+  （副本源码注释一直引用它，但文件从未在本仓库存在）。
+
+### 验证
+
+- `control_selftest` 410/410 通过（新增 15 项：场景 33 姿态断流降级、34 超物理上限
+  急停、35 紧急停车重试、36 参数阈值分层）；
+- ASan+UBSan 构建运行 410/410、退出码 0、无报告；
+- v2 四个纯函数自检 29/12/28/69 全过；
+- 驱动 `decoder_selftest` 69/69、UDP 回环 PASSED（在独立仓库中验证后同步）。
+### P1/P2 批：把"看起来正常"的隐患补上
+
+第二批独立审查修复。原则同上：能用测试或 CI 证明的才改，需要台架定案的留到实机。
+
+**安全/正确性**
+
+- **降级恢复去抖失效**：`healthy_elapsed_` 只在离开降级时清零，进入降级前累积的
+  健康时长会直接满足 `recover_duration_s`，降级下一拍就弹回 Leveling（在找平超时
+  场景会来回横跳）。改为进入任何状态都从零计时。
+- **下行链路"发了就算成功"**：`last_command_` 先更新后发送，串口写失败一次就会被
+  下一拍的"没变化"去重判据吞掉，作动器永远收不到这条指令。改为发送成功才记账，
+  失败下拍自动重试。
+- **找平只按时间判完成**：新增 `leveling_max_tilt_deg`（默认 2.9°）与
+  `leveling_max_wait_s`（默认 2 s）——姿态没回到零位基准就继续等，等太久转降级。
+  就绪判据用"相对零位标定基准的误差"，车停在斜坡上也能正确判断。
+- **非法波特率被静默回退**：`is_baud_supported()` 是死代码，非法值会被悄悄换成
+  115200。现在启动即 FATAL。
+- **控制频率越界**：`control_rate_hz` 超出 [50, 1000] Hz 时拒绝启动；与 200 Hz
+  标定值不一致时给非致命提示（离散系数的时间标度会变）。
+
+**参数校验补缺**（原先完全没校验）
+
+- `kp_roll/kp_pitch` 必须为正、`kd_roll/kd_pitch` 非负——符号写反是正反馈；
+- 滤波链系数 `attitude_gyro_alpha/attitude_accel_alpha` 落在 (0,1]、死区非负；
+- `max_jump_m` 必须小于物理量程的 2 倍，否则帧间跳变检查永远不会触发；
+- `leveling_max_wait_s` 必须大于 `leveling_duration_s`；
+- `control_period_s` 超出 [0.001, 0.02] s 判致命。
+
+**可观测性**
+
+- `ControlStatus` 新增 `saturated` / `rate_limited`：控制器内部本来就有这两个标志，
+  但一直没上报，联调时只能看到"作动器跟不上"、看不到原因。
+
+**工程规范**
+
+- `suspension_control_v3` 注册 CTest，CI 的 `colcon test` 从"空转"变成真的跑自检；
+  `colcon test-result` 不再带 `|| true`。
+- 自检 410 → 428 项（场景 37~40）。
+
+### 实时性主线：把串口写移出 200 Hz 控制线程
+
+- **新增命令通道层**（`ICommandSink`：`command_sink.hpp/.cpp`）。控制线程
+  `submit()` 非阻塞投递"最新目标"，后台线程负责真正写驱动器；写失败按固定
+  间隔重试，**急停走优先路径插队**（已送达后不重复）。通道析构前会 `flush`
+  最后一帧，避免退出时把作动器停在半路。
+- **合并语义**：下行只剩几十 Hz 时，中间指令本来就没有执行意义，直接覆盖；
+  `command_coalesced` 上报被覆盖条数——这个数持续增长说明下行带宽不够。
+- **同步通道保留**：不注入通道时自动套 `DirectCommandSink`，行为与旧版完全一致
+  （既有 428 项断言零改动通过）；节点显式换成异步通道。
+- **控制周期超时计数**：原始 `dt` 超过 1.5 倍标称周期即计一次 `dt_overruns`。
+  这是"控制线程有没有被阻塞"的直接证据——旧实现把阻塞串口写放在这条线程里，
+  而软件上的 200 Hz 并不能保证物理上每 5 ms 算一次。
+- `ControlStatus` 新增 `command_coalesced` / `command_retries` /
+  `command_last_sent_age_ms` / `command_sink_async` / `dt_overruns`。
+- 自检 428 → **443 项**（场景 41 异步通道：不阻塞/合并/重试/急停优先/析构冲刷；
+  场景 42 回路接入异步通道后 600 拍不被 20 ms/次的写阻塞）。
+
+**构建规范化（P2）—— 已落地**
+
+这条最初被回退过一轮。根因是 `suspension_core` 是"源码不依赖 PCL、构建上却
+链接 PCL"的静态库，导出时把 Boost/VTK/QHULL/FLANN 的导入目标带给了下游。
+拆库（见上）之后彻底解决：
+
+- v2：`install(TARGETS suspension_core EXPORT suspension_core_targets ...)` +
+  `ament_export_targets(... HAS_LIBRARY_TARGET)`；`suspension_extractor`
+  （依赖 PCL）仅内部使用、不导出；
+- v3：删掉 `get_filename_component` 上溯与 `find_library` 硬找路径，
+  链接 imported target（兼容 `suspension_core` / `<pkg>::suspension_core`
+  两种命名，找不到就 configure 阶段 FATAL）；
+- 头文件用 `ament_target_dependencies` + 显式
+  `${suspension_preview_v2_INCLUDE_DIRS}`（容器里实测前者对"库目标"不透传）。
+
+CI 最终全绿：`colcon build` + `colcon test` + ASan + 覆盖率。
+
+### 构建重构：核心库与 PCL 层拆分
+
+`suspension_core` 原先把点云解析（PCL）与协议/串口/驱动放在同一个静态库里，
+导致"核心库不依赖 PCL"这句话只在源码层面成立：静态库链接 PCL 后，其
+`INTERFACE_LINK_LIBRARIES` 会带上 QHULL/VTK/Boost/FLANN 等导入目标，下游
+（v3）一旦不 `find_package(PCL)`，configure 阶段就会报一长串 target not found。
+
+- 新增 `suspension_extractor`（`road_profile_extractor.cpp` + `pipeline.cpp`），
+  依赖 PCL；接口输入本来就是 `pcl::PointCloud`，所以管线也归这一层；
+- `suspension_core` 只保留协议 / 串口 / 作动器驱动 / 趋势 / 障碍 / 标定 /
+  参数校验 / 输出接口，**源码与头文件都不再出现 `pcl/`**；
+- 预览节点与 `offline_demo` 显式链接两个库；`suspension_driver_node` 只链 core。
+
+本地验证：把 9 个 core 源文件在**不带任何 PCL include** 的情况下逐个编译通过，
+并 grep 确认核心头文件无 `pcl/` 引用。这是后续把 v3 切到 `ament_export_targets`
+（去掉路径 hack）的前提。
 
 ## [3.2.1] - 2026-10-15
 

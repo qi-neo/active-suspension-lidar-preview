@@ -32,9 +32,16 @@
 //  23. 预瞄前馈 FIR：关闭时行为不变 / 直流增益守恒 / 凸起被权重分摊而非全跟 /
 //      零权重拍归一化 / 远端缺格回退到最近有效格 / preview_start_m 决定窗口位置 /
 //      权重为空退回单点
+//  33. 姿态断流必须降级 / 34. 超物理上限的姿态必须急停 / 35. 急停失败重试
+//  36. 姿态阈值分层 / 37. 参数校验补充（增益、频率、跳变阈值、找平超时）
+//  38. 下发失败重试 / 39. 找平就绪判据 / 40. 限幅与速率限制上报
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <memory>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -3274,6 +3281,390 @@ void test_emergency_output_path() {
                 fx.driver->estop_calls_, fx.driver->cmd_calls_ - cmd_before);
 }
 
+// ---------------------------------------------------------------- 场景 33
+// 姿态断流：IMU 不再供数时必须降级，而不是带着"冻结的姿态"继续闭环。
+// 这是最隐蔽的一类失效——剖面还在正常更新，日志看不出任何异常。
+void test_attitude_stale_degrades() {
+    section("33. 姿态断流必须降级");
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    // 只推进时间、继续供剖面，但不再提交姿态：模拟 IMU 断流
+    constexpr double kDt = 0.005;
+    for (int i = 0; i < 100; ++i) {  // 0.5 s
+        fx.t += kDt;
+        fx.loop.submit_profile(make_frame(fx.t), fx.t);
+        fx.loop.step(fx.t, kDt);
+    }
+    check(fx.loop.status().state != ControlState::kBalancing,
+          "IMU 断流后不应仍然 BALANCING");
+    check((fx.loop.status().faults & kFaultStaleInput) != 0, "应置位输入过期故障");
+    check(fx.loop.status().attitude_age_ms > 400.0,
+          "姿态龄应随断流持续增长（不能冻结在断流瞬间）");
+    std::printf("  断流 0.5 s 后状态 %s，姿态龄 %.1f ms\n",
+                to_string(fx.loop.status().state), fx.loop.status().attitude_age_ms);
+}
+
+// ---------------------------------------------------------------- 场景 34
+// 超出 validator 物理上限的姿态（1.5 rad ≈ 86°）：会被 submit 拒收，
+// 但"传感器明显坏了"必须进急停。缺了这一支，保护对姿态量就不单调：
+// 20° 急停，70° 反而因为被当坏帧丢掉而没有保护。
+void test_attitude_implausible_trips_estop() {
+    section("34. 超物理上限的姿态必须急停");
+    LoopFixture fx;
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    Attitude a;
+    a.valid = true;
+    a.stamp_sec = fx.t;
+    a.roll_rad = 1.5;  // 超过 max_abs_attitude_rad(1.2)，也远超安全阈值 0.35
+    check(!fx.loop.submit_attitude(a, fx.t), "超物理上限的姿态应被拒收");
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(fx.loop.status().state == ControlState::kEmergency,
+          "被拒的极端姿态也应触发 EMERGENCY");
+    check((fx.loop.status().faults & kFaultAttitudeExceeded) != 0,
+          "应置位姿态超限故障");
+    std::printf("  1.5 rad 姿态 -> %s，faults=0x%02x\n",
+                to_string(fx.loop.status().state), fx.loop.status().faults);
+}
+
+// ---------------------------------------------------------------- 场景 35
+// 硬件急停写失败时必须重试，直到送达为止；送达之后不再重复调用
+void test_estop_retry_until_delivered() {
+    section("35. 硬件急停失败要重试");
+    LoopFixture fx(/*attach_driver=*/true);
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    fx.driver->estop_fail_ = true;
+    fx.loop.request_estop("测试急停");
+    fx.advance(0.5);
+    check(fx.loop.status().state == ControlState::kEmergency, "应进入 EMERGENCY");
+    check(fx.driver->estop_calls_ > 1, "急停写失败时应重试，而不是只试一次");
+    const int calls_while_failing = fx.driver->estop_calls_;
+
+    fx.driver->estop_fail_ = false;
+    fx.advance(0.4);
+    check(fx.driver->estop_calls_ > calls_while_failing, "恢复后应再次尝试");
+    const int calls_after_success = fx.driver->estop_calls_;
+    fx.advance(0.4);
+    check(fx.driver->estop_calls_ == calls_after_success, "成功后不再重复调用急停");
+    std::printf("  失败期间调用 %d 次，送达后共 %d 次\n", calls_while_failing,
+                fx.driver->estop_calls_);
+}
+
+// ---------------------------------------------------------------- 场景 36
+// 参数校验：物理上限必须严格大于安全阈值，否则保护不单调
+void test_param_check_attitude_ordering() {
+    section("36. 参数校验：姿态阈值分层");
+    ControlLoopParams loop_params;
+    StateMachineParams sm_params;
+    loop_params.max_abs_attitude_rad = 0.30;  // 小于安全阈值 0.35 -> 必须报致命错误
+    sm_params.max_abs_roll_rad = 0.35;
+    sm_params.max_abs_pitch_rad = 0.35;
+    const auto issues = suspension_control_v3::validate_params(
+        ControlParams{}, loop_params, ValidatorParams{}, sm_params);
+    bool found = false;
+    for (const auto& i : issues) {
+        if (i.key == "max_abs_attitude_rad" && i.fatal) found = true;
+    }
+    check(found, "物理上限不大于安全阈值时应报致命错误");
+
+    // 出厂默认必须干净（这条防的是"默认值一启动就报错"）
+    const auto clean = suspension_control_v3::validate_params(
+        ControlParams{}, ControlLoopParams{}, ValidatorParams{}, StateMachineParams{});
+    bool default_ok = true;
+    for (const auto& i : clean) {
+        if (i.fatal) default_ok = false;
+    }
+    check(default_ok, "出厂默认参数不应有致命项");
+}
+
+
+// ---------------------------------------------------------------- 场景 37
+// 参数校验补齐：反馈增益符号、滤波系数、控制频率、跳变阈值与量程的关系
+void test_param_check_gaps() {
+    section("37. 参数校验：增益 / 频率 / 跳变阈值");
+    auto run = [](const ControlParams& c, const ControlLoopParams& l,
+                  const ValidatorParams& v, const StateMachineParams& s) {
+        return suspension_control_v3::validate_params(c, l, v, s);
+    };
+    auto fatal_has = [](const std::vector<suspension_control_v3::ParamIssue>& issues,
+                        const char* key) {
+        for (const auto& i : issues) {
+            if (i.fatal && i.key == key) return true;
+        }
+        return false;
+    };
+
+    {   // 反馈增益为 0：等于静默放弃闭环；为负：正反馈
+        ControlParams c;
+        c.kp_roll = 0.0;
+        check(fatal_has(run(c, {}, {}, {}), "kp_roll"), "kp_roll=0 应报致命错误");
+    }
+    {
+        ControlParams c;
+        c.kd_pitch = -1.0;
+        check(fatal_has(run(c, {}, {}, {}), "kd_pitch"), "kd_pitch 为负应报致命错误");
+    }
+    {   // 滤波系数落在 (0,1] 之外会让滤波发散或永久冻结
+        ControlParams c;
+        c.attitude_gyro_alpha = 0.0;
+        check(fatal_has(run(c, {}, {}, {}), "attitude_gyro_alpha"),
+              "滤波系数为 0 应报致命错误");
+    }
+    {   // 控制频率过低：按拍计时的安全判据粒度不可用
+        ControlParams c;
+        c.control_period_s = 0.05;  // 20 Hz
+        check(fatal_has(run(c, {}, {}, {}), "control_rate_hz"),
+              "控制频率过低应报致命错误");
+    }
+    {   // 跳变阈值大于物理量程：这条检查永远不会触发
+        ValidatorParams v;
+        v.check_jump = true;
+        v.max_jump_m = 5.0;
+        v.height_abs_limit_m = 0.6;
+        check(fatal_has(run({}, {}, v, {}), "max_jump_m"),
+              "跳变阈值大于量程应报致命错误");
+    }
+    {   // 找平超时必须大于找平时长
+        StateMachineParams sm;
+        sm.leveling_duration_s = 1.0;
+        sm.leveling_max_wait_s = 0.5;
+        check(fatal_has(run({}, {}, {}, sm), "leveling_max_wait_s"),
+              "找平超时小于找平时长应报致命错误");
+    }
+}
+
+// ---------------------------------------------------------------- 场景 38
+// 下行链路：写失败不能算"已下发"，下一拍要重试
+void test_command_retry_on_send_failure() {
+    section("38. 下发失败要重试");
+    LoopFixture fx(/*attach_driver=*/true);
+    fx.advance(3.0);
+    check(fx.loop.status().state == ControlState::kBalancing, "先进入 BALANCING");
+
+    fx.driver->send_fail_ = true;
+    const int sent_before = static_cast<int>(fx.loop.status().commands_sent);
+    const int err_before = static_cast<int>(fx.loop.status().driver_errors);
+    fx.advance(0.2, 0.0, 0.2, 0.0);  // 指令随横滚反馈变化，每一拍都尝试下发
+    check(static_cast<int>(fx.loop.status().commands_sent) == sent_before,
+          "写失败不应计为已下发");
+    check(static_cast<int>(fx.loop.status().driver_errors) > err_before,
+          "写失败应计入 driver_errors");
+
+    const int cmds_while_failing = fx.driver->cmd_calls_;
+    fx.driver->send_fail_ = false;
+    fx.advance(0.2);
+    check(static_cast<int>(fx.loop.status().commands_sent) > sent_before,
+          "链路恢复后应重发并成功");
+    check(fx.driver->cmd_calls_ > cmds_while_failing, "恢复后应继续尝试下发");
+    std::printf("  失败期 cmds=%d，恢复后 commands_sent=%zu\n", cmds_while_failing,
+                static_cast<std::size_t>(fx.loop.status().commands_sent));
+}
+
+// ---------------------------------------------------------------- 场景 39
+// 找平就绪判据：只看时间会在车身还歪着时就进闭环
+void test_leveling_readiness() {
+    section("39. 找平就绪判据");
+    StateMachineParams p;
+    SafetyInputs in;
+    in.profile_valid = true;
+    in.profile_fresh = true;
+    in.profile_quality = 100;
+    in.min_quality = 40;
+    in.attitude_valid = true;
+    in.actuator_connected = true;
+    in.roll_rate = 0.0;
+    in.pitch_rate = 0.0;
+
+    {   // 姿态已回到零位：正常进入 BALANCING
+        SafetyStateMachine sm(p);
+        for (int i = 0; i < 400; ++i) sm.tick(in, 0.005);  // 2 s
+        check(sm.state() == ControlState::kBalancing, "姿态回中时应进入 BALANCING");
+    }
+    {   // 姿态未回中：到点也不能进闭环，超过最长等待转降级
+        SafetyStateMachine sm(p);
+        for (int i = 0; i < 60; ++i) sm.tick(in, 0.005);  // 标定 0.3 s -> LEVELING
+        check(sm.state() == ControlState::kLeveling, "标定完成后应进入 LEVELING");
+        in.roll_err_rad = 0.10;  // 约 5.7°，远大于 0.05 阈值
+        for (int i = 0; i < 150; ++i) sm.tick(in, 0.005);  // 0.75 s，未到就绪
+        check(sm.state() == ControlState::kLeveling,
+              "姿态未回中时不应只按时间进 BALANCING");
+        for (int i = 0; i < 300; ++i) sm.tick(in, 0.005);  // 累计超过最长等待
+        check(sm.state() == ControlState::kDegraded, "找平超时应转 DEGRADED");
+    }
+}
+
+// ---------------------------------------------------------------- 场景 40
+// 限幅与速率限制要能从状态里看出来
+void test_saturation_reported_in_status() {
+    section("40. 限幅与速率限制上报");
+    {   // 行程只有 5 mm 而反馈要求 50 mm：必然撞限幅
+        ControlParams c;
+        c.height_limit_mm = 5.0;
+        c.rate_limit_mm_per_s = 1.0e6;
+        LoopFixture fx(/*attach_driver=*/false, /*require_driver=*/false, &c);
+        fx.advance(3.0);
+        fx.advance(0.3, 0.0, 0.2, 0.0);  // 0.2 rad * kp(250) = 50 mm
+        check(fx.loop.status().controller_saturated, "撞行程限幅时应上报 saturated");
+        check(!fx.loop.status().controller_rate_limited,
+              "速率限制放宽时不应上报 rate_limited");
+    }
+    {   // 速率限制很紧：输出每拍只能挪一点点
+        ControlParams c;
+        c.height_limit_mm = 40.0;
+        c.rate_limit_mm_per_s = 1.0;
+        LoopFixture fx(/*attach_driver=*/false, /*require_driver=*/false, &c);
+        fx.advance(3.0);
+        fx.advance(0.2, 0.0, 0.1, 0.0);
+        check(fx.loop.status().controller_rate_limited,
+              "速率限制很紧时应上报 rate_limited");
+    }
+}
+
+
+// ---------------------------------------------------------------- 场景 41
+// 探针驱动器：能制造"写串口很慢/一直失败"，用来验证异步通道的非阻塞与重试
+class AsyncProbeDriver : public suspension_preview_v2::ISuspensionDriver {
+public:
+    bool connect() override {
+        connected_ = true;
+        return true;
+    }
+    void disconnect() override { connected_ = false; }
+    bool is_connected() const override { return connected_; }
+    bool set_mode(suspension_preview_v2::SuspensionMode) override { return true; }
+    bool set_target_height(int, int) override { return true; }
+    bool set_target_height(
+        const std::array<int, suspension_preview_v2::kSuspensionWheelCount>& mm) override {
+        ++calls;
+        const int delay = block_ms.load();
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        if (fail.load()) return false;
+        for (int i = 0; i < 4; ++i) last[static_cast<std::size_t>(i)] = mm[static_cast<std::size_t>(i)];
+        ++ok_calls;
+        return true;
+    }
+    bool emergency_stop() override {
+        ++estop_calls;
+        if (estop_fail.load()) return false;
+        estop_ok = true;
+        return true;
+    }
+    const std::string& last_error() const override { return err_; }
+
+    std::atomic<int> calls{0};
+    std::atomic<int> ok_calls{0};
+    std::atomic<int> estop_calls{0};
+    std::atomic<int> block_ms{0};     // >0：每次写阻塞这么久
+    std::atomic<bool> fail{false};    // true：写失败
+    std::atomic<bool> estop_fail{false};
+    std::atomic<bool> connected_{false};
+    std::atomic<bool> estop_ok{false};
+    std::array<int, 4> last{{0, 0, 0, 0}};
+
+private:
+    std::string err_;
+};
+
+void test_async_command_sink() {
+    section("41. 异步命令通道：不阻塞 / 合并 / 重试 / 急停优先");
+    auto drv = std::make_shared<AsyncProbeDriver>();
+    drv->connect();
+
+    {
+        auto sink = make_async_command_sink(drv, 0.005);
+
+        // 1) 驱动卡 200 ms，submit 必须立刻返回（控制线程不能被串口拖住）
+        drv->block_ms = 200;
+        const auto t0 = std::chrono::steady_clock::now();
+        sink->submit({1, 2, 3, 4});
+        const double submit_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - t0)
+                                     .count();
+        check(submit_ms < 50.0, "驱动阻塞时 submit 不应阻塞控制线程");
+
+        // 2) 阻塞期间连续投递：中间值应被合并，最终只写最新值
+        for (int i = 5; i <= 10; ++i) sink->submit({i, i, i, i});
+        drv->block_ms = 0;
+        check(sink->flush(3.0), "flush 应等到队列清空");
+        check(sink->stats().sent >= 1, "最终应至少成功写入一次");
+        check(sink->stats().coalesced >= 1, "阻塞期间的中间值应被合并覆盖");
+        check(drv->last[0] == 10, "最终写入的应是最后一次投递的值");
+
+        // 3) 写失败要重试，恢复后把最新值写进去
+        drv->fail = true;
+        const std::uint64_t failed_before = sink->stats().failed;
+        sink->submit({20, 20, 20, 20});
+        for (int i = 0; i < 400 && sink->stats().failed == failed_before; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        check(sink->stats().failed > failed_before, "写失败应计入 failed");
+        drv->fail = false;
+        check(sink->flush(3.0), "链路恢复后 flush 应等到写入成功");
+        check(drv->last[0] == 20, "重试后应写入最新值");
+
+        // 4) 急停走优先路径，最终必须送达
+        drv->block_ms = 60;
+        sink->request_emergency_stop();
+        check(sink->flush(3.0), "急停请求应被处理");
+        check(sink->emergency_stop_delivered(), "急停应送达");
+        check(drv->estop_calls >= 1, "驱动器应真的收到急停");
+        drv->block_ms = 0;
+    }
+
+    // 5) 通道析构前应把最后一帧冲刷出去（否则进程退出会把作动器停在半路）
+    {
+        auto drv2 = std::make_shared<AsyncProbeDriver>();
+        drv2->connect();
+        {
+            auto sink2 = make_async_command_sink(drv2, 0.005);
+            sink2->submit({7, 7, 7, 7});
+        }
+        check(drv2->ok_calls >= 1, "通道析构前应把最后一帧冲刷出去");
+    }
+}
+
+// ---------------------------------------------------------------- 场景 42
+// 控制回路接异步通道后，串口慢不再拖住 200 Hz 节拍
+void test_loop_nonblocking_downlink() {
+    section("42. 控制回路不再被串口写阻塞");
+    auto drv = std::make_shared<AsyncProbeDriver>();
+    drv->connect();
+
+    ControlLoopParams lp;
+    lp.enable_driver = true;
+    lp.require_driver = false;
+    SuspensionControlLoop loop(lp, ValidatorParams{}, StateMachineParams{}, ControlParams{});
+    loop.set_driver(drv);
+    loop.set_command_sink(make_async_command_sink(drv, 0.005));
+
+    drv->block_ms = 20;  // 每次写阻塞 20 ms（远大于 5 ms 控制周期）
+    const auto wall0 = std::chrono::steady_clock::now();
+    double t = 0.0;
+    for (int i = 0; i < 600; ++i) {  // 3 s 仿真：走到 BALANCING 并持续下发
+        loop.submit_profile(make_frame(t), t);
+        Attitude a;
+        a.valid = true;
+        a.stamp_sec = t;
+        loop.submit_attitude(a, t);
+        loop.step(t, 0.005);
+        t += 0.005;
+    }
+    const double wall_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0)
+            .count();
+    check(wall_ms < 1000.0, "异步通道下 600 拍不应被 20 ms/次的串口写拖住");
+    check(loop.status().command_sink_async, "状态应标记为异步通道");
+    check(loop.status().command_last_sent_age_ms >= 0.0, "通道应有成功写入记录");
+    std::printf("  600 拍耗时 %.1f ms（驱动每次写阻塞 20 ms），已发 %zu 条\n", wall_ms,
+                loop.status().commands_sent);
+}
+
 int main() {
     std::printf("suspension_control_v3 离线自检\n");
     std::printf("（控制环 200 Hz，剖面 10 Hz，无 ROS / 无硬件）\n");
@@ -3310,6 +3701,16 @@ int main() {
     test_driver_error_paths();
     test_param_validation();
     test_emergency_output_path();
+    test_attitude_stale_degrades();
+    test_attitude_implausible_trips_estop();
+    test_estop_retry_until_delivered();
+    test_param_check_attitude_ordering();
+    test_param_check_gaps();
+    test_command_retry_on_send_failure();
+    test_leveling_readiness();
+    test_saturation_reported_in_status();
+    test_async_command_sink();
+    test_loop_nonblocking_downlink();
 
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d -> %s\n", g_checks, g_failed,

@@ -28,6 +28,9 @@ import xml.etree.ElementTree as ET
 NOT_A_ROS_PACKAGE = {
     "ament_cmake",        # buildtool_depend，不是运行依赖
     "PCL",                # 系统库，用 rosdep key libpcl-all-dev 声明
+    # Eigen 是 libpcl-dev 的依赖（libeigen3-dev），随 PCL 一起装；
+    # 单独写 <depend>eigen</depend> 反而会和 PCL 的 rosdep 解析重复
+    "Eigen3",
     "Threads",
     "PkgConfig",
 }

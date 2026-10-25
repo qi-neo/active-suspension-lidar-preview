@@ -1,0 +1,54 @@
+<svg viewBox="0 0 680 380" width="100%" role="img">
+  <title>P0 主控+执行一体化板框图</title>
+  <desc>香橙派经隔离UART下发0xAA55帧到STM32G4，MCU经4路半双工总线驱舵机，心跳丢失经急停MOSFET切舵机电源</desc>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <text class="th" x="40" y="28" style="font-size:15px;font-weight:500;fill:#26215C">P0 主控 + 执行一体化板 · 框图</text>
+
+  <rect x="40" y="60" width="140" height="56" rx="10" fill="#E6F1FB" stroke="#85B7EB" stroke-width="0.5"/>
+  <text class="th" x="110" y="82" text-anchor="middle" dominant-baseline="central" style="fill:#0C447C">香橙派 AI Pro</text>
+  <text class="ts" x="110" y="102" text-anchor="middle" dominant-baseline="central" style="fill:#185FA5">设定值 + 心跳</text>
+
+  <line x1="180" y1="88" x2="220" y2="88" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text class="ts" x="184" y="78" style="font-size:11px;fill:#888780">隔离 UART</text>
+
+  <rect x="220" y="60" width="120" height="56" rx="10" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+  <text class="th" x="280" y="82" text-anchor="middle" dominant-baseline="central" style="fill:#444441">数字隔离器</text>
+  <text class="ts" x="280" y="102" text-anchor="middle" dominant-baseline="central" style="fill:#5F5E5A">Si8640</text>
+
+  <line x1="340" y1="88" x2="380" y2="88" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#ar)"/>
+  <rect x="380" y="56" width="150" height="64" rx="10" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+  <text class="th" x="455" y="80" text-anchor="middle" dominant-baseline="central" style="fill:#27500A">STM32G4 MCU</text>
+  <text class="ts" x="455" y="100" text-anchor="middle" dominant-baseline="central" style="fill:#3B6D11">200Hz 控制 + 急停</text>
+
+  <!-- MCU 到 4 舵机 -->
+  <line x1="455" y1="120" x2="455" y2="150" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text class="ts" x="465" y="140" style="font-size:11px;fill:#888780">4× 半双工总线</text>
+  <rect x="360" y="150" width="190" height="44" rx="10" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+  <text class="th" x="455" y="172" text-anchor="middle" dominant-baseline="central" style="fill:#444441">4 × 数字舵机 (0/1/2/3)</text>
+
+  <!-- 急停 MOSFET -->
+  <rect x="380" y="220" width="150" height="50" rx="10" fill="#FAECE7" stroke="#F0997B" stroke-width="0.5"/>
+  <text class="th" x="455" y="240" text-anchor="middle" dominant-baseline="central" style="fill:#712B13">急停 MOSFET</text>
+  <text class="ts" x="455" y="260" text-anchor="middle" dominant-baseline="central" style="fill:#993C1D">心跳丢失切舵机电源</text>
+  <line x1="455" y1="210" x2="455" y2="220" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text class="ts" x="465" y="216" style="font-size:11px;fill:#888780">控制</text>
+
+  <!-- 外部急停按钮 -->
+  <rect x="600" y="220" width="80" height="50" rx="10" fill="#FCEBEB" stroke="#E24B4A" stroke-width="0.5"/>
+  <text class="th" x="640" y="246" text-anchor="middle" dominant-baseline="central" style="fill:#A32D2D">急停钮</text>
+  <line x1="600" y1="245" x2="530" y2="245" stroke="#E24B4A" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- 看门狗 -->
+  <rect x="40" y="220" width="140" height="50" rx="10" fill="#FAEEDA" stroke="#EF9F27" stroke-width="0.5"/>
+  <text class="th" x="110" y="240" text-anchor="middle" dominant-baseline="central" style="fill:#633806">硬件看门狗</text>
+  <text class="ts" x="110" y="260" text-anchor="middle" dominant-baseline="central" style="fill:#854F0B">TPS3823 / MAX6814</text>
+  <line x1="180" y1="245" x2="380" y2="245" stroke="#5F5E5A" stroke-width="0.5" stroke-dasharray="4 3"/>
+
+  <text class="ts" x="40" y="350" style="font-size:11px;fill:#888780">链路复用 protocol.hpp 的 0xAA55+CRC16 帧；香橙派侧 SerialSuspensionDriver 零改动对接</text>
+  <text class="ts" x="40" y="368" style="font-size:11px;fill:#888780">车轮顺序 0=左前 1=右前 2=左后 3=右后；高度 mm，正=升高（对齐 ISuspensionDriver）</text>
+</svg>

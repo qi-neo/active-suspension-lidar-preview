@@ -25,6 +25,12 @@ struct StateMachineParams {
     int calibrate_samples{50};            // 标定所需有效样本数
     double calibrate_max_rate{0.05};      // 静止判定阈值 (rad/s)
     double leveling_duration_s{1.0};      // 找平持续时间
+    // 找平完成判据：姿态误差（相对零位标定基准）小于它才算"已经回中"。
+    // 只看时间的话，车身还歪着就进闭环——作动器还在走，闭环第一拍就会
+    // 把"没到位"当成"姿态误差"去修，等于自己跟自己打架
+    double leveling_max_tilt_rad{0.05};   // 约 2.9°
+    // 找平最长等待：超时仍未就绪转 Degraded（不允许永远停在 Leveling）
+    double leveling_max_wait_s{2.0};
     // 连续不可信多久后降级。用时间而非帧数：控制环 200 Hz、剖面 10~20 Hz，
     // 同一帧会被多个周期复用，按帧计数会误判
     double degrade_after_unhealthy_s{0.15};
@@ -55,6 +61,17 @@ struct SafetyInputs {
     double pitch_rad{0.0};
     double roll_rate{0.0};
     double pitch_rate{0.0};
+
+    // 姿态"物理上不可能"（超出 validator 的合理性上限，例如 >69°）。
+    // 这种样本会被 submit_attitude() 拒掉，若只看 attitude_valid，就会在
+    // 姿态越离谱时反而没有任何保护——20° 急停、70° 静默忽略。
+    // 由控制回路在拒绝该样本时置位，状态机据此锁存姿态超限并进急停
+    bool attitude_implausible{false};
+
+    // 相对"零位标定基准"的姿态误差 (rad)，只用于找平就绪判据。
+    // 车停在斜坡上时原始姿态不为 0，但相对标定零位应为 0
+    double roll_err_rad{0.0};
+    double pitch_err_rad{0.0};
 
     bool actuator_connected{true};
     bool estop_requested{false};

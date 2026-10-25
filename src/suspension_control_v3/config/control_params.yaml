@@ -110,6 +110,11 @@ suspension_control_node:
     calibrate_samples: 50           # 标定所需样本数
     calibrate_max_rate: 0.05        # 静止判定阈值 (rad/s)
     leveling_duration_s: 1.0        # 找平持续时间
+    # 找平就绪判据：姿态误差（相对零位标定基准）小于它才算回中。
+    # 只看时间的话，作动器还没走完就进闭环，闭环第一拍会把"没到位"当误差去修
+    leveling_max_tilt_deg: 2.9      # 约 0.05 rad
+    # 找平最长等待；超时仍未就绪转 Degraded（不允许永远停在 Leveling）
+    leveling_max_wait_s: 2.0
     degrade_after_unhealthy_s: 0.15 # 连续不可信多久后降级
     recover_duration_s: 0.5         # 恢复正常多久后回闭环
     degraded_hold_timeout_s: 5.0    # 降级后保持多久仍未恢复则转急停回中

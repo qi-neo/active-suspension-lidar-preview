@@ -9,16 +9,20 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 #include "unilidar_driver/protocol.hpp"
 
 namespace unilidar_driver {
 
+// 只有两种结果：缓冲不够（继续喂）或取到一帧。原先还有一个 kNoFrame
+// （"缓冲已处理完"），但 pull() 在任何一条路径上都不会返回它——缓冲耗尽时
+// 统一返回 kNeedMore。留着一个永远取不到的枚举值会让调用方误以为要处理
+// 第三种状态，故删除。
 enum class PullStatus {
   kNeedMore,    // 缓冲里的字节还不够组成一帧，继续喂
   kFrameReady,  // 取到一帧完整且校验通过的报文
-  kNoFrame,     // 缓冲已处理完，当前没有可用帧
 };
 
 struct ParseStats {
@@ -29,11 +33,9 @@ struct ParseStats {
   std::uint64_t bad_crc{0};         // CRC 校验失败
   std::uint64_t resync_bytes{0};    // 为找到帧头而丢弃的字节数
   std::uint64_t buffer_overflow{0}; // 缓冲超限被整体清空
-  std::uint64_t seq_gaps{0};        // 序号不连续，中间可能丢了包
-  std::uint64_t seq_discontinuity{0};
-  bool have_last_seq{false};
-  std::uint32_t last_seq{0};
-  std::uint32_t last_type{0};  // 上一条合法报文的类型，用于分开统计各流的序号
+  std::uint64_t seq_gaps{0};        // 同类型序号向前跳变，中间可能丢了包
+  std::uint64_t duplicates{0};      // 同类型序号与上一条相同，整包已丢弃
+  std::uint64_t out_of_order{0};    // 同类型序号倒退，包已交付但顺序不可信
 };
 
 class PacketParser {
@@ -45,6 +47,8 @@ public:
   void append(const std::uint8_t* data, std::size_t len);
 
   // 取出一帧。成功时 out 被赋值为整包字节（含帧头帧尾），out_type 为报文类型。
+  // 重复包（同类型、序号与上一条相同）会被直接丢弃并计入 duplicates，
+  // 不会通过本函数返回。
   PullStatus pull(std::vector<std::uint8_t>& out, std::uint32_t& out_type);
 
   std::size_t buffered() const { return buf_.size(); }
@@ -55,9 +59,17 @@ private:
   // 从 from 位置起寻找帧头；找不到时只保留可能构成帧头前缀的最后几个字节
   bool seek_header(std::size_t& pos);
 
+  // 每种报文类型各有一条独立的递增序号（点云 102 与 IMU 104 互不相干），
+  // 必须分开记录，否则会一直误报丢包或把正常帧当重复包丢掉。
+  struct SeqState {
+    bool have_last{false};
+    std::uint32_t last{0};
+  };
+
   std::vector<std::uint8_t> buf_;
   std::size_t max_packet_;
   std::size_t max_buffered_;
+  std::map<std::uint32_t, SeqState> seq_state_;  // packet_type -> 序号状态
   ParseStats stats_;
 };
 

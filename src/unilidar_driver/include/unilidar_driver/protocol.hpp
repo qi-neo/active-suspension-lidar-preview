@@ -42,6 +42,16 @@ constexpr std::size_t kMaxPoints2D = 1800;
 constexpr std::size_t kHeaderSize = 12;
 constexpr std::size_t kTailSize = 12;
 
+// CRC32 覆盖范围：**只有数据段**，即 [kHeaderSize, packet_size - kTailSize)，
+// 既不含 12 字节帧头，也不含 12 字节帧尾。
+//
+// 这个范围是对着官方"实现"核对出来的，不是照注释抄的：从官方
+// unitree_lidar_sdk2 的 libunilidar_sdk2.a 反汇编 LidarPacketParser::parseByte，
+// CRC 循环起点是 frame+12、终点是 frame+packet_size-12，长度 = packet_size-24；
+// 而官方协议头文件里 `uint32_t crc32; // crc check of head and data` 这句注释
+// 与它自己的实现相矛盾。按注释实现会导致真机每一帧都 bad_crc。
+constexpr std::size_t kCrcOffset = kHeaderSize;
+
 #pragma pack(push, 1)
 
 // 时间戳，8 字节
@@ -59,7 +69,7 @@ struct FrameHeader {
 
 // 帧尾，12 字节
 struct FrameTail {
-  uint32_t crc32;           // 覆盖「帧头 + 数据段」，不含本结构
+  uint32_t crc32;           // CRC32，只覆盖数据段（见 kCrcOffset 的说明）
   uint32_t msg_type_check;  // 雷达侧回执类型
   uint8_t reserve[2];
   uint8_t tail[2];          // kTailMark

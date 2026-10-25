@@ -35,6 +35,12 @@ void SuspensionControlLoop::set_driver(
     std::shared_ptr<suspension_preview_v2::ISuspensionDriver> driver) {
     driver_ = std::move(driver);
     mode_pushed_ = false;
+    // 没显式注入通道时退化成同步写：与旧版行为完全一致
+    if (!sink_) sink_ = make_direct_command_sink(driver_);
+}
+
+void SuspensionControlLoop::set_command_sink(std::shared_ptr<ICommandSink> sink) {
+    sink_ = std::move(sink);
 }
 
 ValidationResult SuspensionControlLoop::submit_profile(
@@ -64,6 +70,10 @@ bool SuspensionControlLoop::submit_attitude(const Attitude& attitude, double now
         ok = false;
     } else if (std::fabs(attitude.roll_rad) > params_.max_abs_attitude_rad ||
                std::fabs(attitude.pitch_rad) > params_.max_abs_attitude_rad) {
+        // 超出物理上限：这不是"这一帧数据不可信"，而是传感器/安装已经坏了。
+        // 只把它当成坏帧丢掉会让系统在"姿态 > 69°"时反而没有任何保护
+        // （20° 已急停，70° 却被静默忽略）。标记出来交给状态机进急停。
+        attitude_implausible_ = true;
         ok = false;
     } else if (status_.attitude_age_ms > params_.max_attitude_age_ms ||
                status_.attitude_age_ms < -params_.max_attitude_age_ms) {
@@ -79,6 +89,7 @@ bool SuspensionControlLoop::submit_attitude(const Attitude& attitude, double now
 
     attitude_ = attitude;
     attitude_.valid = true;
+    attitude_implausible_ = false;  // 收到合法样本即解除"传感器坏了"的判定
     status_.attitude_accepted = true;
     return true;
 }
@@ -200,29 +211,72 @@ void SuspensionControlLoop::apply_command(
             static_cast<int>(std::lround(height_mm[static_cast<std::size_t>(i)]));
     }
 
-    status_.commanded_mm = next;
+    status_.commanded_mm = next;  // 期望值（诊断用，不代表已经送达）
 
     // 命令没变就不重复下发。控制环 200 Hz 时，零位或降级保持值会被连发几百次，
     // 白白占用总线带宽，也淹没有效帧。
     // force 用于状态跃迁：进入回中/急停时哪怕数值相同也必须发一次，
-    // 否则初始 last_command_ 就是全零，回中指令会被去重吞掉，作动器永远收不到
+    // 否则初始 last_command_ 就是全零，回中指令会被去重吞掉，作动器永远收不到。
+    //
+    // 去重比较的基准必须是"已经成功送达的值"，而不是"上一次想发的值"：
+    // 先更新后发送的话，串口写失败一次就会被下一拍的"没变化"判据吞掉，
+    // 作动器永远收不到这条指令，除了 driver_errors 看不出任何异常。
     if (!force && next == last_command_) return;
-    last_command_ = next;
 
-    if (!params_.enable_driver || !driver_) return;
-    std::array<int, suspension_preview_v2::kSuspensionWheelCount> cmd{};
-    for (int i = 0; i < kWheelCount; ++i) {
-        cmd[static_cast<std::size_t>(i)] = last_command_[static_cast<std::size_t>(i)];
+    if (!params_.enable_driver || !sink_) {
+        // 纯软件/未接驱动器：没有"送达"概念，直接记账
+        last_command_ = next;
+        return;
     }
-    if (driver_->set_target_height(cmd)) {
-        ++status_.commands_sent;
-    } else {
-        ++status_.driver_errors;
+
+    sink_->submit(next);
+
+    if (sink_->is_async()) {
+        // 异步通道：去重基准是"已投递"。真正写入与失败重试在后台线程，
+        // 送达情况通过 status_.command_* 与 command_last_sent_age_ms 观察
+        last_command_ = next;
+        if (force) sink_->flush(0.05);  // 状态跃迁：确认关键指令真的出去了
+        return;
+    }
+
+    // 同步通道：以 sent 计数增量判断这一条是否写成功。
+    // 失败时不更新 last_command_，下一拍自动重试（P0 修复的语义）
+    const CommandSinkStats st = sink_->stats();
+    if (st.sent > last_sink_sent_) {
+        last_sink_sent_ = st.sent;
+        last_command_ = next;
     }
 }
 
 const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) {
     ++status_.ticks;
+
+    // 原始 dt 超过 1.5 倍标称周期 → 记一次控制周期超时。
+    // 这个计数是"控制线程有没有被阻塞"的直接证据：串口写、日志、调度抖动
+    // 都会在这里留下痕迹（旧实现正是把阻塞串口写放在这条线程里）
+    {
+        const double expected_dt = controller_->params().control_period_s;
+        if (expected_dt > 0.0 && dt > 1.5 * expected_dt) ++status_.dt_overruns;
+    }
+
+    // ---- 姿态过期判定：必须按"当前时刻"每拍重算 ----
+    // 不能只在 submit_attitude() 里算：IMU 断流后该函数不再被调用，age 会永远
+    // 停在最后一个值、attitude_.valid 永远是 true，于是控制器带着几秒前的姿态
+    // 持续输出、状态机零故障位——这是最危险的一种失效（看起来一切正常）。
+    //
+    // age 每拍都更新（即使已经判为无效），这样联调时能看到"姿态已经断了 2 s"，
+    // 而不是冻结在断流瞬间的那个数
+    {
+        const double attitude_age_ms = (now_sec - attitude_.stamp_sec) * 1000.0;
+        status_.attitude_age_ms = attitude_age_ms;
+        if (attitude_.valid &&
+            (attitude_age_ms > params_.max_attitude_age_ms ||
+             attitude_age_ms < -params_.max_attitude_age_ms)) {
+            attitude_.valid = false;
+            status_.attitude_accepted = false;
+            ++status_.attitude_rejected;
+        }
+    }
 
     // 周期时长封顶后再往下传。dt 异常大时（抖动、卡顿、断点），状态机里所有
     // "累计时长"型判据都会被一次性推过阈值，速率限制也会按它放行一个大跳变。
@@ -282,6 +336,12 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     in.pitch_rad = attitude_.pitch_rad;
     in.roll_rate = attitude_.roll_rate;
     in.pitch_rate = attitude_.pitch_rate;
+    // 姿态数据"物理上不可能"：这不是坏帧，是传感器/安装失效，状态机直接急停
+    in.attitude_implausible = attitude_implausible_;
+    // 找平就绪判据用"相对零位标定基准"的误差：车停在斜坡上时，原始姿态不是 0，
+    // 但相对标定零位是 0——用原始姿态判就绪会永远等不到
+    in.roll_err_rad = attitude_.roll_rad - status_.calibrated_roll_rad;
+    in.pitch_err_rad = attitude_.pitch_rad - status_.calibrated_pitch_rad;
     // require_driver 为真时，"声明要驱动却没驱动"按链路丢失上报并最终急停；
     // 纯软件联调模式（require_driver=false）不参与该判定
     const bool driver_ready =
@@ -289,6 +349,24 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     in.actuator_connected = driver_ready || !params_.require_driver;
     // 堵转：指令与实际位置持续偏离。无位置反馈时恒为 false，状态机整段跳过
     in.actuator_stalled = stalled_now_;
+
+    // 下行通道统计：异步实现里的 sent/failed/coalesced 是判断链路健康度的依据
+    if (sink_) {
+        const CommandSinkStats ss = sink_->stats();
+        status_.commands_sent = static_cast<std::size_t>(ss.sent);
+        status_.command_coalesced = static_cast<std::size_t>(ss.coalesced);
+        status_.command_retries = static_cast<std::size_t>(ss.failed);
+        // 保留 driver_errors 的既有语义：写失败也计入（旧测试与运维看板都在用它）
+        const std::uint64_t failed_now = static_cast<std::uint64_t>(ss.failed);
+        if (failed_now > last_sink_failed_) {
+            status_.driver_errors +=
+                static_cast<std::size_t>(failed_now - last_sink_failed_);
+            last_sink_failed_ = failed_now;
+        }
+        status_.command_last_sent_age_ms = ss.last_sent_age_ms;
+        status_.command_sink_async = sink_->is_async();
+        status_.estop_commands_sent = static_cast<std::size_t>(ss.estop_sent);
+    }
 
     const StateMachineOutput sm = state_machine_->tick(in, step_dt);
 
@@ -312,19 +390,28 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         }
     }
 
-    // ---- 进入 Emergency 时触发硬件急停 ----
+    // ---- 硬件急停：直到送达为止 ----
     // 只下发目标高度 0 是不够的：那是位置伺服指令，作动器按自身速度慢慢走回零位；
     // 硬件急停是毫秒级的切断使能/泄压，两者安全等级不同，不能互相替代。
-    // 只在跃迁进来的第一拍调用一次：200 Hz 下每拍重复调用既淹没总线，
-    // 也不符合硬件急停"一次触发即保持"的语义
-    if (sm.state == ControlState::kEmergency && state_changed) {
-        if (params_.enable_driver && driver_) {
-            if (driver_->emergency_stop()) {
-                ++status_.estop_commands_sent;
-            } else {
-                ++status_.driver_errors;
+    //
+    // 但"只在跃迁那一拍调用一次"是错的：串口写失败一次（丢帧、忙、线被拔）
+    // 就再也不会重试，系统会停在"以为已经急停"的状态里。现在的语义是：
+    // 成功后不再重复（符合"一次触发即保持"），失败则按 10 Hz 重试直到成功。
+    if (sm.state == ControlState::kEmergency) {
+        const bool retry_due = (now_sec - last_estop_attempt_sec_) >= 0.1;
+        if (!estop_sent_ok_ && params_.enable_driver && sink_) {
+            // 通道可能在上两次轮询之间已经送达，先同步一次状态
+            if (sink_->emergency_stop_delivered()) {
+                estop_sent_ok_ = true;
+            } else if (retry_due) {
+                last_estop_attempt_sec_ = now_sec;
+                sink_->request_emergency_stop();
             }
         }
+    } else {
+        // 离开急停后重新武装：下次进 Emergency 需要重新下发一次
+        estop_sent_ok_ = false;
+        last_estop_attempt_sec_ = -1.0e9;
     }
 
     // ---- 零位标定：只在 Calibrating 阶段、姿态可信时累计 ----
@@ -352,6 +439,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
                 static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
         }
         status_.output = held_out;
+        status_.controller_saturated = false;
+        status_.controller_rate_limited = false;
 
         // 控制器内部的速率限制基准仍停留在降级前的值，与实际下发值脱节。
         // 不同步的话，恢复闭环后的第一拍会从旧值起步，产生超过速率限制的跳变
@@ -367,6 +456,8 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     if (sm.output_zero) {
         ControlOutput zero;
         status_.output = zero;
+        status_.controller_saturated = false;
+        status_.controller_rate_limited = false;
         const std::array<double, kWheelCount> zeros{0.0, 0.0, 0.0, 0.0};
         // 有反馈时以实际位置为速率限制基准：回中指令发出后作动器还在往回走，
         // 基准应该是它此刻真正在的地方，而不是"已经到零位"这个假设
@@ -374,6 +465,25 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
         // 首次进入该状态时强制下发：last_command_ 初值就是全零，
         // 不强制的话回中/急停指令会被去重判为"没变化"而吞掉
         apply_command(zeros, state_changed);
+        return status_;
+    }
+
+    // 没有可信姿态时不重新计算：闭环的反馈项唯一来源是 IMU，缺了它只剩前馈，
+    // 等于开环"跟着路面走"，而反馈项的缺失还会让输出慢慢滑向零位。
+    // 这里保持上一拍下发值不动，等状态机在 degrade_after_unhealthy_s 后
+    // 把状态切到 Degraded（hold_output）再走既有的降级/急停路径。
+    if (!attitude_.valid) {
+        ControlOutput held_out;
+        std::array<double, kWheelCount> held{};
+        for (int i = 0; i < kWheelCount; ++i) {
+            const double v = static_cast<double>(last_command_[static_cast<std::size_t>(i)]);
+            held_out.height_mm[static_cast<std::size_t>(i)] = v;
+            held[static_cast<std::size_t>(i)] = v;
+        }
+        status_.output = held_out;
+        status_.controller_saturated = false;
+        status_.controller_rate_limited = false;
+        controller_->sync_reference(reference_for_sync(held));
         return status_;
     }
 
@@ -419,6 +529,10 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     }
 
     status_.output = controller_->compute(ci, step_dt);
+    // 限幅/速率限制是"输出已经不等于控制律算出来的值"的信号。
+    // 之前只在控制器内部置位、没有上报，联调时看不出作动器为什么跟不上
+    status_.controller_saturated = status_.output.saturated;
+    status_.controller_rate_limited = status_.output.rate_limited;
     // 取样位置由控制器算出（单一出处：与真正用来采样的公式同一个），
     // 这里只做搬运，避免"上报的值"和"实际用的值"漂移
     status_.sample_position_m = status_.output.sample_position_m;

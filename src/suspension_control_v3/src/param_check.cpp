@@ -1,5 +1,6 @@
 #include "suspension_control_v3/param_check.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -114,11 +115,54 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
                  "意外缩放。");
     }
 
+    // ---- 反馈增益 ----
+    // 符号写反不是"效果差一点"，而是正反馈：姿态越偏，修正越把车往偏的方向推。
+    // 之前只校验了行程/速率/前馈，反馈增益完全没管
+    positive(control.kp_roll, "kp_roll",
+             "横滚比例增益；为 0 等于放弃横滚闭环，为负会变成正反馈。", out);
+    non_negative(control.kd_roll, "kd_roll",
+                 "横滚微分增益；为负会让阻尼反向，越抖越修。", out);
+    positive(control.kp_pitch, "kp_pitch",
+             "俯仰比例增益；为 0 等于放弃俯仰闭环，为负会变成正反馈。", out);
+    non_negative(control.kd_pitch, "kd_pitch",
+                 "俯仰微分增益；为负会让阻尼反向，越抖越修。", out);
+    if (!std::isfinite(control.feedforward_gain)) {
+        push(out, "feedforward_gain", "当前不是有限值（NaN/inf），前馈会污染整条输出。");
+    }
+
+    // ---- 姿态滤波链 ----
+    // 三个系数都是 IIR/互补权重，落在 (0, 1] 之外会让滤波发散或永久冻结
+    positive_up_to(control.attitude_gyro_alpha, 1.0, "attitude_gyro_alpha",
+                   "陀螺角速度 IIR 系数，取值 (0, 1]；为 0 角速度永远保持初值。", out);
+    positive_up_to(control.attitude_accel_alpha, 1.0, "attitude_accel_alpha",
+                   "姿态观测 IIR 系数，兼作互补滤波校正权重，取值 (0, 1]。", out);
+    non_negative(control.attitude_deadzone_deg, "attitude_deadzone_deg",
+                 "软死区半宽；为负会让死区反向，等于放大抖动。", out);
+
     // 控制周期：FIR 权重是按它推导的，改错等于给整条权重改了时间标度
     positive(control.control_period_s, "control_period_s",
              "FIR 权重是时间域的，落地按 车速×周期 换算距离；周期错则提前量错。"
              "正常情况下它由 control_rate_hz 推出，不需要单独填。",
              out);
+    // 控制律的离散系数（积分项、微分项、FIR 权重、滤波链）都是按 200 Hz 整定的。
+    // 改频率等于同时改了这些系数的时间标度，必须重新标定，不能只是"改个数"
+    if (std::isfinite(control.control_period_s) && control.control_period_s > 0.0) {
+        if (control.control_period_s < 0.001 || control.control_period_s > 0.02) {
+            push(out, "control_rate_hz",
+                 "由 control_period_s = " + fmt(control.control_period_s) +
+                     " 推出的控制频率为 " +
+                     fmt(1.0 / control.control_period_s) +
+                     " Hz，超出允许范围 [50, 1000] Hz。控制环与安全判据都按拍计时，"
+                     "频率过低会让降级/超时判据的粒度粗到不可用。");
+        } else if (std::fabs(control.control_period_s - 0.005) > 1e-9) {
+            push(out, "control_rate_hz",
+                 "当前控制周期 " + fmt(control.control_period_s) +
+                     " s（" + fmt(1.0 / control.control_period_s) +
+                     " Hz），而控制律与滤波链是按 200 Hz（0.005 s）整定的。"
+                     "换频率必须重新整定全部离散系数，否则相当于悄悄改了时间标度。",
+                 /*fatal=*/false);
+        }
+    }
 
     // 控制律选择：int 直转枚举，越界值会被静默当成 LQI
     const int kind = static_cast<int>(control.controller_kind);
@@ -226,6 +270,17 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
         positive(validator.max_jump_m, "max_jump_m",
                  "开了帧间跳变检查却没给阈值；为 0 会把正常帧间变化也判成跳变。",
                  out);
+        // 跳变阈值必须小于"物理上可能的最大高程差"，否则这条检查永远不会触发。
+        // 剖面本身已经被 height_abs_limit_m 限制在 ±limit 内，同格最大跳变是 2*limit
+        if (std::isfinite(validator.max_jump_m) &&
+            std::isfinite(validator.height_abs_limit_m) &&
+            validator.max_jump_m >= 2.0 * validator.height_abs_limit_m) {
+            push(out, "max_jump_m",
+                 "当前 " + fmt(validator.max_jump_m) + "，而剖面物理量程是 ±" +
+                     fmt(validator.height_abs_limit_m) +
+                     " m（同格最大可能跳变 " + fmt(2.0 * validator.height_abs_limit_m) +
+                     " m）。阈值不小于量程，这条检查就永远不会触发，坏数据可以整帧偏置通过。");
+        }
     }
 
     // ---------------- 安全状态机 ----------------
@@ -238,6 +293,16 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
              "静止判定阈值；为 0 则车辆永远不满足\"静止\"。", out);
     positive(sm.leveling_duration_s, "leveling_duration_s",
              "回中找平的持续时间；为 0 会立刻跳过找平。", out);
+    positive_up_to(sm.leveling_max_tilt_rad, kHalfPi, "leveling_max_tilt_rad",
+                   "找平就绪的姿态误差阈值；为 0 会永远等不到就绪，"
+                   "过大则车身还歪着就进闭环。",
+                   out);
+    if (!(sm.leveling_max_wait_s > sm.leveling_duration_s)) {
+        push(out, "leveling_max_wait_s",
+             "当前 " + fmt(sm.leveling_max_wait_s) + "，必须大于 leveling_duration_s(" +
+                 fmt(sm.leveling_duration_s) +
+                 ")。否则还没到找平时长就已经超时转降级。");
+    }
     positive(sm.degrade_after_unhealthy_s, "degrade_after_unhealthy_s",
              "数据异常多久后降级；为 0 会让抖动也触发降级。", out);
     positive(sm.recover_duration_s, "recover_duration_s",
@@ -248,6 +313,23 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
                    "横滚安全阈值，超过就进急停。", out);
     positive_up_to(sm.max_abs_pitch_rad, kHalfPi, "max_abs_pitch_rad",
                    "俯仰安全阈值，超过就进急停。", out);
+
+    // 两个阈值分属不同层：
+    //   max_abs_roll/pitch_rad 是"安全阈值"，超了进急停；
+    //   max_abs_attitude_rad   是 validator 的"物理合理性上限"，超了整帧拒收。
+    // 后者必须严格更大，否则保护对姿态量不单调——越离谱的样本先被物理上限
+    // 丢掉，状态机根本看不到它，于是"20°急停、70°无保护"。
+    {
+        const double safety_threshold = std::max(sm.max_abs_roll_rad, sm.max_abs_pitch_rad);
+        if (std::isfinite(loop.max_abs_attitude_rad) &&
+            loop.max_abs_attitude_rad <= safety_threshold) {
+            push(out, "max_abs_attitude_rad",
+                 "当前 " + fmt(loop.max_abs_attitude_rad) +
+                     "，必须大于横滚/俯仰安全阈值 (" + fmt(safety_threshold) +
+                     ")。否则超出物理上限的姿态会被整帧拒收，状态机看不到它，"
+                     "表现为\"小角度急停、大角度反而无保护\"。");
+        }
+    }
     positive(sm.link_lost_timeout_s, "link_lost_timeout_s",
              "作动器链路中断多久后急停；为 0 会让偶发丢包也触发急停。", out);
     positive(sm.stall_degrade_after_s, "stall_degrade_after_s",

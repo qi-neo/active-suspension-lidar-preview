@@ -11,6 +11,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 
 #include <Eigen/Geometry>
@@ -21,9 +22,12 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "suspension_preview_v2/level_calibration.hpp"
+#include "suspension_preview_v2/param_check.hpp"
 #include "suspension_preview_v2/pipeline.hpp"
 #include "suspension_preview_v2/ros_topic_sink.hpp"
 #include "suspension_preview_v2/serial_profile_sink.hpp"
@@ -32,6 +36,8 @@
 using suspension_preview_v2::ExtractorParams;
 using suspension_preview_v2::GravityAccumulator;
 using suspension_preview_v2::LevelRotation;
+using suspension_preview_v2::ParamIssue;
+using suspension_preview_v2::PreviewNodeParams;
 using suspension_preview_v2::PreviewPipeline;
 using suspension_preview_v2::RosTopicSink;
 using suspension_preview_v2::SerialProfileSink;
@@ -40,6 +46,9 @@ class RoadPreviewNode : public rclcpp::Node {
 public:
     RoadPreviewNode() : rclcpp::Node("road_preview_node") {
         declare_parameters();
+        // 参数错了就别启动：v2 的参数大多是物理量/阈值，填错时节点"看着在跑、
+        // 其实全错"，日志还一切正常。校验器把每条错误的后果讲清楚后统一拒绝
+        validate_parameters_or_throw();
 
         const ExtractorParams ep = make_extractor_params();
         const std::size_t cells = static_cast<std::size_t>(
@@ -48,8 +57,10 @@ public:
         // 组装管线：解析器 + 输出（话题 / 串口）
         pipeline_ = std::make_unique<PreviewPipeline>(
             suspension_preview_v2::make_grid_extractor(ep));
-        pipeline_->add_sink(
-            std::make_shared<RosTopicSink>(*this, publish_topic_, publish_marker_));
+        // 输出坐标系显式传入 target_frame：v3 按 header.frame_id ==
+        // expected_frame 校验剖面，不能让 frame_id 由 pipeline 调用方随手传
+        pipeline_->add_sink(std::make_shared<RosTopicSink>(
+            *this, publish_topic_, target_frame_, publish_marker_));
 
         if (enable_serial_) {
             auto serial = std::make_shared<SerialProfileSink>(serial_port_, baud_rate_);
@@ -68,6 +79,14 @@ public:
 
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+        // 车体坐标系（base_link）是这个仓库自己定义的，仓库里没有任何包发布它。
+        // 少了这条 TF，cloud_callback 里每一次 lookupTransform 都失败、每一帧
+        // 都被丢弃，表现为"节点启动了但一个剖面都发不出来"。
+        // 这里按参数发一条静态变换；安装量（x/y/z/rpy）默认全 0，必须在实车上实测后填。
+        if (publish_static_tf_) {
+            publish_static_tf();
+        }
 
         // 点云用 SensorDataQoS，才与雷达的 BEST_EFFORT 发布方匹配
         sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -133,6 +152,17 @@ private:
         publish_topic_ = declare_parameter<std::string>("publish_topic",
                                                         "/suspension/road_profile");
 
+        // 静态 TF：仓库里没有任何包发布 base_link，缺了它预瞄会 100% 丢帧。
+        // 安装量默认全 0（单位变换），必须按实车实测后填；全 0 时日志会明确告警
+        publish_static_tf_ = declare_parameter<bool>("publish_static_tf", true);
+        lidar_frame_ = declare_parameter<std::string>("lidar_frame", "unilidar_lidar");
+        mount_x_ = declare_parameter<double>("mount_x", 0.0);
+        mount_y_ = declare_parameter<double>("mount_y", 0.0);
+        mount_z_ = declare_parameter<double>("mount_z", 0.0);
+        mount_roll_ = declare_parameter<double>("mount_roll", 0.0);
+        mount_pitch_ = declare_parameter<double>("mount_pitch", 0.0);
+        mount_yaw_ = declare_parameter<double>("mount_yaw", 0.0);
+
         enable_serial_ = declare_parameter<bool>("enable_serial", true);
         serial_port_ = declare_parameter<std::string>("serial_port", "/dev/ttyS0");
         baud_rate_ = declare_parameter<int>("baud_rate", 115200);
@@ -184,6 +214,54 @@ private:
         level_calib_max_std_ = declare_parameter<double>("level_calib_max_std", 0.05);
         level_calib_max_tilt_deg_ =
             declare_parameter<double>("level_calib_max_tilt_deg", 60.0);
+    }
+
+    // 节点层参数里参与校验的那部分。校验器不依赖 ROS，只吃这个纯结构体
+    PreviewNodeParams make_node_params() const {
+        PreviewNodeParams p;
+        p.cloud_topic = cloud_topic_;
+        p.target_frame = target_frame_;
+        p.publish_topic = publish_topic_;
+        p.enable_serial = enable_serial_;
+        p.serial_port = serial_port_;
+        p.baud_rate = baud_rate_;
+        p.tf_timeout_ms = tf_timeout_ms_;
+        p.publish_static_tf = publish_static_tf_;
+        p.lidar_frame = lidar_frame_;
+        p.publish_obstacles = publish_obstacles_;
+        p.obstacles_topic = obstacles_topic_;
+        p.level_calib_enable = level_calib_enable_;
+        p.imu_topic = imu_topic_;
+        p.level_calib_duration_s = level_calib_duration_s_;
+        p.level_calib_min_samples = level_calib_min_samples_;
+        p.level_calib_max_std = level_calib_max_std_;
+        p.level_calib_max_tilt_deg = level_calib_max_tilt_deg_;
+        p.diag_period_s = diag_period_s_;
+        return p;
+    }
+
+    // fatal 项 -> 逐条 FATAL 日志 + 抛异常拒绝启动（main 会捕获并返回 1，
+    // 让 launch/systemd 能看见"起不来"而不是"起来了但不工作"）；
+    // 可疑项只在启动日志里 WARN，不拦启动
+    void validate_parameters_or_throw() {
+        const std::vector<ParamIssue> issues =
+            suspension_preview_v2::validate_params(make_extractor_params(),
+                                                   make_node_params());
+        bool has_fatal = false;
+        for (const ParamIssue& issue : issues) {
+            if (issue.fatal) {
+                has_fatal = true;
+                RCLCPP_FATAL(get_logger(), "[参数错误] %s：%s",
+                             issue.key.c_str(), issue.message.c_str());
+            } else {
+                RCLCPP_WARN(get_logger(), "[参数可疑] %s：%s",
+                            issue.key.c_str(), issue.message.c_str());
+            }
+        }
+        if (has_fatal) {
+            throw std::runtime_error(
+                "参数校验未通过，拒绝启动（逐条原因见上方 FATAL 日志）");
+        }
     }
 
     ExtractorParams make_extractor_params() const {
@@ -350,6 +428,56 @@ private:
                     level_.tilt_deg, level_.gravity_mps2, accel_.count());
     }
 
+    // 发布 base_link -> 雷达的静态变换。
+    // 方向与 cloud_callback 里的 lookupTransform(target_frame_, msg->header.frame_id)
+    // 一致：父坐标系是 target_frame_（车体），子坐标系是雷达。
+    void publish_static_tf() {
+        if (lidar_frame_ == target_frame_) {
+            RCLCPP_WARN(get_logger(),
+                        "lidar_frame 与 target_frame 同为 %s，跳过静态 TF 发布"
+                        "（否则 tf2 会判成自变换）",
+                        lidar_frame_.c_str());
+            return;
+        }
+        static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
+
+        geometry_msgs::msg::TransformStamped tf;
+        tf.header.stamp = now();
+        tf.header.frame_id = target_frame_;
+        tf.child_frame_id = lidar_frame_;
+        tf.transform.translation.x = mount_x_;
+        tf.transform.translation.y = mount_y_;
+        tf.transform.translation.z = mount_z_;
+
+        const Eigen::Quaterniond q =
+            (Eigen::AngleAxisd(mount_yaw_, Eigen::Vector3d::UnitZ()) *
+             Eigen::AngleAxisd(mount_pitch_, Eigen::Vector3d::UnitY()) *
+             Eigen::AngleAxisd(mount_roll_, Eigen::Vector3d::UnitX()));
+        tf.transform.rotation.x = q.x();
+        tf.transform.rotation.y = q.y();
+        tf.transform.rotation.z = q.z();
+        tf.transform.rotation.w = q.w();
+        static_tf_broadcaster_->sendTransform(tf);
+
+        constexpr double kRadToDeg = 180.0 / 3.14159265358979323846;
+        const bool identity = mount_x_ == 0.0 && mount_y_ == 0.0 && mount_z_ == 0.0 &&
+                              mount_roll_ == 0.0 && mount_pitch_ == 0.0 && mount_yaw_ == 0.0;
+        if (identity) {
+            RCLCPP_WARN(get_logger(),
+                        "已发布静态 TF %s -> %s，但安装量全为 0（单位变换）。"
+                        "这是占位值：实测雷达相对车体原点的 x/y/z 与 roll/pitch/yaw "
+                        "后填进 mount_* 参数，否则点云坐标是错的",
+                        target_frame_.c_str(), lidar_frame_.c_str());
+        } else {
+            RCLCPP_INFO(get_logger(),
+                        "已发布静态 TF %s -> %s | xyz=(%.3f, %.3f, %.3f) m "
+                        "rpy=(%.2f, %.2f, %.2f) deg",
+                        target_frame_.c_str(), lidar_frame_.c_str(), mount_x_, mount_y_,
+                        mount_z_, mount_roll_ * kRadToDeg,
+                        mount_pitch_ * kRadToDeg, mount_yaw_ * kRadToDeg);
+        }
+    }
+
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         frames_++;
         auto cloud = transform_to_target(msg);
@@ -362,6 +490,8 @@ private:
         }
         const double stamp_sec = static_cast<double>(msg->header.stamp.sec) +
                                  static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+        // 点云已在 target_frame_ 下：剖面/障碍物统一用它作 header.frame_id，
+        // v3 的剖面校验按 expected_frame 拒收，坐标系必须与 target_frame 一致
         pipeline_->process(cloud, stamp_sec, target_frame_);
 
         // 语义预瞄：把高出路面的障碍物单独发布（高度剖面不含它们）
@@ -428,6 +558,15 @@ private:
     int obstacle_min_points_{4};
     int tf_timeout_ms_{30};
     bool publish_marker_{true};
+    // 自动发布的静态 TF（base_link -> 雷达）
+    bool publish_static_tf_{true};
+    std::string lidar_frame_{"unilidar_lidar"};
+    double mount_x_{0.0};
+    double mount_y_{0.0};
+    double mount_z_{0.0};
+    double mount_roll_{0.0};
+    double mount_pitch_{0.0};
+    double mount_yaw_{0.0};
     double diag_period_s_{5.0};
 
     // 虚拟水平面标定
@@ -447,6 +586,7 @@ private:
     std::shared_ptr<SerialProfileSink> serial_sink_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Publisher<suspension_preview_v2::msg::RoadObstacles>::SharedPtr obstacles_pub_;
@@ -459,7 +599,16 @@ private:
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<RoadPreviewNode>());
+    try {
+        rclcpp::spin(std::make_shared<RoadPreviewNode>());
+    } catch (const std::exception& ex) {
+        // 参数校验失败等启动期异常的退出码必须是非零：launch/systemd 靠它
+        // 判断"节点没起来"，否则会把"进程活着但什么都不干"当成正常
+        RCLCPP_FATAL(rclcpp::get_logger("road_preview_node"),
+                     "节点启动失败: %s", ex.what());
+        rclcpp::shutdown();
+        return 1;
+    }
     rclcpp::shutdown();
     return 0;
 }

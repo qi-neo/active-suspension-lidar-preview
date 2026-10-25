@@ -20,19 +20,42 @@ builtin_interfaces::msg::Time to_ros_time(double stamp_sec) {
 }  // namespace
 
 RosTopicSink::RosTopicSink(rclcpp::Node& node, const std::string& topic,
-                           bool publish_marker)
-    : publish_marker_(publish_marker) {
+                           const std::string& frame_id, bool publish_marker)
+    : publish_marker_(publish_marker),
+      frame_id_(frame_id),
+      logger_(node.get_logger()) {
     pub_ = node.create_publisher<suspension_preview_v2::msg::RoadProfile>(topic, 10);
     if (publish_marker_) {
         marker_pub_ = node.create_publisher<visualization_msgs::msg::Marker>(
             topic + "_marker", 10);
     }
+    if (frame_id_.empty()) {
+        RCLCPP_WARN(logger_,
+                    "输出剖面的 frame_id 为空：消息/ Marker 会缺失坐标系，"
+                    "rviz 与下游 v3 都无法使用。请检查 target_frame 参数");
+    }
 }
 
 void RosTopicSink::send(const RoadProfileFrame& frame) {
+    // 坐标系一律用构造时传入的 target_frame。pipeline 的 frame_id 参数只是
+    // 转发，不能让它决定输出坐标系：点云已经变换到 target_frame，输出若标成
+    // 别的系，下游（v3 的 expected_frame 校验、rviz）会拿到自相矛盾的数据。
+    // 真的不一致说明调用方传错了，明确告警一次，不静默
+    if (!frame.frame_id.empty() && !frame_id_.empty() &&
+        frame.frame_id != frame_id_ && !warned_frame_mismatch_) {
+        RCLCPP_WARN(logger_,
+                    "剖面 frame_id=\"%s\" 与 target_frame=\"%s\" 不一致："
+                    "已按 target_frame 发布（点云就在这个坐标系下）。"
+                    "请检查 pipeline 调用方是否传错了坐标系",
+                    frame.frame_id.c_str(), frame_id_.c_str());
+        warned_frame_mismatch_ = true;
+    }
+    const std::string out_frame_id =
+        frame_id_.empty() ? frame.frame_id : frame_id_;
+
     suspension_preview_v2::msg::RoadProfile msg;
     msg.header.stamp = to_ros_time(frame.stamp_sec);
-    msg.header.frame_id = frame.frame_id;
+    msg.header.frame_id = out_frame_id;
     msg.spacing = frame.spacing;
     msg.wheel_dist = frame.wheel_dist;
     msg.preview_dist = frame.preview_dist;
@@ -56,7 +79,7 @@ void RosTopicSink::publish_one_marker(const RoadProfileFrame& frame,
                                       int id, const char* ns) {
     visualization_msgs::msg::Marker marker;
     marker.header.stamp = to_ros_time(frame.stamp_sec);
-    marker.header.frame_id = frame.frame_id;
+    marker.header.frame_id = frame_id_.empty() ? frame.frame_id : frame_id_;
     marker.ns = ns;
     marker.id = id;
     marker.type = visualization_msgs::msg::Marker::LINE_STRIP;

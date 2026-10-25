@@ -64,9 +64,11 @@ void SafetyStateMachine::enter(ControlState next) {
     output_.state = next;
     time_in_state_ = 0.0;
     // 离开异常状态时清掉对应的过程量
-    if (next != ControlState::kDegraded) {
-        healthy_elapsed_ = 0.0;
-    }
+    // healthy_elapsed_ 是"降级后持续健康了多久"，必须从进入降级那一刻重新计。
+    // 原先只在离开降级时清零，进入前累积的健康时长会直接满足 recover_duration_s，
+    // 于是降级下一拍就弹回 Leveling，恢复去抖形同虚设（在 Leveling 超时场景
+    // 会来回横跳）。这里无条件清零：其余状态不用这个量
+    healthy_elapsed_ = 0.0;
     if (next != ControlState::kCalibrating) {
         calibrate_count_ = 0;
     }
@@ -133,6 +135,13 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
             out.faults |= kFaultAttitudeExceeded;
         }
     }
+    // 姿态超出 validator 的物理上限（被控制回路拒帧）同样按姿态故障处理。
+    // 少了这一支，保护就对"姿态量"不单调：20° 会急停，70° 反而因为被当成
+    // "坏数据"丢掉而绕过安全判定
+    if (in.attitude_implausible) {
+        attitude_latched_ = true;
+        out.faults |= kFaultAttitudeExceeded;
+    }
     if (estop_latched_ || attitude_latched_) {
         out.state = ControlState::kEmergency;
         apply_contract(out);
@@ -154,12 +163,16 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     }
 
     // ---- 输入健康度统计 ----
-    // 判据只用"现有帧是否还在有效期 + 质量是否达标"：
+    // 判据是"手上这帧剖面还在有效期 + 质量达标 + 姿态可信"：
     // 剖面 10~20 Hz、控制环 200 Hz，同一帧本来就会被多个周期复用，
     // "本周期没有新帧"是正常现象，不能据此降级。单帧被拒也不降级，
     // 因为手上仍有一帧有效数据；只有它过期了才会触发。
+    //
+    // 姿态必须一起算进健康度：IMU 断流时剖面可能还在正常更新，但控制器
+    // 已经拿不到姿态反馈了。原先只看剖面，等于"眼睛瞎了但路还在更新"
+    // 也判定为健康，闭环会一直开环跑下去。
     const bool quality_ok = in.profile_quality >= in.min_quality;
-    const bool input_healthy = in.profile_fresh && quality_ok;
+    const bool input_healthy = in.profile_fresh && quality_ok && in.attitude_valid;
     if (input_healthy) {
         healthy_elapsed_ += dt;
         unhealthy_elapsed_ = 0.0;
@@ -169,6 +182,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     }
 
     if (!in.profile_fresh) out.faults |= kFaultStaleInput;
+    if (!in.attitude_valid) out.faults |= kFaultStaleInput;
     if (!quality_ok) out.faults |= kFaultLowQuality;
     if (in.profile_rejected) out.faults |= kFaultInvalidInput;
 
@@ -206,13 +220,24 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
             break;
         }
 
-        case ControlState::kLeveling:
+        case ControlState::kLeveling: {
+            // 就绪 = 输入健康 + 姿态已回到零位基准附近。
+            // 只看时间会在作动器还没走完时就进闭环：闭环第一拍会把"还没到位"
+            // 当成姿态误差去修，等于自己跟自己打架
+            const bool leveled =
+                std::fabs(in.roll_err_rad) <= params_.leveling_max_tilt_rad &&
+                std::fabs(in.pitch_err_rad) <= params_.leveling_max_tilt_rad;
             if (degrade_triggered || stall_degrade) {
                 out.state = ControlState::kDegraded;
-            } else if (input_healthy && time_in_state_ >= params_.leveling_duration_s) {
+            } else if (input_healthy && leveled &&
+                       time_in_state_ >= params_.leveling_duration_s) {
                 out.state = ControlState::kBalancing;
+            } else if (time_in_state_ >= params_.leveling_max_wait_s) {
+                // 迟迟回不了中：可能是作动器卡住/机型不对，转降级让上层处理
+                out.state = ControlState::kDegraded;
             }
             break;
+        }
 
         case ControlState::kBalancing:
             if (degrade_triggered || stall_degrade) out.state = ControlState::kDegraded;

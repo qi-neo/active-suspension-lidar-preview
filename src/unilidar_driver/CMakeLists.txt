@@ -21,6 +21,8 @@ add_library(unilidar_driver_core STATIC
   src/packet_parser.cpp
   src/frame_decoder.cpp
   src/udp_receiver.cpp
+  src/serial_receiver.cpp
+  src/driver_loop.cpp
 )
 set_target_properties(unilidar_driver_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(unilidar_driver_core PUBLIC
@@ -36,6 +38,20 @@ target_link_libraries(decoder_selftest unilidar_driver_core)
 add_executable(udp_probe examples/udp_probe.cpp)
 target_link_libraries(udp_probe unilidar_driver_core)
 
+# 串口接收自检：PTY 主从对模拟虚拟串口，不需要真雷达也不需要真串口
+add_executable(serial_receiver_selftest examples/serial_receiver_selftest.cpp)
+target_link_libraries(serial_receiver_selftest unilidar_driver_core)
+
+# 串口压力自检：PTY 主端按 2 Mbps 灌入合成报文，掺垃圾与伪帧头、
+# 周期性读暂停，核验零丢失/零误判/缓冲有界。参数 --seconds 控制时长
+add_executable(serial_stress_selftest examples/serial_stress_selftest.cpp)
+target_link_libraries(serial_stress_selftest unilidar_driver_core)
+
+# 节点主循环自检：与 ROS 节点跑同一份 DriverLoop，测吞吐、单轮耗时分布、
+# 定界缓冲深度与超载丢弃/恢复。参数 --seconds 控制时长
+add_executable(node_loop_selftest examples/node_loop_selftest.cpp)
+target_link_libraries(node_loop_selftest unilidar_driver_core)
+
 # ROS 节点：只做参数、收包与发布的接线
 add_executable(unilidar_driver_node src/unilidar_driver_node.cpp)
 target_link_libraries(unilidar_driver_node unilidar_driver_core)
@@ -47,6 +63,9 @@ install(TARGETS
   unilidar_driver_node
   decoder_selftest
   udp_probe
+  serial_receiver_selftest
+  serial_stress_selftest
+  node_loop_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config

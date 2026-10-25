@@ -12,11 +12,19 @@ PacketParser::PacketParser(std::size_t max_packet, std::size_t max_buffered)
 
 void PacketParser::reset() {
   buf_.clear();
+  seq_state_.clear();
   stats_ = ParseStats{};
 }
 
 void PacketParser::append(const std::uint8_t* data, std::size_t len) {
   if (data == nullptr || len == 0) return;
+  // 单批数据本身就超过上限时，clear() 之后再 insert 仍然超限，上限形同虚设。
+  // 这种只能整批丢弃——保留任何一部分都无法凑出完整帧。
+  if (len > max_buffered_) {
+    stats_.buffer_overflow++;
+    buf_.clear();
+    return;
+  }
   if (buf_.size() + len > max_buffered_) {
     // 长时间没有解出合法帧（例如波特率不对或对面根本不是雷达），
     // 缓冲会一直涨。宁可丢掉这批数据重来，也不要把内存吃光。
@@ -36,9 +44,13 @@ bool PacketParser::seek_header(std::size_t& pos) {
 }
 
 PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out_type) {
-  std::size_t pos = 0;
-
   for (;;) {
+    // 每轮从 0 开始扫。erase(pos + 1) 之后缓冲内容整体前移，上一轮的
+    // pos 在新缓冲里已不指向原字节——若沿用旧值会跳过真正的帧头。
+    // （duplicate 分支曾单独重置过一次，其余三个 continue 分支漏了；
+    //  压力自检用「16 B 垃圾 + 伪帧头 + 好帧」抓到过丢整帧，见
+    //  serial_stress_selftest 的对应断言。）
+    std::size_t pos = 0;
     if (!seek_header(pos)) {
       // 帧头没出现。保留最后 3 字节，它们可能是下一个帧头的前缀。
       const std::size_t keep = std::min<std::size_t>(buf_.size(), 3);
@@ -93,10 +105,16 @@ PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out
     if (!ok) {
       stats_.bad_tail++;
     } else {
-      const uint32_t got = crc32(frame, frame_len - sizeof(FrameTail));
-      if (got != tail.crc32) {
-        stats_.bad_crc++;
-        ok = false;
+      // CRC 只覆盖数据段：[kCrcOffset, frame_len - kTailSize)。
+      // 官方实现的 CRC 起点是 frame+12、终点是 frame+packet_size-12（见 protocol.hpp）。
+      // 数据段长度为 0 的包（packet_size == 24）官方不校验，这里保持一致。
+      const std::size_t data_len = frame_len - kCrcOffset - kTailSize;
+      if (data_len > 0) {
+        const uint32_t got = crc32(frame + kCrcOffset, data_len);
+        if (got != tail.crc32) {
+          stats_.bad_crc++;
+          ok = false;
+        }
       }
     }
 
@@ -110,21 +128,50 @@ PullStatus PacketParser::pull(std::vector<std::uint8_t>& out, std::uint32_t& out
 
     // 序号连续性：只在同一种报文类型之间比较才有意义，
     // 点云与 IMU 各自有一套递增序号，混在一起比会一直误报。
-    DataInfo info;
-    std::memcpy(&info, frame + kHeaderSize, sizeof(DataInfo));
-    if (stats_.have_last_seq && head.packet_type == stats_.last_type) {
-      const std::uint32_t expected = stats_.last_seq + 1;
-      if (info.seq != expected) {
-        if (info.seq > expected) {
+    //
+    // 三类异常分开统计，含义不重叠：
+    //   seq == last          -> 重复包（重传/回环），整包丢弃，不交给解码层；
+    //   seq  > last + 1      -> 序号缺口，中间可能丢了包（seq_gaps 语义保持不变）；
+    //   seq  < last          -> 乱序，包仍然交付，但顺序不可信（out_of_order）。
+    //
+    // 读 seq 之前必须先确认数据段里真的有完整的 DataInfo。packet_size 的合法
+    // 下界是 kHeaderSize + kTailSize = 24，此时数据段长度为 0；而 DataInfo 有
+    // 16 字节。若不加这个判断，24..39 字节的包会让下面的 memcpy 越过缓冲末尾
+    // 读 4..16 个字节（堆越界读，ASan 报 container-overflow）。这类短包是协议
+    // 允许的（官方对数据段长度为 0 的包连 CRC 都不校验），不能靠 bad_size 拒掉，
+    // 只能在这里跳过序号跟踪：没有 seq 就不判断连续性，但帧本身照常交付。
+    const std::size_t data_bytes = frame_len - kHeaderSize - kTailSize;
+    bool duplicate = false;
+    if (data_bytes >= sizeof(DataInfo)) {
+      DataInfo info;
+      std::memcpy(&info, frame + kHeaderSize, sizeof(DataInfo));
+      SeqState& seq_state = seq_state_[head.packet_type];
+      if (seq_state.have_last) {
+        // 用无符号回绕差值判断前后，避免 seq 从 0xFFFFFFFF 回到 0 时误报。
+        // delta < 2^31 视为「向前」（含正常 +1）；否则视为「倒退」。
+        const std::uint32_t delta = info.seq - seq_state.last;
+        if (delta == 0) {
+          duplicate = true;
+          stats_.duplicates++;
+        } else if (delta < 0x80000000u && delta > 1) {
           stats_.seq_gaps++;
-        } else {
-          stats_.seq_discontinuity++;
+        } else if (delta >= 0x80000000u) {
+          stats_.out_of_order++;
         }
+        // delta == 1 是正常递增，无需计数
       }
+      // 重复包也更新 last：值相同，无副作用；后续包仍以它作为比较基准。
+      seq_state.have_last = true;
+      seq_state.last = info.seq;
     }
-    stats_.last_seq = info.seq;
-    stats_.last_type = head.packet_type;
-    stats_.have_last_seq = true;
+
+    if (duplicate) {
+      // CRC 与帧尾都已校验通过，边界可信，可以直接跳过这一整包。
+      // 重复包不增加 frames_ok，也不能混进点云（否则同一扫描线被计两次）。
+      stats_.resync_bytes += pos;  // 帧头之前若还有垃圾字节，仍按重同步计
+      buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(pos + frame_len));
+      continue;
+    }
 
     // 帧头之前的字节都是被丢掉的垃圾，成功路径也要计进去，否则统计会漏
     stats_.resync_bytes += pos;

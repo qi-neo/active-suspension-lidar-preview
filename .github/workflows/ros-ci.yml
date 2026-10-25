@@ -7,6 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 容器 job 的默认 shell 是 sh（dash），不支持 `set -o pipefail`。
+# 本工作流的步骤里用了 pipefail（配合 tee 保留失败码），必须显式用 bash。
+defaults:
+  run:
+    shell: bash
+
+# 失败时要把日志贴回 PR，需要写 issue comment 权限
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
 # 同一分支上新的推送取消正在跑的旧任务，省额度
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,18 +52,20 @@ jobs:
       # 比等 colcon 报错早得多，也不额外花时间。
       - name: CMakeLists 与 package.xml 对齐
         working-directory: src/active-suspension-lidar-preview
-        run: python3 tools/check_deps.py
+        run: python3 tools/check_deps.py 2>&1 | tee /tmp/check_deps.log
 
       # ROS2 里 YAML 键名是纯字符串匹配：键写错、或改了参数名没同步 YAML，
       # 结果都是参数被静默忽略——节点照常启动、跑起来却用着默认值。
       # 这个检查零耗时，放在构建之前，漂移在 5 分钟的编译前就暴露
       - name: 参数声明与 YAML 键一一对应
         working-directory: src/active-suspension-lidar-preview
-        run: python3 src/suspension_control_v3/tools/check_ros_params.py
+        run: python3 src/suspension_control_v3/tools/check_ros_params.py 2>&1 | tee /tmp/check_params.log
 
       - name: 安装构建与依赖工具
         run: |
-          set -e
+          set -eo pipefail
+          {
+          echo "== apt-get update =="
           apt-get update
           apt-get install -y --no-install-recommends \
             python3-colcon-common-extensions \
@@ -59,50 +73,95 @@ jobs:
             python3-pip
           rosdep init || true
           rosdep update
+          } 2>&1 | tee /tmp/apt.log
 
       - name: rosdep 安装依赖
         run: |
-          set -e
+          set -eo pipefail
+          {
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           rosdep install --from-paths src --ignore-src -r -y --skip-keys libpcl-all-dev
           # libpcl-all-dev 在部分平台没有对应 rosdep 条目，单独装
           apt-get install -y --no-install-recommends libpcl-dev || true
+          } 2>&1 | tee /tmp/rosdep.log
 
       - name: colcon build
         run: |
-          set -e
+          set -eo pipefail
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          # tee 到文件：失败时由下面的步骤把日志贴回 PR（本机没有 ROS/容器时，
+          # Actions 日志需要认证才能看，这是唯一不依赖本地环境的定位手段）
           colcon build \
             --packages-select suspension_preview suspension_preview_v2 \
                              suspension_control_v3 unilidar_driver car_balancer \
             --cmake-args -Wall -Wextra -Wpedantic \
-            --event-handlers console_cohesion+
-          colcon test-result --verbose || true
+            --event-handlers console_cohesion+ 2>&1 | tee /tmp/colcon.log
+          # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
+          # test-result 只是把"没有测试结果"打印出来而已。现在 v3 与 v2 都注册了
+          # CTest，这里真的跑一遍并且不容忍失败
+          colcon test --packages-select suspension_control_v3 suspension_preview_v2 \
+            --event-handlers console_direct+ \
+            --return-code-on-test-failure 2>&1 | tee /tmp/test.log
+          colcon test-result --verbose | tee -a /tmp/test.log
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（395 项）
+      - name: v3 控制与安全逻辑自检（443 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run suspension_control_v3 control_selftest
 
-      - name: 驱动报文解析自检（63 项）
+      - name: 驱动报文解析自检（151 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run unilidar_driver decoder_selftest
 
-      # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
-      # install(TARGETS) 里装了可执行，却没有任何步骤调用它
-      - name: v2 纯函数自检（69 项）
+      # 串口接收：PTY 主从对造虚拟串口，不依赖真雷达也不依赖真串口。
+      # 容器里同样能跑——Linux PTY 从端输入队列约 4 KB，一帧整包 1044 B
+      # 放得下（macOS 队列只有约 512 B，主端写在从端读之前会阻塞，那是
+      # 本机自检才需要 pushAndPump 边写边读的原因）。这一步在独立仓库
+      # unilidar-driver 的 core job 里也跑（双编译器 × ASan），两边都门住。
+      - name: 驱动串口接收自检（64 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
-          for t in trend_selftest obstacle_selftest protocol_selftest; do
+          ros2 run unilidar_driver serial_receiver_selftest
+
+      # 压力灌入：PTY 主端按 2 Mbps 灌 3 秒合成报文，同时掺垃圾与伪帧头、
+      # 每 2 秒一次 100 ms 读暂停，核验零丢失/零误判/缓冲有界。这一步把
+      # 「CH340 需实测」缩小到只剩物理层误码率；packet_parser 坏帧恢复路径
+      # 的 pos 重置 bug（每次注入丢一整帧）正是它最先发现的，与接收自检
+      # 互为攻防。独立仓库 core job 里同样跑（双编译器 × ASan）。
+      - name: 驱动串口压力自检（14 项，2 Mbps 灌入 3 s）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run unilidar_driver serial_stress_selftest --seconds 3 --quiet
+
+      # 节点主循环（收包→定界→解码→拼帧）已抽成不依赖 ROS 的 DriverLoop，
+      # 节点把发布当回调塞进去，所以这段能离线实测：吞吐、单轮耗时分布、
+      # 定界缓冲深度、超载整批丢弃与恢复。跑的是真机上跑的同一份代码。
+      - name: 驱动节点主循环自检（28 项，2 Mbps 灌入 2 s）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run unilidar_driver node_loop_selftest --seconds 2 --quiet
+
+      # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
+      # install(TARGETS) 里装了可执行，却没有任何步骤调用它
+      - name: v2 纯函数自检（196 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          for t in trend_selftest obstacle_selftest protocol_selftest param_selftest; do
             echo "--- $t ---"
             ros2 run suspension_preview_v2 "$t"
           done
@@ -126,71 +185,47 @@ jobs:
           . install/setup.sh
           ros2 run suspension_preview_v2 offline_demo
 
-  # 内存与未定义行为检查。与 build 分开而不是加一个 step：插桩要改编译 flag，
-  # 与上面的常规构建产物混在一起会互相污染。
-  #
-  # 只编"不依赖 ROS 与 PCL"的四个离线自检，直接用 g++ 而不走 colcon：
-  #   - 这些自检才是真正跑控制逻辑与解析逻辑的地方，bug 只可能在这里
-  #   - 不拉 PCL，整个 job 十几秒就跑完，不占额度
-  # 已经抓到过东西：用 999 当"无凸起"哨兵去索引 100 格数组，堆溢出，
-  # 而当时 234 项断言是全过的——断言验的是"值对不对"，验不出"写没写错地方"
-  sanitize:
-    name: ASan + UBSan（离线自检）
+      # 构建/测试失败时，把日志作为 PR 评论回传。
+      # 动机：开发机没有 ROS/Docker，Actions 日志要认证才能看——这是唯一
+      # 不依赖本地环境的失败定位手段（以后任何 CI 回归都能自查）。
+  # 失败后回传日志：必须是独立 job（needs build）。在 build 自己的步骤里回传时
+  # 它还没结束，拿不到完整日志；这里 job 已结束，可以下载到全部输出。
+  # 动机：开发机没有 ROS/Docker，Actions 网页日志要认证，跑挂了只能看"红"。
+  report-failure:
+    name: 回传失败日志
+    needs: [build]
+    if: failure() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    container:
-      # 直接写死而不是用 ${{ matrix.* }}：本 job 没有 strategy.matrix，
-      # 引用它会展开成 ros:-ros-base 这种空镜像名，整个 job 起不来
-      image: ros:humble-ros-base
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          path: src/active-suspension-lidar-preview
-
-      - name: 安装编译器
+      - name: 下载 build 日志并评论到 PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          set -e
-          apt-get update
-          apt-get install -y --no-install-recommends g++
-
-      - name: v3 控制与安全逻辑（ASan + UBSan）
-        run: |
-          set -e
-          cd src/active-suspension-lidar-preview
-          g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
-            -fno-omit-frame-pointer \
-            -I src/suspension_control_v3/include -I src/suspension_preview_v2/include \
-            src/suspension_control_v3/examples/control_selftest.cpp \
-            src/suspension_control_v3/src/input_validator.cpp \
-            src/suspension_control_v3/src/controller.cpp \
-            src/suspension_control_v3/src/attitude_filter.cpp \
-            src/suspension_control_v3/src/safety_state_machine.cpp \
-            src/suspension_control_v3/src/control_loop.cpp \
-            src/suspension_control_v3/src/temporal_fuser.cpp \
-            src/suspension_control_v3/src/param_check.cpp \
-            -o /tmp/asan_control
-          /tmp/asan_control
-
-      # v2 四个纯函数自检同样过一遍。它们与 PCL 无关，只需 v2 的 include 目录
-      - name: v2 纯函数自检（ASan + UBSan）
-        run: |
-          set -e
-          cd src/active-suspension-lidar-preview
-          for pair in \
-            "trend_selftest:road_trend.cpp" \
-            "obstacle_selftest:obstacle_detect.cpp" \
-            "protocol_selftest:protocol.cpp" \
-            "level_selftest:level_calibration.cpp"; do
-            name="${pair%%:*}"
-            src="${pair##*:}"
-            echo "--- $name ---"
-            g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
-              -fno-omit-frame-pointer -I src/suspension_preview_v2/include \
-              "src/suspension_preview_v2/examples/${name}.cpp" \
-              "src/suspension_preview_v2/src/${src}" \
-              -o "/tmp/asan_${name}"
-            "/tmp/asan_${name}"
-          done
+          set -uo pipefail
+          API="https://api.github.com"
+          JOBS=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+            "$API/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")
+          JOB_ID=$(echo "$JOBS" | jq -r '.jobs[] | select(.name | contains("colcon build")) | .id' | head -1)
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "找不到 build job"; exit 0
+          fi
+          echo "job id = $JOB_ID"
+          # 先取 302 的 Location，再匿名下载（避免把 token 带给存储域名）
+          LOC=$(curl -sS -o /dev/null -w '%{redirect_url}' \
+            -H "Authorization: Bearer $GH_TOKEN" "$API/repos/$REPO/actions/jobs/$JOB_ID/logs")
+          if [ -z "$LOC" ]; then echo "拿不到日志地址"; exit 0; fi
+          curl -sSL "$LOC" -o /tmp/joblog.txt
+          echo "log bytes: $(wc -c < /tmp/joblog.txt)"
+          tail -300 /tmp/joblog.txt > /tmp/tail.txt
+          jq -Rs '{body: ("## CI 失败日志（自动回传）\n\n完整日志尾部 300 行：\n```\n" + . + "\n```")}' \
+            /tmp/tail.txt > /tmp/body.json
+          curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+            "$API/repos/$REPO/issues/$PR/comments" -d @/tmp/body.json
+          echo "comment posted"
 
   # 覆盖率。单独 job：插桩要改编译 flag，且 -O0 + --coverage 与 sanitizer 不共存。
   #
@@ -239,6 +274,7 @@ jobs:
             src/suspension_control_v3/src/control_loop.cpp \
             src/suspension_control_v3/src/temporal_fuser.cpp \
             src/suspension_control_v3/src/param_check.cpp \
+            src/suspension_control_v3/src/command_sink.cpp \
             -o build-cov/control_selftest
           ./build-cov/control_selftest > /dev/null
           # v2：四个纯函数自检，与 PCL 无关
@@ -254,6 +290,19 @@ jobs:
               "src/suspension_preview_v2/src/${src}" -o "build-cov/${name}"
             "./build-cov/${name}" > /dev/null
           done
+          # 参数校验器也要跑，否则它在预览包的分母里贡献 0 覆盖。
+          # 但 serial_port.cpp 是纯 termios I/O：离线自检只能覆盖到
+          # is_baud_supported，实测 7% 行 / 3.5% 分支，插桩进来会把分支门禁
+          # 直接拖穿（本地复算：其余文件全在 94~100%）。所以它**不插桩**，
+          # 只作为链接依赖参与，不进分母。
+          g++ -std=c++17 -O0 -I src/suspension_preview_v2/include \
+            -c src/suspension_preview_v2/src/serial_port.cpp \
+            -o build-cov/serial_port_noinstr.o
+          g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
+            src/suspension_preview_v2/examples/param_selftest.cpp \
+            src/suspension_preview_v2/src/param_check.cpp \
+            build-cov/serial_port_noinstr.o -o build-cov/param_selftest
+          ./build-cov/param_selftest > /dev/null
 
       - name: 汇总覆盖率
         run: |
