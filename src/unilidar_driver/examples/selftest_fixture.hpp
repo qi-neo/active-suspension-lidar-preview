@@ -1,5 +1,6 @@
-// 串口相关离线自检的公共夹具。被 serial_receiver_selftest（功能场景）与
-// serial_stress_selftest（速率压力）共用：
+// 串口相关离线自检的公共夹具。被 serial_receiver_selftest（功能场景）、
+// serial_stress_selftest（速率压力）、node_loop_selftest（主循环）与
+// udp_receiver_selftest（UDP 回环，只用 SelftestLog）共用：
 //   - SelftestLog：断言计数与汇总（替代原来的自由函数 check）；
 //   - seal / makeCloudFrame / makeImuFrame / frameSeq：测试帧构造，与
 //     decoder_selftest 同一套规则（CRC 只覆盖数据段）；
