@@ -248,7 +248,7 @@ L1 (TTL UART) ──CH340 转接模块──> USB ──> /dev/ttyUSB0 @ 2,000,0
 （返回 -1、err 点名设备）——不需要真雷达，也不需要真串口。
 
 UDP 接收另有 38 项离线自检（`udp_receiver_selftest`）：回环 socket 自发自收，
-覆盖打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP 与端口重复 bind 的失败
+覆盖打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP 与 bind 非本机地址的失败
 路径、未打开即收、超时返回 0 且不污染 err、close 幂等；与 `tests/udp_loopback_test.sh`
 的真实回环 happy path 互补（脚本走收发主路径，本自检覆盖每条分支含失败路径）。
 
@@ -289,7 +289,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
 | 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 202 项断言全过 |
 | `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，81 项断言全过（Linux；macOS 本机 80 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、空设备名/EACCES 提示 dialout 组/设备拔出（两平台实测 EOF：返回 0、err 空）/fd 失效走 readSome 错误分支（返回 -1、err 点名设备）；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
-| `udp_receiver` + 解析器（UDP 路径） | 回环 socket 38 项断言全过：打开契约与 SO_RCVBUF/SO_RCVTIMEO 回读、非法 IP 与重复 bind 失败、未打开即收、超时返回 0、close 幂等；另有真实回环集成测试（7 包收到、6 帧解出、1 帧 CRC 损坏被拒） |
+| `udp_receiver` + 解析器（UDP 路径） | 回环 socket 38 项断言全过：打开契约与 SO_RCVBUF/SO_RCVTIMEO 回读、非法 IP 与 bind 非本机地址失败、未打开即收、超时返回 0、close 幂等；另有真实回环集成测试（7 包收到、6 帧解出、1 帧 CRC 损坏被拒） |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：60 秒灌入 126,636 帧 = 解出 126,636 帧，`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB；CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 逐点时间与环号语义 | 对照官方 `parseFromPacketToPointCloud` 源码与官方 README 示例（`ringNum = 18`、首条线 `ring = 1`）核对；离线自检覆盖单调性、步长、两种时间戳基准、拼帧后 ring 分布。**真机数据仍待确认** |
