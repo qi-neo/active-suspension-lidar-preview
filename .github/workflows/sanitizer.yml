@@ -113,7 +113,7 @@ jobs:
       # 与 /dev/ttyUSB0 完全相同的 termios 路径，这段代码同样要过 sanitizer——
       # 断言只验"值对不对"，验不出"写没写错地方"。与独立仓库 unilidar-driver
       # 的 core job（双编译器 × ASan）互为双保险
-      - name: 驱动串口接收自检（ASan + UBSan；64 项）
+      - name: 驱动串口接收自检（ASan + UBSan；78 项）
         run: |
           set -e
           cd src/active-suspension-lidar-preview
@@ -126,6 +126,22 @@ jobs:
             src/unilidar_driver/src/serial_receiver.cpp \
             -o /tmp/asan_serial_receiver
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_receiver
+
+      # UDP 接收同样过 sanitizer：socket 的 bind/setsockopt/recvfrom/sendto
+      # 路径要查越界与 UB，超时与 close 幂等分支也要守住
+      - name: 驱动 UDP 接收自检（ASan + UBSan；38 项）
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
+            -I src/unilidar_driver/include \
+            src/unilidar_driver/examples/udp_receiver_selftest.cpp \
+            src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/udp_receiver.cpp \
+            -o /tmp/asan_udp_receiver
+          ASAN_OPTIONS=detect_leaks=1 /tmp/asan_udp_receiver
 
       # 压力灌入同样过 sanitizer：3 秒 2 Mbps 灌入 + 垃圾注入 + 读暂停，
       # 校验缓冲边界写入与 erase 后的越界访问。packet_parser 的 pos 重置
