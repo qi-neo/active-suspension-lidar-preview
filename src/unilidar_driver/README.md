@@ -36,10 +36,11 @@ src/unilidar_driver/
 ├── src/                    以上五个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
 │   ├── decoder_selftest.cpp        离线自检，202 项断言
-│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
+│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），78 项断言（macOS 77）
+│   ├── udp_receiver_selftest.cpp    UDP 接收自检（回环 socket），38 项断言
 │   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
 │   ├── node_loop_selftest.cpp      节点主循环自检（实时性与背压），65 项断言
-│   ├── selftest_fixture.hpp        三个串口自检共用的测试基建
+│   ├── selftest_fixture.hpp        四个自检共用的测试基建
 │   └── udp_probe.cpp               实测定界探针
 ├── launch/unilidar_driver.launch.py
 └── config/unilidar_params.yaml
@@ -74,12 +75,20 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/src/frame_decoder.cpp src/unilidar_driver/src/udp_receiver.cpp \
   -o /tmp/decoder_selftest && /tmp/decoder_selftest
 
-# 串口接收：PTY 主从对模拟虚拟串口，64 项断言（macOS 63），不需要真雷达也不需要真串口
+# 串口接收：PTY 主从对模拟虚拟串口，78 项断言（macOS 77），不需要真雷达也不需要真串口
 clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/examples/serial_receiver_selftest.cpp \
   src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
   src/unilidar_driver/src/serial_receiver.cpp \
   -o /tmp/serial_receiver_selftest && /tmp/serial_receiver_selftest
+
+# UDP 接收：回环 socket 自发自收，38 项断言（覆盖打开失败、未打开即收、超时、close 幂等）；
+# 默认端口 46311，可用 UDP_SELFTEST_PORT 覆盖
+clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
+  src/unilidar_driver/examples/udp_receiver_selftest.cpp \
+  src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
+  src/unilidar_driver/src/udp_receiver.cpp \
+  -o /tmp/udp_receiver_selftest && /tmp/udp_receiver_selftest
 
 # 串口压力：2 Mbps 灌入 + 垃圾/伪帧头注入 + 读暂停，14 项断言；--seconds 控制时长
 clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
@@ -229,11 +238,18 @@ L1 (TTL UART) ──CH340 转接模块──> USB ──> /dev/ttyUSB0 @ 2,000,0
 - 打不开串口时按节点启动日志的排查顺序：设备是否存在（`ls /dev/ttyUSB*`）、
   用户是否在 `dialout` 组、波特率、TX/RX 交叉与共地。
 
-串口接收有 64 项离线自检（`serial_receiver_selftest`，Linux 平台；macOS 本机
-为 63 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps 断言）：
+串口接收有 78 项离线自检（`serial_receiver_selftest`，Linux 平台；macOS 本机
+为 77 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps 断言）：
 用 PTY 主从对造虚拟串口，走与 `/dev/ttyUSB0` 完全相同的 termios 代码路径，覆盖整帧直达、
 跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、以及各类
-打开失败路径——不需要真雷达，也不需要真串口。
+打开失败路径——空设备名、EACCES（提示加入 dialout 组）、设备拔出语义分平台
+（PTY 主端关闭后 macOS 读到 EOF 返回 0、Linux 报 EIO 返回 -1；真机 USB 串口
+拔出两平台都是错误返回，EOF 是 PTY 独有的仿真语义）——不需要真雷达，也不需要真串口。
+
+UDP 接收另有 38 项离线自检（`udp_receiver_selftest`）：回环 socket 自发自收，
+覆盖打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP 与端口重复 bind 的失败
+路径、未打开即收、超时返回 0 且不污染 err、close 幂等；与 `tests/udp_loopback_test.sh`
+的真实回环 happy path 互补（脚本走收发主路径，本自检覆盖每条分支含失败路径）。
 
 在此之上还有 14 项**压力自检**（`serial_stress_selftest`）：PTY 主端按 2 Mbps
 灌入合成报文（默认 60 秒），同时掺三种干扰——整秒边界注入 16 B 垃圾 + 12 B
@@ -271,13 +287,13 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
 | 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 202 项断言全过 |
-| `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，64 项断言全过（Linux；macOS 本机 63 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、设备不存在/非终端/坏波特率/未打开即读；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
+| `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，78 项断言全过（Linux；macOS 本机 77 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、空设备名/EACCES 提示 dialout 组/设备拔出语义分平台（macOS EOF 返 0、Linux EIO 返 -1）；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
+| `udp_receiver` + 解析器（UDP 路径） | 回环 socket 38 项断言全过：打开契约与 SO_RCVBUF/SO_RCVTIMEO 回读、非法 IP 与重复 bind 失败、未打开即收、超时返回 0、close 幂等；另有真实回环集成测试（7 包收到、6 帧解出、1 帧 CRC 损坏被拒） |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：60 秒灌入 126,636 帧 = 解出 126,636 帧，`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB；CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
 | 逐点时间与环号语义 | 对照官方 `parseFromPacketToPointCloud` 源码与官方 README 示例（`ringNum = 18`、首条线 `ring = 1`）核对；离线自检覆盖单调性、步长、两种时间戳基准、拼帧后 ring 分布。**真机数据仍待确认** |
 | `PointCloud2` time/ring 字段 | 核心库输出由离线自检覆盖；`point_step = 24` 与字段偏移按字节手算，节点发布路径**本机无 ROS 未编译**（只用最小 ROS 桩头文件做过语法/模板实例化检查），待 CI 的 `ros` job 与实机确认 |
 | 测试自身有效性 | 变异测试：3 处人为破坏全部被对应断言抓住 |
-| `udp_receiver` + 解析器 + 探针 | 真实 UDP 回环：7 包收到、6 帧解出、1 帧 CRC 损坏被拒 |
 | 解析核心编译 | `-Wall -Wextra -Wpedantic` 零警告 |
 | ROS 节点编译 | 本仓库 CI 的 `ros` job 在 `ros:humble-ros-base` 容器里 `rosdep install` + `colcon build`，并用越界 `local_port` 与非法 `transport` 启动节点，断言参数校验会 FATAL 退出（本地无 ROS，首次运行结果待 CI） |
 | **ROS 节点实机运行** | **未验证**，需接雷达后按上面的流程核对 |
