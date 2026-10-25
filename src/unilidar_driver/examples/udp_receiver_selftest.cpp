@@ -1,15 +1,15 @@
 // UDP 收包的离线自检。不需要雷达、也不需要外部网络——
 // 收发两端都建在本机回环上：接收端是被测的 UdpReceiver，发送端是一个
 // 普通的 UDP socket。真机上 recvfrom 之前的每一类失败（IP 配错、
-// 端口被占、socket 没开就收）在这里都能复现并断言。
+// IP 配错、socket 没开就收）在这里都能复现并断言。
 //
 // 覆盖的场景：
 //   1. 打开契约：空 IP 绑所有网卡（INADDR_ANY）、显式 IP、
 //      SO_RCVBUF 请求 0（不设置、沿用系统默认）、超时 0（不设置），
 //      四种组合都能正常打开，recvBufBytes() 读回实际生效值；
-//   2. 打开失败路径：IP 格式不合法（值不合法/段数不足）、
-//      同端口二次 bind（EADDRINUSE）——真机上对应"雷达在跑、
-//      又启动了一个驱动"；
+//   2. 打开失败路径：IP 格式不合法（值不合法/段数不足）、bind 非本机
+//      地址（EADDRNOTAVAIL，多网口机器填错网卡的真错误）——注意不用
+//      "同端口二次 bind"构造，原因见下；
 //   3. 未打开就收：返回 -1 并说明原因，而不是崩或假装超时；
 //   4. 收发契约：自发自收字节数一致、数据逐字节相同、src_ip
 //      回显发送方地址；无数据 + SO_RCVTIMEO：返回 0 且 err 为空
@@ -123,7 +123,7 @@ static void test_open_contract(SelftestLog& log) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. 打开失败路径：IP 不合法、端口被占
+// 2. 打开失败路径：IP 不合法、bind 非本机地址
 // ---------------------------------------------------------------------------
 static void test_open_errors(SelftestLog& log) {
   std::printf("[2] 打开失败路径\n");
@@ -153,20 +153,23 @@ static void test_open_errors(SelftestLog& log) {
     std::printf("      段数不足: %s\n", err.c_str());
   }
 
-  // 同端口二次 bind：SO_REUSEADDR 不允许两个活跃 UDP 监听同端口
-  // （那是 SO_REUSEPORT 的语义）。真机上对应驱动起了两个进程。
+  // bind 非本机地址：local_ip 填了不在这台机器上的 IP（多网口机器上
+  // 填错网卡、或把别的机器的 IP 抄过来），bind 返回 EADDRNOTAVAIL。
+  // 真机上这比"端口被占用"更常见。**不用"同端口二次 bind"构造**：驱动
+  // 开了 SO_REUSEADDR，而 Linux 上两个 REUSEADDR 的 UDP socket 允许绑
+  // 同一端口（多进程负载均衡语义），macOS 则报 EADDRINUSE——该场景两平台
+  // 行为相反，不能作为跨平台断言（首轮 CI 已因此挂过）。
   {
-    UdpReceiver first;
+    UdpReceiver rx;
     err.clear();
-    log.check(first.open(port, "", 200, kDefaultRecvBufBytes, err), "第一个实例应打开成功");
-    UdpReceiver second;
-    err.clear();
-    log.check(!second.open(port, "", 200, kDefaultRecvBufBytes, err),
-              "同端口二次 bind 应失败（EADDRINUSE）");
+    log.check(!rx.open(port, "198.51.100.7", 200, kDefaultRecvBufBytes, err),
+              "bind 非本机地址应失败（EADDRNOTAVAIL）");
     log.check(!err.empty() && err.find("绑定") != std::string::npos,
               "bind 失败错误应点明「绑定」与端口");
-    log.check(!second.isOpen(), "bind 失败后不应持有 socket");
-    std::printf("      端口被占: %s\n", err.c_str());
+    log.check(!err.empty() && err.find("198.51.100.7") != std::string::npos,
+              "bind 失败错误应点明是哪个 IP 绑不上（排障时直接可见）");
+    log.check(!rx.isOpen(), "bind 失败后不应持有 socket");
+    std::printf("      非本机地址: %s\n", err.c_str());
   }
 }
 
@@ -280,7 +283,7 @@ int main() {
   test_close_contract(log);
 
   if (log.report() != 0) return 1;
-  std::printf("结论：UdpReceiver 的打开/接收/关闭行为（含 IP 配错、端口被占、"
+  std::printf("结论：UdpReceiver 的打开/接收/关闭行为（含 IP 配错、bind 非本机地址、"
               "未打开即收、超时契约）\n      在回环上全部符合预期；实物接入只需把"
               "监听 IP 与端口换成雷达实际所发。\n");
   return 0;
