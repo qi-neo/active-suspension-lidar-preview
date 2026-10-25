@@ -36,7 +36,7 @@ src/unilidar_driver/
 ├── src/                    以上五个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
 │   ├── decoder_selftest.cpp        离线自检，202 项断言
-│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），78 项断言（macOS 77）
+│   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），81 项断言（macOS 80）
 │   ├── udp_receiver_selftest.cpp    UDP 接收自检（回环 socket），38 项断言
 │   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
 │   ├── node_loop_selftest.cpp      节点主循环自检（实时性与背压），65 项断言
@@ -75,7 +75,7 @@ clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/src/frame_decoder.cpp src/unilidar_driver/src/udp_receiver.cpp \
   -o /tmp/decoder_selftest && /tmp/decoder_selftest
 
-# 串口接收：PTY 主从对模拟虚拟串口，78 项断言（macOS 77），不需要真雷达也不需要真串口
+# 串口接收：PTY 主从对模拟虚拟串口，81 项断言（macOS 80），不需要真雷达也不需要真串口
 clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/examples/serial_receiver_selftest.cpp \
   src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
@@ -238,13 +238,14 @@ L1 (TTL UART) ──CH340 转接模块──> USB ──> /dev/ttyUSB0 @ 2,000,0
 - 打不开串口时按节点启动日志的排查顺序：设备是否存在（`ls /dev/ttyUSB*`）、
   用户是否在 `dialout` 组、波特率、TX/RX 交叉与共地。
 
-串口接收有 78 项离线自检（`serial_receiver_selftest`，Linux 平台；macOS 本机
-为 77 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps 断言）：
+串口接收有 81 项离线自检（`serial_receiver_selftest`，Linux 平台；macOS 本机
+为 80 项——`B2000000` 是 Linux 扩展常量，没有它的平台跳过 2 Mbps 断言）：
 用 PTY 主从对造虚拟串口，走与 `/dev/ttyUSB0` 完全相同的 termios 代码路径，覆盖整帧直达、
 跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、以及各类
-打开失败路径——空设备名、EACCES（提示加入 dialout 组）、设备拔出语义分平台
-（PTY 主端关闭后 macOS 读到 EOF 返回 0、Linux 报 EIO 返回 -1；真机 USB 串口
-拔出两平台都是错误返回，EOF 是 PTY 独有的仿真语义）——不需要真雷达，也不需要真串口。
+打开失败路径——空设备名、EACCES（提示加入 dialout 组）、设备拔出（PTY 主端
+关闭后两平台实测均为 EOF：读返回 0、err 为空；真机 USB 串口拔出两平台都是
+错误返回，EOF 是 PTY 独有的仿真语义）、fd 失效后 readSome 走错误分支
+（返回 -1、err 点名设备）——不需要真雷达，也不需要真串口。
 
 UDP 接收另有 38 项离线自检（`udp_receiver_selftest`）：回环 socket 自发自收，
 覆盖打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读、非法 IP 与端口重复 bind 的失败
@@ -287,7 +288,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
 | 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 202 项断言全过 |
-| `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，78 项断言全过（Linux；macOS 本机 77 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、空设备名/EACCES 提示 dialout 组/设备拔出语义分平台（macOS EOF 返 0、Linux EIO 返 -1）；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
+| `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，81 项断言全过（Linux；macOS 本机 80 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、空设备名/EACCES 提示 dialout 组/设备拔出（两平台实测 EOF：返回 0、err 空）/fd 失效走 readSome 错误分支（返回 -1、err 点名设备）；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
 | `udp_receiver` + 解析器（UDP 路径） | 回环 socket 38 项断言全过：打开契约与 SO_RCVBUF/SO_RCVTIMEO 回读、非法 IP 与重复 bind 失败、未打开即收、超时返回 0、close 幂等；另有真实回环集成测试（7 包收到、6 帧解出、1 帧 CRC 损坏被拒） |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：60 秒灌入 126,636 帧 = 解出 126,636 帧，`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB；CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
