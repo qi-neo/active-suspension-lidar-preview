@@ -127,24 +127,32 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
 - **UDP 接收自检新建 38 项**（第五套离线自检，`udp_receiver_selftest`）。
   此前 `udp_receiver.cpp` 只有真实回环脚本覆盖 happy path；新建自检补上全部分支：
   打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读（打印 `getsockopt` 生效值不是
-  请求值）、非法 IP（`300.1.2.3`/`1.2.3`）早退、同端口重复 bind 报「绑定」
-  失败、未打开即收报「未打开」、超时返回 0 且不污染 err、close 幂等。
+  请求值）、非法 IP（`300.1.2.3`/`1.2.3`）早退、bind 非本机地址
+  （`198.51.100.7`，EADDRNOTAVAIL）报「绑定」失败且点明是哪个 IP、
+  未打开即收报「未打开」、超时返回 0 且不污染 err、close 幂等。
   行覆盖 67.14% → **92.86%**，剩余未覆盖行（`socket()`/`recvfrom()` 硬错误）
   需耗尽 fd 才构造得出。与 `tests/udp_loopback_test.sh` 的分工写进头注释：
   脚本=集成测试只走 happy path，自检=单元测试覆盖每条分支含失败路径
-- **首轮 CI 翻车与修正（平台语义教训）**：设备拔出的 PTY 语义原按「Linux
-  主端关闭后从端 read 返回 -1/EIO」断言，首轮 CI 在 Ubuntu 24.04 runner
-  （内核 6.8）上两平台实测都是 **EOF（返回 0、err 为空）**——4 个核心库
-  组合与 ROS job 当场挂掉。修正：删掉 `#ifdef __APPLE__` 分平台断言，统一
-  按 EOF 断言（readSome 无法区分 EOF 与暂时无数据，都是 0，POSIX read 在
-  `VMIN=0` 下的固有限定；真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY
-  独有的仿真语义），错误分支改由 fd 失效场景覆盖。**平台语义不能凭文献/
-  记忆断言，要以目标 CI 环境的实测为准；实测与预期不符时，改的是断言和
-  文档，不是事实。**
-- **变异验证**：十个变异体（串口 4 + UDP 6：空设备名校验删除、EACCES 提示删除、
+- **两轮 CI 翻车与修正（平台语义教训，本轮最重要经验）**：
+  1. 设备拔出的 PTY 语义原按「Linux 主端关闭后从端 read 返回 -1/EIO」
+     断言，首轮 CI 在 Ubuntu 24.04 runner（内核 6.8）上两平台实测都是
+     **EOF（返回 0、err 为空）**——4 个核心库组合与 ROS job 当场挂掉。
+     修正：删掉 `#ifdef __APPLE__` 分平台断言，统一按 EOF 断言（readSome
+     无法区分 EOF 与暂时无数据，都是 0，POSIX read 在 `VMIN=0` 下的
+     固有限定；真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY 独有的
+     仿真语义），错误分支改由 fd 失效场景覆盖。
+  2. 同端口二次 bind 原按「SO_REUSEADDR 下报 EADDRINUSE」断言，二轮 CI 在
+     Linux runner 上挂掉——**Linux 上两个都设了 SO_REUSEADDR 的 UDP socket
+     允许绑同一端口**（多进程负载均衡语义），macOS 才报 EADDRINUSE。修正：
+     换成 bind 非本机地址（EADDRNOTAVAIL，两平台一致；且「local_ip 填了
+     不在这台机器上的 IP」真机上比端口被占更常见）。
+  **平台语义不能凭文献/记忆断言，要以目标 CI 环境的实测为准；实测与预期
+  不符时，改的是断言和文档，不是事实。**
+- **变异验证**：十一个变异体（串口 4 + UDP 7：空设备名校验删除、EACCES 提示删除、
   「未打开」err 删除、readSome 错误分支 err 填充删除、非法 IP 早退删除、
-  bind 失败返 true、「绑定」提示改名、src_ip 回填删除、超时返 -1、
-  close 不清 recv_buf_bytes_）全部被新断言抓住，且只抓目标断言、不误伤
+  bind 失败返 true、「绑定」提示改名、bind 失败 err 退化成无 IP 通用文案、
+  src_ip 回填删除、超时返 -1、close 不清 recv_buf_bytes_）全部被新断言抓住，
+  且只抓目标断言、不误伤
 - **60 s 长时程复跑**（2 Mbps 灌入 120 MB）：126,637 帧全部解出零丢失、
   `readSome` 调用 136,026 次、缓冲峰值 2,064 B、RSS 峰值 1.7 MB、
   `bad_size 59`（= 注入的伪帧头数，全部按预期拒斥）；双编译器 × 普通/ASan+UBSan
