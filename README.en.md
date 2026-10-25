@@ -192,7 +192,7 @@ missing) verifies reception offline, and `serial_stress_selftest` (14 checks)
 feeds 2 Mbps through the same termios path with junk injected and periodic read
 pauses; the UDP path is covered by `udp_receiver_selftest` (38 checks over a
 loopback socket: open contract, SO_RCVBUF/SO_RCVTIMEO readback, invalid IP,
-duplicate bind, receive-before-open, timeout, close idempotency). The parsing core
+binding to a non-local address, receive-before-open, timeout, close idempotency). The parsing core
 does not depend on ROS and can be built and self-tested on any machine.
 
 It also fixes a QoS incompatibility present in the official node: that node
@@ -468,7 +468,7 @@ parameter to `udp` and configure it via `local_ip` / `local_port` / `source_ip`.
 > USB-serial unplug errors out on both — EOF is a PTY-only simulation semantic; 80 on macOS —
 > the 2 Mbps assertion needs the Linux-only `B2000000` termios constant). The UDP receiver has
 > 38 offline checks (`udp_receiver_selftest`, a loopback socket covering the open contract,
-> SO_RCVBUF/SO_RCVTIMEO readback, invalid IP, duplicate bind, receive-before-open, timeout and
+> SO_RCVBUF/SO_RCVTIMEO readback, invalid IP, binding to a non-local address (EADDRNOTAVAIL), receive-before-open, timeout and
 > close idempotency — the failure paths the loopback integration script never exercises). On top
 > of that, `serial_stress_selftest` adds 14 checks: a PTY
 > master feeding 2 Mbps of synthetic frames with junk and fake headers injected and periodic read
