@@ -13,7 +13,7 @@
 //   7. 一次写入两帧：连续两帧应连续解出，序号不得误报；
 //   8. IMU 帧同样走串口：类型与整包长都对得上；
 //   9. 参数契约与设备拔出（gcov 盲区补齐）：空设备名、权限不足的 dialout
-//      提示、拔出后按平台的 EOF/EIO 语义。
+//      提示、拔出后的 EOF 语义（两平台实测一致）、fd 失效后的错误分支。
 //
 // 测试基建（PTY、帧构造、边写边读、断言计数）在 selftest_fixture.hpp，
 // 与 serial_stress_selftest 共用；本文件只放场景。
@@ -320,9 +320,9 @@ static void test_imu_frame(SelftestLog& log) {
 // ---------------------------------------------------------------------------
 // 9. 参数契约与设备拔出（gcov 盲区补齐）
 //    未覆盖行来自 gcov 报告：空设备名分支、EACCES 的 dialout 提示、
-//    读错误分支。前两个是真机上"打不开设备"的最常见原因；
-//    拔出语义按平台分化，两种平台共同的契约是不崩、fd 状态不变、
-//    close() 可正常收尾。
+//    readSome 的错误分支（176-177）。前两个是真机上"打不开设备"的
+//    最常见原因；错误分支用 fd 失效场景覆盖（见 9.3）。共同契约：
+//    不崩、fd 状态不变、close() 可正常收尾。
 // ---------------------------------------------------------------------------
 static void test_open_contract_and_unplug(SelftestLog& log) {
   std::printf("[9] 参数契约与设备拔出\n");
@@ -371,11 +371,14 @@ static void test_open_contract_and_unplug(SelftestLog& log) {
   }
 
   // 9.3 设备拔出：关掉 PTY 主端 = 模拟 USB 线被拔 / CH340 掉电。
-  // 从端 read 的行为按平台分化：PTY 仿真下 macOS 返回 0（EOF 语义，
-  // 表现为"没有数据"），Linux 返回 -1/EIO。（真机 USB 串口拔出两个
-  // 平台都是错误返回，EOF 是 PTY 独有的仿真语义。）两种平台共同的
-  // 契约：不崩、fd 状态不变、close() 可正常收尾；Linux 上额外走
-  // readSome 的错误分支，err 必须点名设备。
+  // 从端 read 的行为是 EOF（返回 0、err 为空）——两个平台实测一致：
+  // macOS 本机与 CI 的 Ubuntu 24.04 runner（内核 6.8）都是这个语义。
+  // **首轮 CI 曾按"Linux 返回 -1/EIO"断言并被 runner 实测推翻**——平台
+  // 语义不能凭文献/记忆断言，要以目标 CI 环境的实测为准。
+  // 注意 readSome 无法区分"EOF"与"暂时无数据"（都是 0，POSIX read 在
+  // VMIN=0 下的固有限定）；真机 USB 串口拔出两个平台都是错误返回，EOF
+  // 是 PTY 独有的仿真语义。两种平台共同的契约：不崩、fd 状态不变、
+  // close() 可正常收尾。
   {
     SerialFixture fx;
     std::string err;
@@ -399,18 +402,27 @@ static void test_open_contract_and_unplug(SelftestLog& log) {
     std::vector<std::uint8_t> buf(64);
     err.clear();
     const int n = fx.rx.readSome(buf.data(), buf.size(), err);
-#ifdef __APPLE__
-    log.check(n == 0, "macOS：主端关闭后读从端应返回 0（EOF 语义）");
-    log.check(err.empty(), "macOS：EOF 不是错误，err 应为空");
-    std::printf("      macOS 拔出后读: n=0（EOF 语义）\n");
-#else
-    log.check(n == -1, "Linux：主端关闭后读从端应返回 -1（EIO）");
-    log.check(!err.empty() && err.find("失败") != std::string::npos,
-              "Linux：读错误信息应点名设备与「失败」");
-    std::printf("      Linux 拔出后读: %s\n", err.c_str());
-#endif
+    // 平台语义实测：macOS 与 Linux（CI Ubuntu 24.04 runner，内核 6.8）
+    // 都是 EOF——返回 0、err 为空。曾按 Linux EIO 断言，被 runner 推翻。
+    log.check(n == 0, "主端关闭后读从端应返回 0（EOF 语义，两平台实测一致）");
+    log.check(err.empty(), "EOF 不是错误，err 应为空");
+    std::printf("      拔出后读: n=0（EOF 语义）\n");
     log.check(fx.rx.isOpen(), "拔出后 isOpen() 应保持 true（错误在 read 时才暴露）");
     log.check(fx.rx.device() == fx.pty.slave_name, "拔出后 device() 不应变化");
+
+    // fd 失效：从外部关掉驱动持有的句柄——真机上对应设备节点被移除后
+    // fd 变野、或重复 close 一类错误。readSome 必须走错误分支：返回 -1、
+    // err 点名设备与「失败」。这条覆盖 readSome 的 176-177 行：上面的
+    // EOF 场景返回 0 走不到错误分支，而真机拔出（EIO/ENODEV）是会走到的。
+    // ::close 之后无新 open，句柄号不会被复用，EBADF 必然触发。
+    ::close(fx.rx.fd());
+    err.clear();
+    log.check(fx.rx.readSome(buf.data(), buf.size(), err) == -1,
+              "fd 失效后 readSome 应返回 -1（错误分支）");
+    log.check(!err.empty() && err.find("失败") != std::string::npos,
+              "fd 失效的错误信息应点名设备与「失败」");
+    log.check(fx.rx.isOpen(), "fd 失效后 isOpen() 仍为 true（成员未清，close 前可查）");
+    std::printf("      fd 失效后读: %s\n", err.c_str());
 
     fx.rx.close();
     log.check(!fx.rx.isOpen(), "拔出后 close() 应正常收尾");
