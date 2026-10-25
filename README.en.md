@@ -27,7 +27,7 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > executes seven offline self-test groups (v3 control: 443 checks, driver packet parsing: 151
 > checks, driver serial receive: 64 checks, driver serial stress: 14 checks, driver node
 > loop: 28 checks, v2 pure functions: 196 checks, level calibration: 69
-> checks — 965 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> checks — 1016 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is

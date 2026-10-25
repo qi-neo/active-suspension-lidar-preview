@@ -16,6 +16,7 @@
 // 叠上 -Werror 直接编译失败（clang 不报，所以只在双编译器 CI 里暴露）。
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -1120,6 +1121,234 @@ static void test_p0_regressions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 11. 覆盖率补齐：对着 gcov 报告补盲
+//
+// 这一节的用例不是"锦上添花"，而是按覆盖率报告逐分支补的。做法：
+//   1. g++ --coverage 编出全部自检并跑完，gcov 出报告；
+//   2. 挑出 packet_parser.cpp / frame_decoder.cpp 里未覆盖的行；
+//   3. 每个分支配"行为可观测"的断言——把对应实现改坏，断言必须失败
+//      （六个变异体的验证结果记在 CHANGELOG）。
+//
+// 既有自检全绿却留下的六个盲区（括号内为对应源文件行号）：
+//   11.1 PacketParser::reset()            整个方法没有任何调用方（13-17 行）
+//   11.2 append() 累积超限                单批不超限、累加后超限（28-33 行）
+//   11.3 半截帧头 + 前置垃圾的重同步      帧头到齐、12 字节头没凑齐（67-70 行）
+//   11.4 点数组越出报文尾部               point_num 合法但包装不下（133-135 行）
+//   11.5 报文自带的距离门限               帧内 range_min/max（184-186 行）
+//   11.6 IMU 帧短于最小读取长度           （254-256 行）
+//
+// 为什么这些分支值得单独立项：它们全是"外部数据异常"路径——报文被截断、
+// 帧头被拆散、缓冲被顶爆。正常数据永远走不到，而真机上恰恰是这些路径
+// 决定驱动会不会越界读、会不会把内存吃光。
+// ---------------------------------------------------------------------------
+static void test_coverage_gaps() {
+  std::printf("[11] 覆盖率补齐：reset / 累积超限 / 半帧头 / 点数组越界 / 帧内门限 / IMU 短帧\n");
+
+  // 11.1 reset()：复位必须三件事都做——清缓冲、清序号状态、清统计。
+  // 少任何一件，下一次运行的诊断数字就是上一次的残留，线上排查会看错。
+  {
+    PacketParser p;
+    const auto frame = makeCloudFrame(100, 5);
+    p.append(frame.data(), frame.size());
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kFrameReady, "reset：复位前应能解出一帧");
+
+    // 喂 10 字节无帧头数据：制造"缓冲非空 + 有重同步计数"的现场
+    // （数字里不含 0x55 0xAA，否则可能凑出假帧头，测的就不是重同步了）
+    const uint8_t junk[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    p.append(junk, sizeof(junk));
+    p.pull(out, type);
+    check(p.buffered() == 3, "reset：复位前无帧头数据应只保留 3 字节前缀");
+    check(p.stats().resync_bytes == 7, "reset：复位前应记 7 字节重同步");
+
+    p.reset();
+    check(p.buffered() == 0, "reset：缓冲应清空");
+    check(p.stats().frames_ok == 0, "reset：frames_ok 应清零");
+    check(p.stats().resync_bytes == 0, "reset：resync_bytes 应清零");
+    check(p.stats().bytes_in == 0, "reset：bytes_in 应清零");
+    check(p.stats().buffer_overflow == 0 && p.stats().bad_crc == 0 && p.stats().bad_size == 0,
+          "reset：各类错误计数应清零");
+
+    // 序号状态也必须清掉：同类型同序号再到来应是"首帧"而不是重复包。
+    // 若 reset 漏清 seq_state_，这里会被判为 duplicate 而整包丢弃——
+    // 这正是变异验证时用来抓"reset 不完整"的可观测行为。
+    p.append(frame.data(), frame.size());
+    check(p.pull(out, type) == PullStatus::kFrameReady,
+          "reset：序号状态应已清除（否则同序号帧会被当成重复包丢弃）");
+    check(p.stats().duplicates == 0, "reset：复位后不应有重复包误报");
+    check(p.stats().frames_ok == 1, "reset：复位后统计应从 0 开始计");
+    check(p.stats().seq_gaps == 0, "reset：复位后不应有缺口误报");
+  }
+
+  // 11.2 append() 的累积超限分支：两批数据单批都不超上限，但第二批放不进。
+  // 与 [8] 节的对照关系——[8] 喂一整批超过上限的数据，走"整批丢弃"；
+  // 这里走"清空后只保留新批次"。两条路径语义不同：后者不丢新数据。
+  {
+    // 上限取 1050 = 点云整帧 1044 + 6：两批累加（1100）必然超限，
+    // 而恢复阶段单独一帧（1044）不超限——否则帧会走"单批整批丢弃"，
+    // 测的就不是累积超限后的恢复了。
+    PacketParser p(8192, 1050);
+    const std::vector<uint8_t> batch1(1000, 0xAB);  // 不含帧头标识
+    const std::vector<uint8_t> batch2(100, 0xCD);
+    p.append(batch1.data(), batch1.size());
+    p.append(batch2.data(), batch2.size());
+    check(p.stats().buffer_overflow == 1, "累积超限：第二批放不进应记 1 次溢出");
+    check(p.buffered() == 100, "累积超限：清空后应保留新批次（而不是连新数据一起丢）");
+    check(p.stats().bytes_in == 1100, "累积超限：两批字节都应计入 bytes_in");
+
+    // 对照：单批就超过上限时整批丢弃，一个字节都不保留
+    {
+      PacketParser q(8192, 1024);
+      const std::vector<uint8_t> big(2000, 0xAB);
+      q.append(big.data(), big.size());
+      check(q.stats().buffer_overflow == 1, "单批超限：应记 1 次溢出");
+      check(q.buffered() == 0, "单批超限：整批丢弃，不应保留任何字节");
+    }
+
+    // 超限清空之后解析器必须还能正常工作（不能把状态机带坏）
+    const auto frame = makeCloudFrame(30, 5);
+    p.append(frame.data(), frame.size());
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kFrameReady, "累积超限：清空后应能正常解出下一帧");
+    check(out.size() == frame.size(), "累积超限：解出的帧应完整");
+  }
+
+  // 11.3 帧头标识已到、但 12 字节帧头还没凑齐时，先把前置垃圾清掉。
+  // 现场：3 字节垃圾 + 帧头标识 + 2 字节类型字段（共 9 字节）。
+  // seek_header 在 pos=3 找到标识，但 pos + 12 > 9，此时应把 3 字节垃圾
+  // 计入重同步并擦除——留着它们会干扰后续拼接时的帧头定位。
+  {
+    const auto frame = makeCloudFrame(20, 10);
+    std::vector<uint8_t> partial;
+    partial.push_back(0x00);
+    partial.push_back(0x11);
+    partial.push_back(0x22);
+    partial.insert(partial.end(), frame.begin(), frame.begin() + 6);
+
+    PacketParser p;
+    p.append(partial.data(), partial.size());
+    std::vector<uint8_t> out;
+    uint32_t type = 0;
+    check(p.pull(out, type) == PullStatus::kNeedMore, "半帧头：数据不足时应继续等待");
+    check(p.stats().resync_bytes == 3, "半帧头：前置垃圾应计入重同步");
+    check(p.buffered() == 6, "半帧头：擦除垃圾后应只剩已到的 6 字节帧内容");
+    check(p.stats().frames_ok == 0, "半帧头：未凑齐不应交付帧");
+
+    // 补齐剩余字节，帧必须完整解出且与原始帧逐字节一致
+    p.append(frame.data() + 6, frame.size() - 6);
+    check(p.pull(out, type) == PullStatus::kFrameReady, "半帧头：补齐后应解出完整帧");
+    check(out.size() == frame.size(), "半帧头：解出的帧长应与原始一致");
+    bool same = out.size() == frame.size();
+    for (std::size_t i = 0; same && i < out.size(); ++i) {
+      if (out[i] != frame[i]) same = false;
+    }
+    check(same, "半帧头：解出的帧内容应与原始帧逐字节一致");
+    check(p.stats().frames_ok == 1, "半帧头：应恰好交付 1 帧");
+  }
+
+  // 11.4 点数组越出报文尾部：point_num 合法（≤ 300），但包装不下这么多点。
+  // 守的是"报文被截断"的现场：既不能越界读，也不能把坏包当正常解出。
+  // 与 [6] 节"长度不符"的区别：那里整包 64 字节，连 point_num 都读不到，
+  // 挂在第一道长度检查；这里整包够读到 point_num，挂在点数组边界检查。
+  {
+    LidarPointData body = makePointBody(0, 100);
+    const auto full = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+    // 点数组需要 帧头 + offsetof(ranges) + 3*point_num = 12 + 120 + 300 = 432 字节
+    const std::size_t need = kHeaderSize + offsetof(LidarPointData, ranges) + 3 * 100;
+    const std::vector<uint8_t> truncated(full.begin(), full.begin() + 300);
+
+    DecodeParams params;
+    DecodeStats st;
+    std::vector<PointXYZI> cloud;
+    double stamp = 0;
+    check(!decodePointCloud(truncated, params, 1.0, cloud, stamp, st),
+          "点数组越界：截断的包应解码失败");
+    check(st.size_mismatch == 1, "点数组越界：应记 1 次长度不符");
+    check(st.bad_point_num == 0, "点数组越界：point_num=100 合法，不应记为点数越界");
+    check(st.clouds_decoded == 0, "点数组越界：失败的包不应计入 clouds_decoded");
+
+    // 边界：长度恰好凑够点数组时应放行
+    const std::vector<uint8_t> exact(full.begin(),
+                                     full.begin() + static_cast<std::ptrdiff_t>(need));
+    DecodeStats st2;
+    std::vector<PointXYZI> cloud2;
+    double stamp2 = 0;
+    check(decodePointCloud(exact, params, 1.0, cloud2, stamp2, st2),
+          "点数组边界：长度恰好够点数组时应解码成功");
+    check(cloud2.size() == 100, "点数组边界：应解出 100 个点");
+    check(st2.size_mismatch == 0, "点数组边界：恰好够长不应记长度不符");
+  }
+
+  // 11.5 报文自带的距离门限（帧内 range_min/max）先于用户门限生效。
+  // 两个门限语义不同：帧内门限描述"这一帧雷达认为有效的距离"，
+  // 用户门限是驱动使用者的配置。统计分开计数，线上看到点被剔时
+  // 才分得清是雷达参数问题还是自己配错了范围。
+  {
+    LidarPointData body = makePointBody(0, 6);  // 全部 1 米
+    body.range_min = 2.0f;  // 帧内门限 [2, 3] 米，1 米全部低于下限
+    body.range_max = 3.0f;
+    const auto frame = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+
+    DecodeParams params;  // 用户门限默认 [0, 100]，不会剔 1~2.5 米的点
+    DecodeStats st;
+    std::vector<PointXYZI> cloud;
+    double stamp = 0;
+    check(decodePointCloud(frame, params, 1.0, cloud, stamp, st),
+          "帧内门限：解码本身应成功（门限只剔点，不拒帧）");
+    check(cloud.empty(), "帧内门限：低于帧内下限的点应全部剔除");
+    check(st.dropped_frame_range == 6, "帧内门限：应记 6 次帧内门限剔除");
+    check(st.dropped_user_range == 0, "帧内门限：用户门限不该被触发");
+
+    // 混合：2.5 米的点过帧内门限，1 米的点被它剔下
+    body.ranges[0] = 2500;
+    const auto mixed = seal<LidarPointDataPacket>(kTypePointCloud3D, &body, sizeof(body));
+    DecodeStats st2;
+    std::vector<PointXYZI> cloud2;
+    double stamp2 = 0;
+    check(decodePointCloud(mixed, params, 1.0, cloud2, stamp2, st2), "帧内门限：混合帧应解码成功");
+    check(cloud2.size() == 1, "帧内门限：只有 2.5 米的点应保留");
+    check(st2.dropped_frame_range == 5, "帧内门限：应记 5 次帧内剔除");
+    check(st2.dropped_user_range == 0, "帧内门限：混合帧同样只走帧内门限");
+    if (cloud2.size() == 1) {
+      check(std::fabs(cloud2[0].y - 2.5f) < 1e-3, "帧内门限：保留点的距离应为 2.5 米");
+    }
+  }
+
+  // 11.6 IMU 帧短于最小读取长度：既要拒帧，又不能越界读。
+  // kMinImu = 帧头 + offsetof(linear_acceleration) + 12 + 帧尾 = 80 字节，
+  // 恰好等于 IMU 整包长度——短 1 字节就该拒，齐 1 字节就能解。
+  {
+    LidarImuData body{};
+    body.info.seq = 7;
+    body.info.stamp.sec = 2000;
+    body.linear_acceleration[2] = 9.8f;
+    const auto full = seal<LidarImuDataPacket>(kTypeImu, &body, sizeof(body));
+    check(full.size() == kImuPacketSize, "IMU 短帧：整包长度应为 80 字节");
+
+    // 79 字节：差 1 字节读不到 linear_acceleration，必须拒绝
+    const std::vector<uint8_t> short79(full.begin(), full.begin() + 79);
+    DecodeParams params;
+    params.use_system_timestamp = false;
+    DecodeStats st;
+    ImuSample s;
+    check(!decodeImu(short79, params, 0.0, s, st), "IMU 短帧：79 字节应解码失败");
+    check(st.size_mismatch == 1, "IMU 短帧：应记 1 次长度不符");
+    check(st.imus_decoded == 0, "IMU 短帧：失败的包不应计入 imus_decoded");
+
+    // 恰好 80 字节：要读的字段都凑得齐，应放行
+    DecodeStats st2;
+    ImuSample s2;
+    check(decodeImu(full, params, 0.0, s2, st2), "IMU 短帧：恰好 80 字节应解码成功");
+    check(st2.size_mismatch == 0, "IMU 短帧：恰好够长不应记长度不符");
+    check(std::fabs(s2.stamp - 2000.0) < 1e-3, "IMU 短帧：时间戳应取报文 sec");
+    check(std::fabs(s2.linear_acceleration[2] - 9.8f) < 1e-6,
+          "IMU 短帧：acceleration 应读到（未越界）");
+  }
+}
+
 int main() {
   std::printf("unilidar_driver 离线自检\n\n");
   test_crc_and_layout();
@@ -1132,6 +1361,7 @@ int main() {
   test_buffer_guard();
   test_point_time_and_ring();
   test_p0_regressions();
+  test_coverage_gaps();
 
   std::printf("\n检查项 %d，失败 %d -> %s\n", g_checks, g_failed,
               g_failed == 0 ? "全部通过" : "存在失败");

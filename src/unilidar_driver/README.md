@@ -35,7 +35,7 @@ src/unilidar_driver/
 │   └── serial_receiver.hpp POSIX 串口收字节（实物默认路径）
 ├── src/                    以上五个的实现 + unilidar_driver_node.cpp（ROS 薄节点）
 ├── examples/
-│   ├── decoder_selftest.cpp        离线自检，151 项断言
+│   ├── decoder_selftest.cpp        离线自检，202 项断言
 │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
 │   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
 │   ├── node_loop_selftest.cpp      节点主循环自检（实时性与背压），28 项断言
@@ -67,7 +67,7 @@ ros2 launch unilidar_driver unilidar_driver.launch.py
 脱离 ROS 的快速自检（任何有 clang 的机器，路径相对于仓库根目录）：
 
 ```bash
-# 报文解析与解码：151 项断言
+# 报文解析与解码：202 项断言
 clang++ -std=c++17 -Wall -Wextra -Wpedantic -O1 -I src/unilidar_driver/include \
   src/unilidar_driver/examples/decoder_selftest.cpp \
   src/unilidar_driver/src/protocol.cpp src/unilidar_driver/src/packet_parser.cpp \
@@ -270,7 +270,7 @@ RELIABLE 与 BEST_EFFORT 不兼容，表现为「官方节点明明在发，v3 �
 | 项目 | 状态 |
 |---|---|
 | CRC32 算法 | 已对标准测试向量 `123456789` 校验（0xCBF43926） |
-| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 151 项断言全过 |
+| 报文定界、重同步、CRC 篡改、帧尾篡改、长度越界、重复/乱序序号 | 离线自检 202 项断言全过 |
 | `serial_receiver` + 解析器（串口路径） | PTY 主从对虚拟串口，64 项断言全过（Linux；macOS 本机 63 项，无 `B2000000` 常量跳过 2 Mbps 断言）：整帧直达、跨写拆包、垃圾与伪帧头重同步、无数据契约、一次多帧、IMU 帧、设备不存在/非终端/坏波特率/未打开即读；本机（macOS）实测通过，CI 双编译器 × ASan 复跑 |
 | 串口 2 Mbps 满码率链路 | 压力自检 14 项断言全过：60 秒灌入 126,636 帧 = 解出 126,636 帧，`bad_crc 0 · bad_tail 0 · seq_gaps 0 · duplicates 0`，缓冲峰值 2,064 B，RSS 峰值 1.7 MB；CI 双编译器 × ASan 复跑 |
 | 点云几何换算 | 在退化标定下与解析解逐点比对（仰角 30° 时 z 应为 0.5） |
