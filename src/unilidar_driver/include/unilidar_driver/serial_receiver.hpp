@@ -32,6 +32,10 @@ public:
   void close();
   bool isOpen() const { return fd_ >= 0; }
 
+  // 底层文件描述符（未打开时为 -1）。供调用方自行 poll/select，或测试
+  // 观察句柄状态；句柄的所有权仍归本类，调用方不得关闭它。
+  int fd() const { return fd_; }
+
   const std::string& device() const { return device_; }
   int baud() const { return baud_; }
 
