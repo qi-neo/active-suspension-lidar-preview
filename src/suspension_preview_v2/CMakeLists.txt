@@ -122,7 +122,30 @@ add_executable(param_selftest
 target_include_directories(param_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# 五个纯函数自检注册进 CTest：colcon test / ctest 会真正跑它们。
+# ---- B3：高度标定与 P0 板接口层（不依赖 ROS / PCL / 串口硬件，可纯离线编译）----
+# 标定表加载/插值/钳位/序列化的纯函数自检（height_calibration + 共用检查逻辑）
+add_executable(height_calib_selftest
+  examples/height_calib_selftest.cpp src/height_calibration.cpp)
+target_include_directories(height_calib_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+# 标定 CLI 工具：validate / generate / sample / --selftest（同用一份检查逻辑）
+add_executable(calibration_tool
+  examples/calibration_tool.cpp src/height_calibration.cpp)
+target_include_directories(calibration_tool PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+
+# P0 板接口层自检：用 PTY 仿真板端，验证「mm -> 标定 -> 0xAA55(0x13) 帧」全链路
+find_package(Threads REQUIRED)
+add_executable(p0_link_selftest
+  examples/p0_link_selftest.cpp
+  src/p0_board_link.cpp src/suspension_driver.cpp
+  src/serial_port.cpp src/protocol.cpp src/height_calibration.cpp)
+target_include_directories(p0_link_selftest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+target_link_libraries(p0_link_selftest PRIVATE Threads::Threads)
+
+# 六个纯函数自检注册进 CTest：colcon test / ctest 会真正跑它们。
 # 此前只有 install(TARGETS) 而没有 add_test，colcon test 是空的——
 # "装了可执行但没有任何步骤调用它"正是这些自检长期不进 CI 的原因。
 include(CTest)
@@ -133,11 +156,15 @@ if(BUILD_TESTING)
   add_test(NAME protocol_selftest COMMAND protocol_selftest)
   add_test(NAME level_selftest COMMAND level_selftest)
   add_test(NAME param_selftest COMMAND param_selftest)
+  add_test(NAME height_calib_selftest COMMAND height_calib_selftest)
+  add_test(NAME calibration_tool_selftest COMMAND calibration_tool --selftest)
+  add_test(NAME p0_link_selftest COMMAND p0_link_selftest)
 endif()
 
 # 安装
 install(TARGETS road_preview_node suspension_driver_node offline_demo
   trend_selftest obstacle_selftest protocol_selftest level_selftest param_selftest
+  height_calib_selftest calibration_tool p0_link_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 # suspension_core 必须一并安装：下面 ament_export_libraries 声明了导出它，

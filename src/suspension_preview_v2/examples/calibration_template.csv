@@ -1,0 +1,14 @@
+﻿# 高度(mm) -> PWM(us) 标定表模板
+# 列：target_mm, measured_pwm_us, temp_c, date
+# 用法（台架标定五步见 docs/calibration.md）：
+#   1) 让车静止在水平基准，记录此时为 target_mm=0 对应的 PWM；
+#   2) 逐高度点抬升车身，记录该高度下舵机实测 PWM 脉宽；
+#   3) 至少取 2 点，target_mm 必须严格递增；
+#   4) 把数据填到下面两列（后两列仅作记录，不参与换算）；
+#   5) 运行 calibration_tool validate 本文件，确认通过后再 generate 注入。
+target_mm,measured_pwm_us,temp_c,date
+0,1000,25.0,2026-10-25
+25,1180,25.0,2026-10-25
+50,1360,25.0,2026-10-25
+75,1540,25.0,2026-10-25
+100,1720,25.0,2026-10-25

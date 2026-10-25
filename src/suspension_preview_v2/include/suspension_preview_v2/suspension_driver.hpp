@@ -38,6 +38,10 @@ public:
     // 四轮一次性下发（顺序：0=左前 1=右前 2=左后 3=右后）
     virtual bool set_target_height(const std::array<int, kSuspensionWheelCount>& height_mm) = 0;
 
+    // 直接下发目标 PWM 脉宽（us）。P0 板只认 PWM，不认高度；高度->PWM 的换算
+    // 由上层（P0BoardLink + 标定表）完成，这里只负责把 us 原样塞进 0x13 命令。
+    virtual bool set_target_pwm(int wheel_index, int pwm_us) = 0;
+
     virtual bool emergency_stop() = 0;
 
     virtual const std::string& last_error() const = 0;
@@ -74,6 +78,7 @@ public:
     bool set_mode(SuspensionMode mode) override;
     bool set_target_height(int wheel_index, int height_mm) override;
     bool set_target_height(const std::array<int, kSuspensionWheelCount>& height_mm) override;
+    bool set_target_pwm(int wheel_index, int pwm_us) override;
     bool emergency_stop() override;
 
     const std::string& last_error() const override { return last_error_; }

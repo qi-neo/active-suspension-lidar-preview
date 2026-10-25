@@ -425,6 +425,32 @@ CI 最终全绿：`colcon build` + `colcon test` + ASan + 覆盖率。
 并 grep 确认核心头文件无 `pcl/` 引用。这是后续把 v3 切到 `ament_export_targets`
 （去掉路径 hack）的前提。
 
+### 控制/标定：高度(mm)→PWM(us) 标定与 P0 板接口层（`suspension_preview_v2`，离线可跑）
+
+P0 板只认 PWM 脉宽（舵机），不认高度；高度到 PWM 的映射每台车不同，必须在台架实测
+得到标定表。本轮把这段映射收敛到 `suspension_preview_v2`，交付**离线可跑**成果（真机
+CH340 误码率与 P0 板流板仍阻塞在硬件，与 B1 同口径）：
+
+- 新增 `height_calibration`（纯函数，不依赖 ROS / PCL / 串口）：`loadCsv` / `setPoints` /
+  `pwmForHeight`（分段线性插值 + 区间外钳位）/ `heightForPwm` / `toJson` / `toHeader` /
+  `strictlyIncreasing`；空表换算返回 `NaN`，调用方据 `hasCalibration()` 判断，绝不凭默认值硬算
+- `loadCsv` 兼容 UTF-8 BOM（Excel 导出的表常带）与首行表头（如 `target_mm,...` 当表头跳过）；
+  真正的坏数据（首字段仍是数值但后续字段非数值）照常报错
+- 新增 `P0BoardLink`：把「目标高度(mm)」经标定换算成 PWM，再经 0xAA55 协议下发 `0x13`
+  命令（payload = 轮号 + PWM）；四轮逐条下发。`setTargetHeightMm` 在未连接 / 未标定 /
+  轮号越界 / 换算 `NaN` / 下发失败时返回 `false`，且 `last_error()` 非空
+- `protocol` 新增 `kIdSetTargetPwm = 0x13`，与 `0x11`（直接下发 mm）区分，避免协议单位歧义；
+  `ISuspensionDriver` 加 `set_target_pwm` 虚函数，`SerialSuspensionDriver` 补实现
+- 新增 `calibration_tool`（CLI）：`validate` / `generate`（`--json` 可切换 JSON）/ `sample` /
+  `--selftest`；含 `calibration_template.csv` 五步法模板
+- 新增三个 CTest 用例并注册进 CI：
+  `height_calib_selftest`（31 项：点集校验 / 插值精度 / 钳位 / 空表 NaN / 往返一致 /
+  序列化 / CSV 含注释空行）、`calibration_tool --selftest`（复用同一份 31 项）、
+  `p0_link_selftest`（18 项，PTY 仿真板端，校验「mm→标定→0xAA55(0x13) 帧」全链路：收 4 帧
+  `id=0x13` 且 wheel/pwm 与标定换算一致，未标定下发被拒；无 PTY 环境自动跳过返回 0）
+- v2 纯函数断言 69 → **149** 项（新增 80：31 + 31 + 18），仓库离线断言总数 596 → **676** 项；
+  README 中英同步，新增 [docs/calibration.md](docs/calibration.md)
+
 ## [3.2.1] - 2026-10-15
 
 对应 `suspension_control_v3` 的 3.2.x。主线是前馈取样从"固定距离单点取样"

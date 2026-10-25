@@ -68,6 +68,16 @@ bool SerialSuspensionDriver::emergency_stop() {
     return send(protocol::kIdEStop, {1});
 }
 
+bool SerialSuspensionDriver::set_target_pwm(int wheel_index, int pwm_us) {
+    if (!valid_wheel(wheel_index)) {
+        last_error_ = "轮序号越界（应为 0-3）";
+        return false;
+    }
+    const int clamped = std::max(-32767, std::min(32767, pwm_us));
+    return send(protocol::kIdSetTargetPwm,
+                {static_cast<int16_t>(wheel_index), static_cast<int16_t>(clamped)});
+}
+
 std::unique_ptr<ISuspensionDriver> make_serial_driver(const std::string& device,
                                                       int baud_rate) {
     return std::make_unique<SerialSuspensionDriver>(device, baud_rate);

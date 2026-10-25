@@ -31,6 +31,10 @@ constexpr uint8_t kIdLaneRight = 0x02;
 constexpr uint8_t kIdSetMode = 0x10;
 constexpr uint8_t kIdSetTarget = 0x11;
 constexpr uint8_t kIdEStop = 0x12;
+// 0x13：下发目标 PWM 脉宽（us）。P0 板只认 PWM（舵机），不认高度；高度到 PWM
+// 的非线性映射由上位标定表换算后，经此命令下发。与 0x11（直接下发 mm）区分开，
+// 避免「协议单位到底是 mm 还是 us」的歧义在联调时才暴露。
+constexpr uint8_t kIdSetTargetPwm = 0x13;
 
 // 无效点标记（int16 最大值）
 constexpr int16_t kInvalidMm = 0x7FFF;
