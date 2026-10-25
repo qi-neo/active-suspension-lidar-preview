@@ -86,7 +86,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
       202 项断言的离线自检
 
   src/unilidar_driver/examples/serial_receiver_selftest.cpp
-      78 项断言的串口接收自检（PTY 虚拟串口；macOS 为 77 项，
+      81 项断言的串口接收自检（PTY 虚拟串口；macOS 为 80 项，
       B2000000 是 Linux 扩展常量）
 
   src/unilidar_driver/examples/udp_receiver_selftest.cpp
