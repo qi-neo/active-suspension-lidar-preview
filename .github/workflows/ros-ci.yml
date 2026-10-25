@@ -125,12 +125,22 @@ jobs:
       # 放得下（macOS 队列只有约 512 B，主端写在从端读之前会阻塞，那是
       # 本机自检才需要 pushAndPump 边写边读的原因）。这一步在独立仓库
       # unilidar-driver 的 core job 里也跑（双编译器 × ASan），两边都门住。
-      - name: 驱动串口接收自检（64 项）
+      - name: 驱动串口接收自检（78 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           . install/setup.sh
           ros2 run unilidar_driver serial_receiver_selftest
+
+      # UDP 接收：回环 socket 自发自收，覆盖打开契约与 SO_RCVBUF/SO_RCVTIMEO
+      # 回读、非法 IP、重复 bind、未打开即收、超时、close 幂等——回环脚本只走
+      # happy path，失败路径全在这里。默认端口 46311，容器内无冲突。
+      - name: 驱动 UDP 接收自检（38 项）
+        run: |
+          set -e
+          . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
+          . install/setup.sh
+          ros2 run unilidar_driver udp_receiver_selftest
 
       # 压力灌入：PTY 主端按 2 Mbps 灌 3 秒合成报文，同时掺垃圾与伪帧头、
       # 每 2 秒一次 100 ms 读暂停，核验零丢失/零误判/缓冲有界。这一步把
