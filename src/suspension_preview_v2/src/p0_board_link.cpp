@@ -54,6 +54,16 @@ bool P0BoardLink::setTargetHeightMm(int wheel_index, double mm) {
         last_error_ = "高度->PWM 换算得到非有限值（标定表为空？）";
         return false;
     }
+    // 下发前的最后一道闸：标定表在载入时已校验过量程，这里再判一次是为了
+    // 覆盖"表不是从 setPoints/loadCsv 来的"以及将来的插值改动。舵机只认
+    // 500~2500 us，超出直接拒绝，不赌"板端会自己限幅"
+    if (pwm < kMinServoPwmUs || pwm > kMaxServoPwmUs) {
+        last_error_ = "高度 " + std::to_string(mm) + " mm 换算出的 PWM " +
+                      std::to_string(pwm) + " us 超出舵机量程 [" +
+                      std::to_string(kMinServoPwmUs) + ", " +
+                      std::to_string(kMaxServoPwmUs) + "] us，拒绝下发";
+        return false;
+    }
     if (!driver_.set_target_pwm(wheel_index, static_cast<int>(std::lround(pwm)))) {
         last_error_ = driver_.last_error();
         return false;
@@ -78,6 +88,14 @@ bool P0BoardLink::setTargetHeightMm(
         const double p = cal_->pwmForHeight(mm[i]);
         if (!std::isfinite(p)) {
             last_error_ = "高度->PWM 换算得到非有限值（标定表为空？）";
+            return false;
+        }
+        if (p < kMinServoPwmUs || p > kMaxServoPwmUs) {
+            last_error_ = "第 " + std::to_string(i) + " 轮高度 " +
+                          std::to_string(mm[i]) + " mm 换算出的 PWM " +
+                          std::to_string(p) + " us 超出舵机量程 [" +
+                          std::to_string(kMinServoPwmUs) + ", " +
+                          std::to_string(kMaxServoPwmUs) + "] us，拒绝下发";
             return false;
         }
         if (!driver_.set_target_pwm(i, static_cast<int>(std::lround(p)))) {

@@ -154,6 +154,105 @@ inline int run_calibration_checks() {
         std::remove(bad);
     }
 
+    // ---- H. 缺陷回归：表头判定 / 反算方向 / 舵机量程 ----
+    //
+    // 这一段专门盯三类"自检全绿但行为是错的"缺陷。它们的共同点是都不崩溃、
+    // 不报错，只是悄悄给出错误结果，所以必须转成可观测的行为断言。
+    std::printf("\n=== H. 缺陷回归 ===\n");
+    {
+        // H1. 越界数值的数据行不能被当成表头静默跳过。
+        // std::stod("1e400") 抛 out_of_range，原先被 catch(...) 当成"表头"吞掉，
+        // 标定表凭空少一个点而 loadCsv 仍返回成功。
+        const char* over = "calib_checks_overflow.csv";
+        std::FILE* fo = std::fopen(over, "w");
+        if (fo) {
+            std::fprintf(fo, "0.0, 1000.0\n1e400, 1700.0\n40.0, 1900.0\n");
+            std::fclose(fo);
+        }
+        HeightCalibration c;
+        std::string e;
+        check(!c.loadCsv(over, e), "越界数值行必须报错，不能当表头跳过");
+        check(e.find("超出") != std::string::npos, "越界行的错误信息应说明原因");
+        std::remove(over);
+    }
+    {
+        // H2. 表头只允许出现在第一个数据行之前。
+        // 原先"首字段非数值就跳过"对每一行都成立，数据行写坏会被静默丢弃。
+        const char* mid = "calib_checks_midheader.csv";
+        std::FILE* fm = std::fopen(mid, "w");
+        if (fm) {
+            std::fprintf(fm, "0.0, 1000.0\nlabel, 1700.0\n40.0, 1900.0\n");
+            std::fclose(fm);
+        }
+        HeightCalibration c;
+        std::string e;
+        check(!c.loadCsv(mid, e), "数据行之后出现非数值行必须报错");
+        std::remove(mid);
+    }
+    {
+        // H3. 反装舵机（PWM 随高度递减）时反算必须成立。
+        // 原先端点钳位无条件假设 pwm 递增，1750us 会被钳到 0mm（正确值 5mm）。
+        HeightCalibration c;
+        std::string e;
+        check(c.setPoints({{0.0, 2000.0}, {10.0, 1500.0}, {20.0, 1000.0}}, e),
+              "递减 PWM 的标定表应被接受（反装是合法台架结果）");
+        check(near(c.heightForPwm(1750.0), 5.0, 1e-6),
+              "递减表：heightForPwm(1750) 应为 5mm（原实现返回 0mm）");
+        check(near(c.heightForPwm(c.pwmForHeight(5.0)), 5.0, 1e-6),
+              "递减表：height<->pwm 往返一致");
+        check(c.pwmMonotonic(), "递减表应判为单调（反算可靠）");
+    }
+    {
+        // H4. 递增方向的既有行为不能被改坏
+        HeightCalibration c;
+        std::string e;
+        c.setPoints({{0.0, 1000.0}, {10.0, 1500.0}, {20.0, 2000.0}}, e);
+        check(near(c.heightForPwm(1250.0), 5.0, 1e-6), "递增表反算保持正确");
+        check(c.pwmMonotonic(), "递增表应判为单调");
+    }
+    {
+        // H5. 非单调表要如实报告，而不是给出看似正常的错值
+        HeightCalibration c;
+        std::string e;
+        c.setPoints({{0.0, 1500.0}, {10.0, 1000.0}, {20.0, 1700.0}}, e);
+        check(!c.pwmMonotonic(), "非单调表应被 pwmMonotonic 识别");
+    }
+    {
+        // H6. pwm_us 必须落在舵机量程内。原先只查 finite，999999us 能被载入并
+        // 一路下发到硬件（RDS3115 只认 500~2500us）。
+        HeightCalibration c;
+        std::string e;
+        check(!c.setPoints({{0.0, 1500.0}, {40.0, 999999.0}}, e),
+              "超出舵机量程的 pwm 必须拒绝载入");
+        check(!c.setPoints({{0.0, 1500.0}, {40.0, 100.0}}, e),
+              "低于舵机量程的 pwm 必须拒绝载入");
+        check(c.setPoints({{0.0, 500.0}, {40.0, 2500.0}}, e),
+              "量程边界 500/2500us 应被接受");
+    }
+    {
+        // H7. 量程校验不能误伤模板：calibration_template.csv 仍要能载入。
+        // 模板在 examples/ 下，而 ctest 的工作目录不固定（构建目录/源码目录都
+        // 有可能），所以按候选路径依次尝试；找不到就跳过而不是判失败——
+        // 这条是防"校验过严"的护栏，不是被测对象本身
+        const char* candidates[] = {
+            "calibration_template.csv",
+            "src/suspension_preview_v2/examples/calibration_template.csv",
+            "../examples/calibration_template.csv",
+            "../../src/suspension_preview_v2/examples/calibration_template.csv",
+        };
+        for (const char* p : candidates) {
+            if (std::FILE* ft = std::fopen(p, "r")) {
+                std::fclose(ft);
+                HeightCalibration c;
+                std::string e;
+                check(c.loadCsv(p, e),
+                      "标定模板 CSV 应仍能载入（量程校验不可过严）");
+                check(c.size() == 5, "模板应读出 5 个标定点");
+                break;
+            }
+        }
+    }
+
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d\n", checks, fails);
     return fails;

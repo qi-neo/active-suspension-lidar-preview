@@ -451,6 +451,66 @@ CH340 误码率与 P0 板流板仍阻塞在硬件，与 B1 同口径）：
 - v2 纯函数断言 69 → **149** 项（新增 80：31 + 31 + 18），仓库离线断言总数 596 → **676** 项；
   README 中英同步，新增 [docs/calibration.md](docs/calibration.md)
 
+## [3.2.2] - 2026-10-25
+
+### 修复：B3 提交引入的构建断裂与标定层三处静默缺陷
+
+**P0-1 构建断裂：新增纯虚函数未同步测试替身（CI 直接红）**
+
+`4ea1c3e` 给 `ISuspensionDriver` 加了纯虚 `set_target_pwm()`，只补了
+`SerialSuspensionDriver` 的实现，漏了 `control_selftest.cpp` 里的两个测试替身
+（`MockDriver` / `AsyncProbeDriver`）。抽象类无法实例化，`suspension_control_v3`
+的 443 项控制自检**编译不过**——CI 的 `control_selftest` 步骤直接失败。
+该提交的 CHANGELOG 记的是"断言 596 → 676（新增 80）"，实际是把既有的 443 项
+整段打没了：新加 80，静默损失 443。
+
+- 修复：两个测试替身补上 `set_target_pwm()`，与各自的 `set_target_height()`
+  共用同一套成败语义（发送失败模拟、调用计数），而不是随手 `return true`
+- 教训已写进注释：给被广泛实现的接口加纯虚函数是破坏性变更，必须同步所有实现者
+
+**P1-2 标定表 CSV：坏数据行被当成表头静默丢弃**
+
+`loadCsv()` 用 `try { std::stod(首字段) } catch { 跳过 }` 判定表头，而这条规则
+对**每一行**都成立，于是任何首字段解析失败的数据行都被当作表头悄悄跳过；
+`std::stod("1e400")` 抛的 `out_of_range` 也被同一个 `catch(...)` 吞掉。
+实测：`0,1500` / `1e400,1700` / `40,1900` 三行数据读进来只剩 2 个点，
+`loadCsv` 返回成功、无报错，插值结果偏了也看不出来。
+
+- 修复：表头只允许出现在第一个数据行之前；越界数值单独判 `out_of_range` 并报错
+
+**P1-3 反算 `heightForPwm()` 在反装舵机（PWM 随高度递减）时结果完全错误**
+
+端点钳位与二分查找都隐含"pwm 随 mm 递增"的假设，而标定表只保证 mm 严格递增，
+pwm 递减是合法的台架结果（`feedforward_sign` 就是为反装准备的）。
+实测：递减表 `0→2000 / 10→1500 / 20→1000` 上查 `heightForPwm(1750)`
+返回 **0 mm**，正确值是 **5 mm**，且往返一致性检查不成立。
+
+- 修复：先判方向再钳位；二分改为线性扫描（标定表只几十个点，代价可忽略），
+  使任意形状的表都给出确定答案；新增 `pwmMonotonic()` 如实报告表是否可靠
+
+**P1-4 标定表缺舵机量程校验，异常 PWM 可直达硬件**
+
+`setPoints()` 只查了 `std::isfinite(pwm_us)`。RDS3115 mg 只认 **500~2500 μs**
+（见 `hardware/` 下的 BOM 与接线说明），但 `999999` 这种显然写错单位的值能被
+正常载入，`P0BoardLink` 照原样下发——舵机会被顶到机械极限并持续堵转
+（单路 1.6 A，四路 ~10 A）。
+
+- 修复：新增 `kMinServoPwmUs` / `kMaxServoPwmUs` 常量，`setPoints()` 拒绝越界点；
+  `P0BoardLink::setTargetHeightMm()` 在下发前再判一次（硬件边界的纵深防御）
+
+### 自检
+
+- `height_calib_selftest` / `calibration_tool --selftest` 31 → **46** 项
+  （新增 [H] 缺陷回归 15 项：越界行报错、表头位置、递减表反算与往返一致、
+  单调性识别、量程上下界拒绝、模板 CSV 不被误伤）
+- `control_selftest` 恢复可编译，443 项全绿；`p0_link_selftest` 18 项全绿
+- README 计数同步（控制自检 395 → 443，v2 纯函数 149 → 179，仓库总数 676 → 706）
+
+### 保全
+
+改动前已在 `backup/pre-optimization-20261025` 分支与 `baseline/pre-optimization-20261025`
+带注释 tag 上保留旧代码（`4d5a9ba`）。
+
 ## [3.2.1] - 2026-10-15
 
 对应 `suspension_control_v3` 的 3.2.x。主线是前馈取样从"固定距离单点取样"

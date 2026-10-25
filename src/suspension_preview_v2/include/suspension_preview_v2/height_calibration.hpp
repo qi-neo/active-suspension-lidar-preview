@@ -19,6 +19,16 @@
 
 namespace suspension_preview_v2 {
 
+// 舵机脉宽量程（RDS3115 mg，与 hardware/ 下的 BOM 与接线说明一致）：
+// 500~2500 us，中点 1500 us。
+//
+// 标定表里的 pwm_us 必须落在这个区间内。超出区间几乎总是单位写错（把占空比
+// 百分比、毫秒、或原始的定时器计数值当成了微秒），而这类错误不会被"有限值"
+// 检查拦住——它会一路走到硬件，把舵机顶到机械极限并持续堵转（RDS3115 堵转
+// 电流 1.6 A，四路就是 ~10 A）。宁可在载入标定表时就拒绝，也不要"先发出去试试"。
+constexpr double kMinServoPwmUs = 500.0;
+constexpr double kMaxServoPwmUs = 2500.0;
+
 struct CalibPoint {
     double mm{0.0};      // 目标高度 (mm)，相对标定零点，正=升高
     double pwm_us{0.0};  // 实测 PWM 脉宽 (us)
@@ -45,8 +55,17 @@ public:
     double pwmForHeight(double mm) const;
 
     // 反算：PWM(us) -> 目标高度(mm)，用于校验与诊断。表外钳位到最近端点，
-    // 表为空返回 NaN。要求 pwm 随 mm 单调递增（台架实测应满足），否则结果仅近似。
+    // 表为空返回 NaN。
+    //
+    // 方向无关：标定表只保证 mm 严格递增，pwm 随 mm 递增还是递减取决于舵机
+    // 安装方向与连杆机构（反装时递减），两者都是合法的台架结果。反算因此对
+    // 两种方向都成立；pwm 非单调时退化为"最近的标定点的高度"，并在
+    // pwmMonotonic() 里如实报告，便于诊断时识别。
     double heightForPwm(double pwm_us) const;
+
+    // pwm_us 是否随 mm 单调（递增或递减都算）。非单调说明台架实测有异常
+    // （机构死区、回程差、或两个点测反了），反算只能给近似值。
+    bool pwmMonotonic() const;
 
     // 序列化：JSON 数组（供配置加载）或 C++ 表字面量（注入进源码）。
     std::string toJson() const;
