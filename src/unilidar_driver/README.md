@@ -38,7 +38,7 @@ src/unilidar_driver/
 │   ├── decoder_selftest.cpp        离线自检，202 项断言
 │   ├── serial_receiver_selftest.cpp 串口接收自检（PTY 虚拟串口），64 项断言（macOS 63）
 │   ├── serial_stress_selftest.cpp  串口压力自检（PTY 2 Mbps 灌入），14 项断言
-│   ├── node_loop_selftest.cpp      节点主循环自检（实时性与背压），28 项断言
+│   ├── node_loop_selftest.cpp      节点主循环自检（实时性与背压），65 项断言
 │   ├── selftest_fixture.hpp        三个串口自检共用的测试基建
 │   └── udp_probe.cpp               实测定界探针
 ├── launch/unilidar_driver.launch.py

@@ -145,7 +145,7 @@ jobs:
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_stress --seconds 3 --quiet
 
       # 主循环同样过 sanitizer：DriverLoop 的缓冲与拼帧路径要查越界与 UB
-      - name: 驱动节点主循环自检（ASan + UBSan；28 项，2 Mbps 灌入 2 s）
+      - name: 驱动节点主循环自检（ASan + UBSan；65 项，2 Mbps 灌入 2 s）
         run: |
           set -e
           cd src/active-suspension-lidar-preview

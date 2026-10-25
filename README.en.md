@@ -24,10 +24,10 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes seven offline self-test groups (v3 control: 443 checks, driver packet parsing: 151
+> executes seven offline self-test groups (v3 control: 443 checks, driver packet parsing: 202
 > checks, driver serial receive: 64 checks, driver serial stress: 14 checks, driver node
-> loop: 28 checks, v2 pure functions: 196 checks, level calibration: 69
-> checks — 1016 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> loop: 65 checks, v2 pure functions: 196 checks, level calibration: 69
+> checks — 1053 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
@@ -379,10 +379,10 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 All three C++ packages (the historical `suspension_preview` aside) ship offline checks that confirm the pipeline without any hardware:
 
 ```bash
-ros2 run unilidar_driver decoder_selftest           # packet parsing and decoding, 151 checks
+ros2 run unilidar_driver decoder_selftest           # packet parsing and decoding, 202 checks
 ros2 run unilidar_driver serial_receiver_selftest   # serial receive (PTY virtual port), 64 checks (63 on macOS)
 ros2 run unilidar_driver serial_stress_selftest     # serial stress (2 Mbps feed, 60 s default), 14 checks
-ros2 run unilidar_driver node_loop_selftest         # node main loop (latency and backpressure), 28 checks
+ros2 run unilidar_driver node_loop_selftest         # node main loop (latency and backpressure), 65 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
 ros2 run suspension_control_v3 control_selftest    # control and safety logic, 443 checks

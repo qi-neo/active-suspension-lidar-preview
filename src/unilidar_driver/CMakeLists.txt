@@ -48,7 +48,8 @@ add_executable(serial_stress_selftest examples/serial_stress_selftest.cpp)
 target_link_libraries(serial_stress_selftest unilidar_driver_core)
 
 # 节点主循环自检：与 ROS 节点跑同一份 DriverLoop，测吞吐、单轮耗时分布、
-# 定界缓冲深度与超载丢弃/恢复。参数 --seconds 控制时长
+# 定界缓冲深度、超载丢弃/恢复、读错误恢复、深积压读满、空云线与半圈丢弃、
+# 统计复位语义、重复线端到端。参数 --seconds 控制时长
 add_executable(node_loop_selftest examples/node_loop_selftest.cpp)
 target_link_libraries(node_loop_selftest unilidar_driver_core)
 
