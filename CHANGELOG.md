@@ -110,20 +110,20 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
 `gcov` 查下来驱动核心里只剩两个传输层文件没过覆盖率分析：`serial_receiver.cpp`
 81.69%、`udp_receiver.cpp` 67.14%。未覆盖行逐条归因后分三类：用户态构造不出的
 失败（`tcgetattr`/`tcsetattr` 失败分支）、要耗尽 fd 才够得着的硬错误
-（`socket()`/`recvfrom()`）、平台语义分化——驱动自设 `VMIN=0/VTIME=0`，PTY
-无数据时 read 返回 0 而非 EAGAIN，`readSome` 的 EAGAIN 分支两平台均不可达
-（防御代码，如实标注）；而关掉 PTY 主端后读从端，**macOS 返回 0（EOF 语义）、
-Linux 返回 -1/EIO**——真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY 独有的
-仿真语义，这类断言必须 `#ifdef __APPLE__` 分平台写并把原因写进注释，否则换
-平台 CI 就红。
+（`socket()`/`recvfrom()`）、平台语义——驱动自设 `VMIN=0/VTIME=0`，PTY
+无数据时 read 返回 0 而非 EAGAIN（`readSome` 的 EAGAIN 分支是防御代码）。
+设备拔出的 PTY 语义被首轮 CI 实测推翻，见下。
 
-- **串口接收自检 64 → 78**（macOS 63 → 77）。新增 `[9] 打开契约与设备拔出`
-  14 项：空设备名直接失败且 err 提示「空」；EACCES（`chmod 0` 构造）提示
+- **串口接收自检 64 → 81**（macOS 63 → 80）。新增 `[9] 打开契约与设备拔出`
+  17 项：空设备名直接失败且 err 提示「空」；EACCES（`chmod 0` 构造）提示
   「Permission denied（把当前用户加入 dialout 组后重新登录）」，root 下自动
-  跳过（权限位被绕过）；设备拔出分平台断言（macOS n==0/err 空；Linux
-  n==-1/err 含「失败」，CI 的 Linux runner 覆盖 176-177 行），拔出后
+  跳过（权限位被绕过）；设备拔出断言 EOF 语义；fd 失效后 `readSome` 走错误
+  分支（返回 -1、err 点名设备与「失败」，覆盖 176-177 行）——错误分支靠
+  「从外部关掉驱动持有的 fd」模拟句柄变野，为此 `SerialReceiver` 新增
+  `fd()` 访问器（select/poll 型调用方同样用得上，非测试后门）；拔出后
   `isOpen` 保持 true、`device()` 不变，close 后句柄归零、再读返回 -1。
-  行覆盖 81.69% → **84.51%**，剩余未覆盖行的不可构造原因逐条写在自检头注释
+  行覆盖 81.69% → **88.73%**（macOS 本机），剩余未覆盖行的不可构造原因
+  逐条写在自检头注释
 - **UDP 接收自检新建 38 项**（第五套离线自检，`udp_receiver_selftest`）。
   此前 `udp_receiver.cpp` 只有真实回环脚本覆盖 happy path；新建自检补上全部分支：
   打开契约与 `SO_RCVBUF`/`SO_RCVTIMEO` 回读（打印 `getsockopt` 生效值不是
@@ -132,19 +132,28 @@ Linux 返回 -1/EIO**——真机 USB 串口拔出两平台都是错误返回，
   行覆盖 67.14% → **92.86%**，剩余未覆盖行（`socket()`/`recvfrom()` 硬错误）
   需耗尽 fd 才构造得出。与 `tests/udp_loopback_test.sh` 的分工写进头注释：
   脚本=集成测试只走 happy path，自检=单元测试覆盖每条分支含失败路径
-- **变异验证**：九个变异体（串口 3 + UDP 6：空设备名校验删除、EACCES 提示删除、
-  「未打开」err 删除、非法 IP 早退删除、bind 失败返 true、「绑定」提示改名、
-  src_ip 回填删除、超时返 -1、close 不清 recv_buf_bytes_）全部被新断言抓住，
-  且只抓目标断言、不误伤
+- **首轮 CI 翻车与修正（平台语义教训）**：设备拔出的 PTY 语义原按「Linux
+  主端关闭后从端 read 返回 -1/EIO」断言，首轮 CI 在 Ubuntu 24.04 runner
+  （内核 6.8）上两平台实测都是 **EOF（返回 0、err 为空）**——4 个核心库
+  组合与 ROS job 当场挂掉。修正：删掉 `#ifdef __APPLE__` 分平台断言，统一
+  按 EOF 断言（readSome 无法区分 EOF 与暂时无数据，都是 0，POSIX read 在
+  `VMIN=0` 下的固有限定；真机 USB 串口拔出两平台都是错误返回，EOF 是 PTY
+  独有的仿真语义），错误分支改由 fd 失效场景覆盖。**平台语义不能凭文献/
+  记忆断言，要以目标 CI 环境的实测为准；实测与预期不符时，改的是断言和
+  文档，不是事实。**
+- **变异验证**：十个变异体（串口 4 + UDP 6：空设备名校验删除、EACCES 提示删除、
+  「未打开」err 删除、readSome 错误分支 err 填充删除、非法 IP 早退删除、
+  bind 失败返 true、「绑定」提示改名、src_ip 回填删除、超时返 -1、
+  close 不清 recv_buf_bytes_）全部被新断言抓住，且只抓目标断言、不误伤
 - **60 s 长时程复跑**（2 Mbps 灌入 120 MB）：126,637 帧全部解出零丢失、
   `readSome` 调用 136,026 次、缓冲峰值 2,064 B、RSS 峰值 1.7 MB、
   `bad_size 59`（= 注入的伪帧头数，全部按预期拒斥）；双编译器 × 普通/ASan+UBSan
   四组合全过（UDP 自检连跑 5 次零抖动，默认端口 46311 与回环脚本的 46201 不
   冲突，可用 `UDP_SELFTEST_PORT` 覆盖）
-- 离线自检总数 1053 → **1105** 项（串口 64 → 78、新增 UDP 38）；
+- 离线自检总数 1053 → **1108** 项（串口 64 → 81、新增 UDP 38）；
   `ros-ci.yml` 与 `sanitizer.yml` 新增「驱动 UDP 接收自检（38 项）」步骤、
-  串口步骤名 64 → 78；README.en.md 分组计数与总数同步（seven → eight 组）；
-  vendored 副本与独立仓 `bfab9b4` 之后的提交逐字节一致
+  串口步骤名 64 → 81；README.en.md 分组计数与总数同步（seven → eight 组）；
+  vendored 副本与独立仓同源逐字节一致
 
 ### 驱动：四个 P0 级缺陷修复同步（`unilidar_driver`）
 
