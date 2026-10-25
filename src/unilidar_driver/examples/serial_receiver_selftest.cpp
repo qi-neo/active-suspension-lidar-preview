@@ -11,7 +11,9 @@
 //   5. 垃圾与伪帧头重同步：坏字节不得把后续好帧一起带坏；
 //   6. 无数据契约：没有数据时 readSome 返回 0 而不是 -1；
 //   7. 一次写入两帧：连续两帧应连续解出，序号不得误报；
-//   8. IMU 帧同样走串口：类型与整包长都对得上。
+//   8. IMU 帧同样走串口：类型与整包长都对得上；
+//   9. 参数契约与设备拔出（gcov 盲区补齐）：空设备名、权限不足的 dialout
+//      提示、拔出后按平台的 EOF/EIO 语义。
 //
 // 测试基建（PTY、帧构造、边写边读、断言计数）在 selftest_fixture.hpp，
 // 与 serial_stress_selftest 共用；本文件只放场景。
@@ -29,6 +31,11 @@
 // 写注释时不要把命令行以反斜杠结尾：C++ 翻译阶段会先把「反斜杠 + 换行」
 // 拼接掉，// 注释会被续到下一行，GCC 的 -Wcomment 会报 multi-line comment，
 // 叠上 -Werror 直接编译失败（clang 不报，所以只在双编译器 CI 里暴露）。
+
+#include <sys/stat.h>
+
+#include <chrono>
+#include <thread>
 
 #include "selftest_fixture.hpp"
 
@@ -310,6 +317,111 @@ static void test_imu_frame(SelftestLog& log) {
   log.check(frameSeq(out) == 3, "IMU 帧序号应为 3");
 }
 
+// ---------------------------------------------------------------------------
+// 9. 参数契约与设备拔出（gcov 盲区补齐）
+//    未覆盖行来自 gcov 报告：空设备名分支、EACCES 的 dialout 提示、
+//    读错误分支。前两个是真机上"打不开设备"的最常见原因；
+//    拔出语义按平台分化，两种平台共同的契约是不崩、fd 状态不变、
+//    close() 可正常收尾。
+// ---------------------------------------------------------------------------
+static void test_open_contract_and_unplug(SelftestLog& log) {
+  std::printf("[9] 参数契约与设备拔出\n");
+
+  // 9.1 空设备名：参数校验必须先于 ::open。否则 errno 报的是"无此文件"，
+  // 离真正原因（没配设备名）很远，真机排障时会被带偏。
+  {
+    SerialReceiver rx;
+    std::string err;
+    log.check(!rx.open("", 9600, 0, err), "空设备名应打开失败");
+    log.check(!err.empty() && err.find("空") != std::string::npos,
+              "空设备名错误应点明「设备名为空」");
+    log.check(!rx.isOpen(), "空设备名打开失败后不应持有 fd");
+    std::printf("      空设备名: %s\n", err.c_str());
+  }
+
+  // 9.2 权限不足的提示：open 因 EACCES 失败时错误信息必须带上 dialout
+  // 提示——真机上"设备明明存在却打不开"绝大多数是这个原因。
+  // root 绕过权限位，此时打开会成功，按平台跳过（与 B2000000 同一思路）。
+  {
+    const std::string path = "/tmp/unilidar_selftest_noperm";
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (f == nullptr) {
+      std::printf("  [skip] 无法创建权限测试文件: %s\n", std::strerror(errno));
+    } else {
+      std::fclose(f);
+      if (::chmod(path.c_str(), 0) != 0) {
+        std::printf("  [skip] chmod 失败: %s\n", std::strerror(errno));
+        ::unlink(path.c_str());
+        return;
+      }
+      SerialReceiver rx;
+      std::string err;
+      const bool opened = rx.open(path, 9600, 0, err);
+      if (::geteuid() == 0) {
+        std::printf("  [skip] root 运行，权限位不生效\n");
+        if (opened) rx.close();
+      } else {
+        log.check(!opened, "无权限文件应打开失败（EACCES）");
+        log.check(!err.empty() && err.find("dialout") != std::string::npos,
+                  "EACCES 错误应提示把用户加入 dialout 组");
+        std::printf("      无权限: %s\n", err.c_str());
+      }
+      ::unlink(path.c_str());
+    }
+  }
+
+  // 9.3 设备拔出：关掉 PTY 主端 = 模拟 USB 线被拔 / CH340 掉电。
+  // 从端 read 的行为按平台分化：PTY 仿真下 macOS 返回 0（EOF 语义，
+  // 表现为"没有数据"），Linux 返回 -1/EIO。（真机 USB 串口拔出两个
+  // 平台都是错误返回，EOF 是 PTY 独有的仿真语义。）两种平台共同的
+  // 契约：不崩、fd 状态不变、close() 可正常收尾；Linux 上额外走
+  // readSome 的错误分支，err 必须点名设备。
+  {
+    SerialFixture fx;
+    std::string err;
+    if (!fx.setup(9600, err)) {
+      log.check(false, "创建 PTY 并打开从端应成功");
+      return;
+    }
+    // 先正常收一帧，确认夹具本身是好的（拔出前的基准）
+    const std::vector<std::uint8_t> frame = makeCloudFrame(5, 2);
+    PacketParser parser;
+    bool err_seen = false;
+    log.check(pushAndPump(fx.pty, fx.rx, parser, frame.data(), frame.size(), 5000,
+                          &err_seen) == frame.size(),
+              "拔出前应能正常收发");
+
+    // 关主端后把 fixture 的 master 置 -1，析构不会再重复关闭
+    ::close(fx.pty.master);
+    fx.pty.master = -1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::vector<std::uint8_t> buf(64);
+    err.clear();
+    const int n = fx.rx.readSome(buf.data(), buf.size(), err);
+#ifdef __APPLE__
+    log.check(n == 0, "macOS：主端关闭后读从端应返回 0（EOF 语义）");
+    log.check(err.empty(), "macOS：EOF 不是错误，err 应为空");
+    std::printf("      macOS 拔出后读: n=0（EOF 语义）\n");
+#else
+    log.check(n == -1, "Linux：主端关闭后读从端应返回 -1（EIO）");
+    log.check(!err.empty() && err.find("失败") != std::string::npos,
+              "Linux：读错误信息应点名设备与「失败」");
+    std::printf("      Linux 拔出后读: %s\n", err.c_str());
+#endif
+    log.check(fx.rx.isOpen(), "拔出后 isOpen() 应保持 true（错误在 read 时才暴露）");
+    log.check(fx.rx.device() == fx.pty.slave_name, "拔出后 device() 不应变化");
+
+    fx.rx.close();
+    log.check(!fx.rx.isOpen(), "拔出后 close() 应正常收尾");
+    log.check(fx.rx.device().empty(), "close 后 device() 应清空");
+    log.check(fx.rx.baud() == 0, "close 后 baud() 应归零");
+    err.clear();
+    log.check(fx.rx.readSome(buf.data(), buf.size(), err) == -1,
+              "close 之后再读仍应返回 -1");
+  }
+}
+
 int main() {
   std::printf("unilidar_driver 串口接收离线自检（PTY 虚拟串口）\n\n");
   SelftestLog log;
@@ -321,6 +433,7 @@ int main() {
   test_no_data(log);
   test_two_frames_one_write(log);
   test_imu_frame(log);
+  test_open_contract_and_unplug(log);
 
   if (log.report() != 0) return 1;
   std::printf("结论：SerialReceiver 的打开/读取/关闭行为与 packet_parser 的定界"
