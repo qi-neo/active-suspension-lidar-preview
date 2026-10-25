@@ -48,10 +48,16 @@ add_executable(serial_stress_selftest examples/serial_stress_selftest.cpp)
 target_link_libraries(serial_stress_selftest unilidar_driver_core)
 
 # 节点主循环自检：与 ROS 节点跑同一份 DriverLoop，测吞吐、单轮耗时分布、
-# 定界缓冲深度、超载丢弃/恢复、读错误恢复、深积压读满、空云线与半圈丢弃、
+# 定界缓冲深度、超载丢弃与恢复、读错误恢复、深积压读满、空云线与半圈丢弃、
 # 统计复位语义、重复线端到端。参数 --seconds 控制时长
 add_executable(node_loop_selftest examples/node_loop_selftest.cpp)
 target_link_libraries(node_loop_selftest unilidar_driver_core)
+
+# UDP 接收自检：收发两端都建在本机回环上，覆盖 UdpReceiver 的每条分支
+# （打开契约、IP 配错、端口被占、未打开即收、src_ip 回显、超时契约）。
+# 端口默认 46311，可用 UDP_SELFTEST_PORT 覆盖
+add_executable(udp_receiver_selftest examples/udp_receiver_selftest.cpp)
+target_link_libraries(udp_receiver_selftest unilidar_driver_core)
 
 # ROS 节点：只做参数、收包与发布的接线
 add_executable(unilidar_driver_node src/unilidar_driver_node.cpp)
@@ -67,6 +73,7 @@ install(TARGETS
   serial_receiver_selftest
   serial_stress_selftest
   node_loop_selftest
+  udp_receiver_selftest
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config
