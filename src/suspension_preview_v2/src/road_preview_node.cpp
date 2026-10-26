@@ -88,9 +88,14 @@ public:
             publish_static_tf();
         }
 
-        // 点云用 SensorDataQoS，才与雷达的 BEST_EFFORT 发布方匹配
+        // 点云用 SensorDataQoS 的 best_effort 才与雷达发布方匹配；但 depth
+        // 显式收到 1——SensorDataQoS 默认 depth=5，处理慢时队列里会压着最多
+        // 5 帧旧点云。对预瞄系统，旧帧是最坏的数据：它描述的是车已经开过去
+        // 的路面。宁可丢帧保新鲜，也不要带着 500 ms 前的路面做前馈
+        rclcpp::QoS cloud_qos(rclcpp::KeepLast(1));
+        cloud_qos.best_effort().durability_volatile();
         sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic_, rclcpp::SensorDataQoS(),
+            cloud_topic_, cloud_qos,
             std::bind(&RoadPreviewNode::cloud_callback, this, std::placeholders::_1));
 
         if (level_calib_enable_) {

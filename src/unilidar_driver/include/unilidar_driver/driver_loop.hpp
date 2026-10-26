@@ -64,8 +64,18 @@ class DriverLoop {
   std::size_t buffered() const { return parser_.buffered(); }
   std::size_t bufferedLimit() const { return cfg_.max_buffered; }
 
+  // 单轮耗时样本上限。
+  //
+  // 此前 poll_ns_ 只 push 不清：500 Hz 轮询下跑一天就是 4320 万个样本
+  // （约 345 MB），而 pollNsQuantile() 每次调用还要完整拷贝并排序整个
+  // vector —— 跑久了诊断日志本身会变成秒级卡顿。封顶后用环形覆盖，
+  // vector 容量在第 4096 个样本后不再增长，也不再有 realloc。
+  static constexpr std::size_t kMaxPollSamples = 4096;
+
   // 单轮耗时分位数（ns），q ∈ [0,1]；无样本返回 0。成本 O(n log n)，只给诊断用。
   std::uint64_t pollNsQuantile(double q) const;
+  // 当前持有的耗时样本数，恒 ≤ kMaxPollSamples。供自检断言封顶行为。
+  std::size_t pollSampleCount() const { return poll_ns_.size(); }
   std::uint64_t pollNsP50() const { return pollNsQuantile(0.50); }
   std::uint64_t pollNsP99() const { return pollNsQuantile(0.99); }
   std::uint64_t pollNsMax() const;
@@ -92,8 +102,14 @@ class DriverLoop {
   PacketParser parser_;
   DecodeStats dstats_;
   LoopStats stats_;
-  std::vector<std::uint64_t> poll_ns_;  // 每轮耗时样本，供分位数使用
+  std::vector<std::uint64_t> poll_ns_;  // 每轮耗时样本，封顶 kMaxPollSamples 后环形覆盖
+  std::size_t poll_ns_cursor_{0};       // 环形覆盖写游标（仅在已满时使用）
   std::vector<std::uint8_t> buf_;
+
+  // 复用缓冲：此前 drainFrames 与 handleCloud 各自声明局部 vector，
+  // 每帧（180 线/s）都重新分配。提成成员后容量只增长一次。
+  std::vector<std::uint8_t> frame_buf_;   // 定界后的整帧字节
+  std::vector<PointXYZIT> pts_buf_;       // 单条扫描线的解码输出
 
   std::vector<PointXYZIT> pending_;     // 尚未拼满一帧的点
   std::size_t pending_scans_{0};        // 已拼入的扫描线条数

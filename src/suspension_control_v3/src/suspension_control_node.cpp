@@ -48,8 +48,17 @@ public:
         check_params();
         build_loop();
 
+        // 路面剖面只保留最新一帧。
+        //
+        // SensorDataQoS 默认 depth=5，处理慢时最多积压 5 帧（10 Hz 下 = 500 ms）。
+        // 剖面的价值在于"车前方此刻的路面"，积压的旧剖面只会把前馈算到已经
+        // 开过去的位置上——宁可丢帧保新鲜。IMU 反而保留 SensorDataQoS 的
+        // depth=5：姿态滤波依赖采样的连续性，丢样本会改变滤波的动态特性，
+        // 而 IMU 消息只有几十字节，5 帧的内存开销可以忽略
+        rclcpp::QoS profile_qos(rclcpp::KeepLast(1));
+        profile_qos.best_effort().durability_volatile();
         profile_sub_ = create_subscription<suspension_preview_v2::msg::RoadProfile>(
-            profile_topic_, rclcpp::SensorDataQoS(),
+            profile_topic_, profile_qos,
             std::bind(&SuspensionControlNode::on_profile, this, std::placeholders::_1));
         imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
             imu_topic_, rclcpp::SensorDataQoS(),
