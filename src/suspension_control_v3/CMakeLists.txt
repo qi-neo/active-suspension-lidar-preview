@@ -8,6 +8,51 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ---- 构建类型与优化级别 ----
+# colcon build 不带 --cmake-args 时 CMAKE_BUILD_TYPE 为空，CMake 会按「无优化
+# 标志」编译，等同 -O0。本仓库的点云解码、PCL 模板与 Eigen 矩阵乘在开启优化
+# 前后差 3-5 倍，所以这里给一个显式默认值；命令行仍可用
+#   colcon build --cmake-args -DCMAKE_BUILD_TYPE=Debug
+# 覆盖。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "构建类型：Release/Debug/RelWithDebInfo" FORCE)
+  message(STATUS "${PROJECT_NAME}: 未指定 CMAKE_BUILD_TYPE，默认 Release（-O3 -DNDEBUG）")
+endif()
+
+# -fno-math-errno：数学函数不再写 errno，可省去调用点的存取，且不改变 NaN/Inf
+# 语义。**刻意不开 -ffast-math**：input_validator 与 control_loop 用
+# std::isfinite() 拦 NaN/Inf，-ffast-math 允许编译器假设"无 NaN 无 Inf"并删掉
+# 这些校验，等于把坏数据防护去掉。要浮点提速请只在明确不需要该校验的叶子
+# 目标上单独加，不要写进全局选项。
+add_compile_options(-fno-math-errno)
+
+# -mcpu 只在 aarch64 上给。x86 CI 容器加了会直接编译失败（无效的 -mcpu 值）。
+# cortex-a55 是顺序双发射核，编译器的调度模型与小 L1I 假设都与通用 armv8-a
+# 不同，这决定它会不会为缩短代码体积而牺牲指令级并行。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-mcpu=cortex-a55" COMPILER_HAS_CORTEX_A55)
+  if(COMPILER_HAS_CORTEX_A55)
+    add_compile_options(-mcpu=cortex-a55)
+    message(STATUS "${PROJECT_NAME}: 启用 -mcpu=cortex-a55")
+  endif()
+endif()
+
+# LTO 默认关闭：板端（4×A55 + 8 GB）开 LTO 后链接期的内存峰值可能触发 OOM，
+# 且与 ament 的导出目标混用时偶发符号问题。开发机上按需开启。
+option(ENABLE_LTO "开启链接时优化（开发机可用，板端编译可能内存不足）" OFF)
+if(ENABLE_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT _lto_ok OUTPUT _lto_msg)
+  if(_lto_ok)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+    message(STATUS "${PROJECT_NAME}: 启用 LTO")
+  else()
+    message(WARNING "${PROJECT_NAME}: 编译器不支持 LTO，已忽略（${_lto_msg}）")
+  endif()
+endif()
+
 # 让 ctest/colcon test 真正执行离线自检。
 # 之前本包没有注册任何测试，CI 里那句 `colcon test-result` 是空转的装饰
 if(BUILD_TESTING)
@@ -37,6 +82,7 @@ add_library(suspension_control_core STATIC
   src/temporal_fuser.cpp
   src/param_check.cpp
   src/command_sink.cpp
+  src/realtime.cpp
 )
 set_target_properties(suspension_control_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(suspension_control_core PUBLIC

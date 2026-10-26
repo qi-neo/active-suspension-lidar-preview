@@ -55,6 +55,7 @@
 #include "suspension_control_v3/msg_convert.hpp"
 #include "suspension_control_v3/temporal_fuser.hpp"
 #include "suspension_control_v3/param_check.hpp"
+#include "suspension_control_v3/realtime.hpp"
 
 // 让 FIR 的"时间步长折算成距离"恰好等于剖面格距的车速：
 //   v × control_period_s = spacing  =>  v = 0.05 / 0.005 = 10 m/s
@@ -3685,6 +3686,61 @@ void test_loop_nonblocking_downlink() {
                 loop.status().commands_sent);
 }
 
+// 43. 实时性配置：接口契约与越界输入
+//
+// 这组断言刻意不假设"一定有权限"：CI 容器可能是 root（各项真生效），
+// 开发者机器是普通用户（各项全失败），macOS 则根本没有这些接口。
+// 因此只断言**无论成败都成立**的契约——返回值可见、失败必有原因、
+// 越界输入不崩且不谎报成功。
+void test_realtime_setup() {
+    section("43. 实时性配置：接口契约与越界输入");
+
+    suspension_control_v3::RealtimeGuard guard;
+    suspension_control_v3::RealtimeConfig cfg;
+    cfg.priority = 80;
+    cfg.cpu = -1;
+    const auto st = guard.apply(cfg);
+
+    check(guard.status().summary() == st.summary(), "apply() 与 status() 视图一致");
+    check(!st.summary().empty(), "汇总串非空");
+    check(st.summary().find("SCHED_FIFO") != std::string::npos, "汇总串含调度策略项");
+
+    // summary() 靠 affinity_note 是否为空区分「没请求」与「请求了但失败」，
+    // 这个契约一旦破坏，日志就会把"没配绑核"显示成"绑核失败"
+    check(st.affinity_note.empty(), "未请求绑核时 note 为空");
+
+    // 成功要说出生效方式，失败要说出原因——两者都不许为空
+    check(!st.priority_applied || !st.priority_note.empty(),
+          "SCHED_FIFO 生效时必须记录优先级");
+    check(st.priority_applied || !st.priority_note.empty(),
+          "SCHED_FIFO 未生效时必须给出原因");
+    check(st.priority_applied || st.memory_locked || st.idle_blocked || !st.any_applied(),
+          "any_applied() 与各分项自洽");
+
+    // 越界优先级：内核会 EINVAL，实现应先按 sched_get_priority_max 钳位，
+    // 而不是把错值直接传下去（错误信息会指向错误的原因）
+    suspension_control_v3::RealtimeGuard g2;
+    suspension_control_v3::RealtimeConfig bad;
+    bad.priority = 999;
+    bad.lock_memory = false;
+    bad.block_idle = false;
+    const auto s2 = g2.apply(bad);
+    check(!s2.priority_note.empty(), "越界优先级：给出说明而非静默");
+    check(s2.summary().find("SCHED_FIFO") != std::string::npos, "越界优先级不破坏汇总串");
+
+    // 不存在的 CPU 编号：不得崩，也不得谎报成功
+    suspension_control_v3::RealtimeGuard g3;
+    suspension_control_v3::RealtimeConfig bad_cpu;
+    bad_cpu.cpu = 9999;
+    bad_cpu.lock_memory = false;
+    bad_cpu.block_idle = false;
+    const auto s3 = g3.apply(bad_cpu);
+    check(!s3.affinity_applied, "不存在的 CPU 编号不得报告绑核成功");
+    check(!s3.affinity_note.empty(), "绑核失败必须给出原因");
+
+    std::printf("  本机实测：%s\n", st.summary().c_str());
+}
+
 int main() {
     std::printf("suspension_control_v3 离线自检\n");
     std::printf("（控制环 200 Hz，剖面 10 Hz，无 ROS / 无硬件）\n");
@@ -3731,6 +3787,7 @@ int main() {
     test_saturation_reported_in_status();
     test_async_command_sink();
     test_loop_nonblocking_downlink();
+    test_realtime_setup();
 
     std::printf("\n----------------------------------------\n");
     std::printf("检查项 %d，失败 %d -> %s\n", g_checks, g_failed,
