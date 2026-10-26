@@ -25,8 +25,8 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
 > executes offline self-test groups (v3 control: 454 checks, driver packet parsing: 202
-> checks, driver transport & main loop: 197 checks, v2 pure functions: 322
-> checks — 1175 in total; Linux adds one 2 Mbps serial assertion). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> checks, driver transport & main loop: 203 checks, v2 pure functions: 322
+> checks — 1181 in total; Linux adds one 2 Mbps serial assertion). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is

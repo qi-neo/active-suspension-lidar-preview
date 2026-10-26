@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>suspension_preview_v2</name>
-  <version>2.0.1</version>
+  <version>2.0.2</version>
   <description>
     订阅 UniLiDAR 点云，提取左右轮迹路面高程剖面，经串口下发给主动悬架控制器，
     并发布 ROS 话题与 rviz 可视化。点云解析、输出、悬架驱动均已封装为接口。
