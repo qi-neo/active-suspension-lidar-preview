@@ -558,8 +558,11 @@ Release，且 `-mcpu` 在 macOS 上不再被误加。
 而 CHANGELOG 已有 3.2.2），本版一并对齐：
 
 - `suspension_control_v3` 3.2.1 → **3.2.3**
-- `unilidar_driver` 1.0.1 → **1.1.0**（新增 `lowLatencyEnabled()` 等公开方法）
 - `suspension_preview_v2` 2.0.0 → **2.0.1**（默认构建类型变化对产物可见）
+- `unilidar_driver` **保持 1.0.1**：本包里新增的 `lowLatencyEnabled()` 已同步到
+  独立仓库 `qi-neo/unilidar-driver` 的 `[未发布]`（对应 1.1.x）段，但该仓库的
+  1.1.x 还有未发布的协议核对与覆盖率内容，不宜由主仓补丁版抢跑版本号。
+  主仓这份是快照副本，版本号与独立仓库当前发布版保持一致
 
 ## [3.2.2] - 2026-10-25
 
