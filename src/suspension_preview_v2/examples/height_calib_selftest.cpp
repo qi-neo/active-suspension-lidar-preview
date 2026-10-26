@@ -1,7 +1,7 @@
 // 高度标定模块的离线 CTest 自检。
 //
 // 不依赖 ROS / PCL / 串口硬件，可直接 g++ 编译：
-//   g++ -std=c++17 -I include -I examples \
+//   g++ -std=c++17 -I include -I examples
 //     examples/height_calib_selftest.cpp src/height_calibration.cpp
 //
 // 检查逻辑统一放在 calibration_checks.hpp，供本文件与 calibration_tool --selftest

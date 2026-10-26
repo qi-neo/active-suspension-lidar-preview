@@ -6,7 +6,7 @@
 //   calibration_tool --selftest              运行内置标定自检，退出码 0/1
 //
 // 编译：
-//   g++ -std=c++17 -I include -I examples \
+//   g++ -std=c++17 -I include -I examples
 //     examples/calibration_tool.cpp src/height_calibration.cpp
 
 #include <cctype>

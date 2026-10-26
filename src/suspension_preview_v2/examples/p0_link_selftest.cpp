@@ -4,10 +4,10 @@
 // 不依赖真机；若运行环境无 PTY（极少数裁剪过的容器），则跳过并返回 0，避免 CI 误挂。
 //
 // 编译（双编译器均可）：
-//   g++ -std=c++17 -Wall -Wextra -Wpedantic -pthread \
-//     -I include -I examples \
-//     examples/p0_link_selftest.cpp src/p0_board_link.cpp \
-//     src/suspension_driver.cpp src/serial_port.cpp \
+//   g++ -std=c++17 -Wall -Wextra -Wpedantic -pthread
+//     -I include -I examples
+//     examples/p0_link_selftest.cpp src/p0_board_link.cpp
+//     src/suspension_driver.cpp src/serial_port.cpp
 //     src/protocol.cpp src/height_calibration.cpp
 
 #include <atomic>

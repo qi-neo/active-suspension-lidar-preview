@@ -1,5 +1,5 @@
 // v2 参数校验纯函数自检：不依赖 ROS / PCL，可在无 PCL 机器上直接编译验证
-//   g++ -std=c++17 -I include examples/param_selftest.cpp \
+//   g++ -std=c++17 -I include examples/param_selftest.cpp
 //       src/param_check.cpp src/serial_port.cpp -o /tmp/param
 //
 // 覆盖：自洽参数应全部通过、默认 YAML 会暴露的"地面窗 ≥ 障碍阈值"矛盾、
