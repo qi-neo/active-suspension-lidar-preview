@@ -24,14 +24,13 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes eight offline self-test groups (v3 control: 443 checks, driver packet parsing: 202
-> checks, driver serial receive: 81 checks, driver UDP receive: 38 checks, driver serial stress: 14 checks, driver node
-> loop: 65 checks, v2 pure functions: 196 checks, level calibration: 69
-> checks — 1108 in total). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> executes offline self-test groups (v3 control: 454 checks, driver packet parsing: 202
+> checks, driver transport & main loop: 197 checks, v2 pure functions: 322
+> checks — 1175 in total; Linux adds one 2 Mbps serial assertion). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
-> complete and runnable (443 checks).
+> complete and runnable (454 checks).
 
 ## Overview
 
@@ -323,7 +322,7 @@ The effective speed, sample distance and frame age are written into `ControlStat
 every tick (`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`),
 so "how far ahead did the feedforward actually look" is visible during integration.
 
-443 offline self-test checks, requiring neither ROS nor hardware:
+454 offline self-test checks, requiring neither ROS nor hardware:
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -388,7 +387,7 @@ ros2 run unilidar_driver serial_stress_selftest     # serial stress (2 Mbps feed
 ros2 run unilidar_driver node_loop_selftest         # node main loop (latency and backpressure), 65 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
-ros2 run suspension_control_v3 control_selftest    # control and safety logic, 443 checks
+ros2 run suspension_control_v3 control_selftest    # control and safety logic, 454 checks
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
@@ -616,6 +615,119 @@ Core methods of the attitude controller:
 - **Kinematic decoupling and hysteresis PWM**: removes high-frequency chatter at the end effector.
 
 The original paper is a PDF; a text version is under `docs/paper/` (in Chinese).
+
+## Performance and real-time
+
+Three changes in 3.2.3 that touch no algorithm and no interface, but decide
+whether the algorithms above can actually reach their design performance.
+
+### Where the bottleneck is
+
+At the rates this project actually runs at, compute is over-provisioned:
+
+| Metric | Actual | Platform | Utilisation |
+|--------|--------|----------|-------------|
+| Serial input | 188 KB/s (180 lines/s × 1044 B) | 2 Mbps link | — |
+| Point decoding | 54,000 points/s | 4×A55 @1.6 GHz | < 5% of one core |
+| Cloud publish | 1.3 MB/s (10 Hz × 130 KB) | LPDDR4X 25.6 GB/s | 0.005% |
+| Control loop | 200 Hz, ~50 FMAs per tick | same | < 1% |
+
+Micro-benchmarks (M1, `-O2`) give attractive speedups on the hot spots — CRC32
+via slice-by-8 **17.6×**, per-point trig via recurrence **2.4×**, binning via
+flat CSR + `nth_element` **5.6×** — but scaled to the A55 they save only
+**~2.3% of one core** in total. **The real bottleneck is timing determinism,
+not throughput.**
+
+### Build defaults to Release
+
+`colcon build` without `--cmake-args` leaves `CMAKE_BUILD_TYPE` empty, and CMake
+then compiles with **no optimisation flag at all** (equivalent to `-O0`). None of
+the four packages used to set it, so PCL templates, Eigen matrix products and the
+decoding formulas were never inlined — typically a 3–5× gap versus `-O3`.
+
+All four packages now default to `Release` when unspecified; the command line
+still overrides:
+
+```bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Debug   # when you need to debug
+```
+
+`-ffast-math` is **deliberately not enabled**: `input_validator` and
+`control_loop` use `std::isfinite()` to reject NaN/Inf, and `-ffast-math` lets
+the compiler assume "no NaN, no Inf" and delete those checks — which removes the
+bad-data guard entirely.
+
+`-mcpu=cortex-a55` applies only on Linux + aarch64 (AppleClang accepts the flag
+on macOS too, but compiling for Apple Silicon with an A55 scheduling model is
+wrong). LTO is opt-in via `-DENABLE_LTO=ON`, off by default because link-time
+memory on the board (4×A55 + 8 GB) can hit OOM.
+
+### Real-time control thread
+
+The 200 Hz loop runs on the single-threaded `rclcpp::spin()` executor, sharing
+one queue with the profile, IMU and status callbacks. Any callback taking a few
+milliseconds makes the control period late by a few milliseconds — and rclcpp
+timers do not compensate, so the late tick simply slips. `max_step_dt` keeps the
+duration-based predicates from misfiring, but **the `dt` fed to the control law
+is already wrong**.
+
+On startup the node promotes the main thread to `SCHED_FIFO`, calls `mlockall`,
+disables CPU idle deep sleep, and optionally pins to a core. **No extra thread is
+created on purpose**: `SuspensionControlLoop` holds no mutex — `submit_*` is
+written by subscription callbacks and `step` is read by the timer, which is safe
+only because of the single-threaded executor. Moving `step` to its own thread
+would be a genuine data race. Since `rclcpp::spin()` is single-threaded and the
+timer callback already runs on the main thread, promoting that thread achieves
+the same determinism without touching the concurrency model.
+
+Every item is best-effort: failure logs a WARN with the remedy and does not
+abort. To actually enable them, pick one:
+
+```bash
+# 1) capabilities on the executable
+sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' \
+  install/suspension_control_v3/lib/suspension_control_v3/suspension_control_node
+
+# 2) systemd unit
+#   LimitMEMLOCK=infinity
+#   AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+```
+
+With CPU isolation on the board (`/boot/firmware/cmdline.txt`):
+
+```
+isolcpus=3 nohz_full=3 rcu_nocbs=3
+```
+
+then set `realtime_cpu: 3` so the control thread owns that core.
+
+### Serial low_latency
+
+CH340-class USB-serial adapters batch received bytes before reporting them,
+adding roughly 16 ms of buffer latency. The driver now tries
+`/sys/bus/usb-serial/devices/<tty>/low_latency = 1` on open and skips silently
+if the attribute is absent. **Frame age drops by about 15 ms**, which at 2 m/s
+is 30 mm of road-profile localisation.
+
+### Verifying the change
+
+Always capture a baseline first, otherwise the improvement cannot be proven:
+
+```bash
+# did real-time scheduling take effect? startup log prints each item:
+#   control thread switched to SCHED_FIFO (priority=80)
+#   CPU idle deep sleep disabled (cpu_dma_latency=0)
+#   realtime summary: SCHED_FIFO on | memory locked on | idle blocked on | affinity not requested
+
+# did serial low_latency take effect?
+cat /sys/bus/usb-serial/devices/ttyUSB0/low_latency   # 1 = enabled
+
+# is -O3 really in the build?
+grep -r "CMAKE_CXX_FLAGS_RELEASE" build/*/CMakeCache.txt
+```
+
+Jitter histograms (p99.9 and max, before/after) have not been measured on the
+board yet; see the "unverified" section of [CHANGELOG](CHANGELOG.md) 3.2.3.
 
 ## Downlink bandwidth
 
