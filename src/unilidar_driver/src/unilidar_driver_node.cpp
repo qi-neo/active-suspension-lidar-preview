@@ -110,6 +110,20 @@ private:
                   serial_device_.c_str(), serial_baud_, cloud_topic_.c_str(),
                   cloud_frame_.c_str(), cloud_scan_num_, imu_topic_.c_str(), imu_frame_.c_str(),
                   quat_order_str_.c_str());
+      // 低延迟是否生效值得单独报一行：它不是"能不能跑"的问题，而是
+      // "帧龄凭空多 16 ms"的问题，后者只影响预瞄精度、不会报错，
+      // 不注意就永远发现不了。
+      if (serial_rx_.lowLatencyEnabled()) {
+        RCLCPP_INFO(get_logger(), "串口低延迟已开启：%s",
+                    serial_rx_.lowLatencyNote().c_str());
+      } else {
+        RCLCPP_INFO(get_logger(),
+                    "串口低延迟未开启（%s）：CH340 默认攒批约 16 ms，"
+                    "开启后帧龄可再降约 15 ms；该属性不存在时属正常，不影响收发",
+                    serial_rx_.lowLatencyNote().empty()
+                        ? "设备或内核无 low_latency 属性"
+                        : serial_rx_.lowLatencyNote().c_str());
+      }
       if (!source_ip_.empty()) {
         RCLCPP_WARN(get_logger(),
                     "transport=serial 时 source_ip 不生效（串口没有来源地址概念），已忽略。");

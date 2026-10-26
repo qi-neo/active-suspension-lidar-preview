@@ -67,6 +67,42 @@ const BaudEntry kBaudTable[] = {
 #endif
 };
 
+// USB 转串口芯片默认"攒一批再上报"，ftdi/ch341 的缓冲延迟都在毫秒量级
+// （CH340 实测约 16 ms）。L1 的预瞄数据对帧龄敏感，这 16 ms 是纯粹白送的。
+// ch341 驱动自较新内核起提供 low_latency 属性，写 1 即改为逐包上报。
+//
+// 不能用 TIOCSSERIAL + ASYNC_LOW_LATENCY：那是 8250 平台串口的标志，
+// usb-serial 驱动不读它，设了不生效。必须走 sysfs。
+void enableLowLatency(const std::string& device, bool* enabled, std::string* note) {
+  *enabled = false;
+  note->clear();
+#if defined(__linux__)
+  // /dev/ttyUSB0 -> ttyUSB0，拼出 usb-serial 设备的 sysfs 目录
+  const std::size_t slash = device.find_last_of('/');
+  const std::string name = (slash == std::string::npos) ? device : device.substr(slash + 1);
+  if (name.empty()) return;
+
+  const std::string path = "/sys/bus/usb-serial/devices/" + name + "/low_latency";
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+  if (fd < 0) {
+    // 属性不存在是常态：板载 UART、老内核、或经 /dev/serial/by-id 传入的
+    // 长设备名都会走到这里。不是错误，只是少了这项优化。
+    return;
+  }
+  const char one = '1';
+  const ssize_t n = ::write(fd, &one, 1);
+  ::close(fd);
+  if (n == 1) {
+    *enabled = true;
+    *note = "low_latency=1（" + path + "）";
+  } else {
+    *note = "low_latency 写入失败：" + path;
+  }
+#else
+  (void)device;
+#endif
+}
+
 }  // namespace
 
 bool serialBaudSupported(int baud) {
@@ -153,6 +189,9 @@ bool SerialReceiver::open(const std::string& device, int baud, int read_timeout_
 
   device_ = device;
   baud_ = baud;
+  // 放在最后：设备已确认可用、termios 已生效，这时改上报策略才有意义。
+  // 失败不影响收发，只是保留了默认的 16 ms 攒批延迟。
+  enableLowLatency(device, &low_latency_enabled_, &low_latency_note_);
   return true;
 }
 
@@ -163,6 +202,8 @@ void SerialReceiver::close() {
   }
   device_.clear();
   baud_ = 0;
+  low_latency_enabled_ = false;
+  low_latency_note_.clear();
 }
 
 int SerialReceiver::readSome(std::uint8_t* buf, std::size_t cap, std::string& err) {
