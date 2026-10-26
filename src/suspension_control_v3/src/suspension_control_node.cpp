@@ -29,6 +29,7 @@
 #include "suspension_control_v3/control_loop.hpp"
 #include "suspension_control_v3/msg_convert.hpp"
 #include "suspension_control_v3/param_check.hpp"
+#include "suspension_control_v3/realtime.hpp"
 
 namespace {
 
@@ -130,9 +131,63 @@ public:
         } else {
             RCLCPP_INFO(get_logger(), "语义预瞄已关闭（use_semantic_preview=false）");
         }
+
+        // 放在 init() 末尾：此时参数已声明、定时器已建好，且 mlockall 的
+        // MCL_CURRENT 会把此前所有初始化期分配一并锁定，不需要再提前。
+        apply_realtime_settings();
     }
 
 private:
+    // 把当前线程（即 rclcpp::spin 所在的主线程）提到 SCHED_FIFO 并锁住内存。
+    //
+    // 为什么不另起线程跑控制环：SuspensionControlLoop 内部没有任何互斥量，
+    // submit_profile / submit_attitude 由订阅回调写、step 由定时器读；
+    // 单线程 executor 下这种"无锁"是安全的，一旦把 step 挪到独立线程就会
+    // 变成真实的数据竞争。而 rclcpp::spin() 本身是单线程的，定时器回调
+    // 本来就在主线程上跑，所以给主线程设实时调度即可达成同样的确定性，
+    // 且完全不触碰并发模型。
+    void apply_realtime_settings() {
+        if (!enable_realtime_) {
+            RCLCPP_INFO(get_logger(),
+                        "实时调度未启用（enable_realtime=false），控制环按默认 CFS 调度运行");
+            return;
+        }
+
+        suspension_control_v3::RealtimeConfig cfg;
+        cfg.priority = realtime_priority_;
+        cfg.cpu = realtime_cpu_;
+        const auto st = realtime_guard_.apply(cfg);
+
+        // 逐项报告，失败项一律 WARN 并给出补救办法——静默降级会让人误以为
+        // 已经跑在实时配置下，进而把抖动归因到"算法不行"。
+        if (st.priority_applied) {
+            RCLCPP_INFO(get_logger(), "控制线程已切到 SCHED_FIFO（%s）",
+                        st.priority_note.c_str());
+        } else {
+            RCLCPP_WARN(get_logger(),
+                        "SCHED_FIFO 未生效：%s。控制环仍可运行，但 200 Hz 周期抖动会明显变大",
+                        st.priority_note.c_str());
+        }
+        if (st.memory_locked) {
+            RCLCPP_INFO(get_logger(), "内存已锁定（%s）", st.memory_note.c_str());
+        } else {
+            RCLCPP_WARN(get_logger(), "内存锁定未生效：%s", st.memory_note.c_str());
+        }
+        if (st.idle_blocked) {
+            RCLCPP_INFO(get_logger(), "CPU 深睡已禁用（%s）", st.idle_note.c_str());
+        } else {
+            RCLCPP_WARN(get_logger(), "CPU 深睡未禁用：%s", st.idle_note.c_str());
+        }
+        if (realtime_cpu_ >= 0) {
+            if (st.affinity_applied) {
+                RCLCPP_INFO(get_logger(), "控制线程已绑定到 CPU%d", realtime_cpu_);
+            } else {
+                RCLCPP_WARN(get_logger(), "绑核未生效：%s", st.affinity_note.c_str());
+            }
+        }
+        RCLCPP_INFO(get_logger(), "实时性汇总：%s", st.summary().c_str());
+    }
+
     // 启动前的参数统一校验。fatal 项一律拒绝启动——带着错配置跑比不跑更危险：
     // 现象看起来像"算法不行"，而真因埋在 YAML 里没人会想到去查
     void check_params() {
@@ -167,6 +222,18 @@ private:
 
         control_rate_hz_ = declare_parameter<double>("control_rate_hz", 200.0);
         status_rate_hz_ = declare_parameter<double>("status_rate_hz", 20.0);
+
+        // ---- 实时性（仅 Linux 生效）----
+        // 控制环跑在 rclcpp::spin 的单线程 executor 上，定时器回调就在主线程；
+        // 给主线程设 SCHED_FIFO 即可让 200 Hz 周期确定，无需改并发模型。
+        // 默认开启，但任何一项失败都只 WARN 不退出：普通用户没有
+        // CAP_SYS_NICE / CAP_IPC_LOCK 时这些项会全部失败，此时按 CFS 正常
+        // 调度，功能不受影响，只是抖动更大。让它真正生效的做法见包内 README
+        // 的「实时性」一节（capabilities 或 systemd 单元）。
+        enable_realtime_ = declare_parameter<bool>("enable_realtime", true);
+        realtime_priority_ = declare_parameter<int>("realtime_priority", 80);
+        // -1 表示不绑核。板上建议配到 isolcpus 隔离出来的那个核
+        realtime_cpu_ = declare_parameter<int>("realtime_cpu", -1);
 
         enable_driver_ = declare_parameter<bool>("enable_driver", true);
         serial_port_ = declare_parameter<std::string>("serial_port", "/dev/ttyS0");
@@ -582,6 +649,14 @@ private:
     std::string profile_topic_, imu_topic_, status_topic_;
     double control_rate_hz_{200.0};
     double status_rate_hz_{20.0};
+
+    // 实时性。默认开启，失败只降级不退出，见 apply_realtime_settings()
+    bool enable_realtime_{true};
+    int realtime_priority_{80};
+    int realtime_cpu_{-1};
+    // 持有 /dev/cpu_dma_latency 的 fd：关掉就等于撤销 PM QoS 约束，
+    // 所以它必须活到进程退出
+    suspension_control_v3::RealtimeGuard realtime_guard_;
     bool enable_driver_{true};
     std::string serial_port_;
     int baud_rate_{115200};

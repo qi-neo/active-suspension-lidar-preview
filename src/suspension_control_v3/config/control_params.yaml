@@ -9,6 +9,20 @@ suspension_control_node:
     # 控制环与状态上报频率
     control_rate_hz: 200.0
     status_rate_hz: 20.0
+
+    # ---- 实时性（仅 Linux 生效）----
+    # 控制环跑在 rclcpp::spin 的单线程 executor 上，节点启动时会把主线程提到
+    # SCHED_FIFO、锁住内存、禁用 CPU 深睡。任一项失败只 WARN 不退出：普通
+    # 用户没有对应权限时三项都会失败，此时按 CFS 正常调度，功能不受影响，
+    # 只是 200 Hz 周期抖动会从 ±0.2 ms 量级涨到 ±几 ms。
+    # 让它真正生效（二选一，详见包内 README「实时性」一节）：
+    #   1) sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' <控制节点可执行文件>
+    #   2) 用 systemd 单元，设 Restart=always + LimitMEMLOCK=infinity +
+    #      AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+    enable_realtime: true
+    realtime_priority: 80
+    # 板上建议填 isolcpus 隔离出来的那个核号；-1 表示不绑核
+    realtime_cpu: -1
     # 单拍时长上限 (s)。定时抖动时不让累计时长一次跳过阈值，否则降级、
     # 链路超时这些"按持续时间"的判据会提前误触发
     max_step_dt: 0.05

@@ -8,6 +8,29 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ---- 构建类型与优化级别 ----
+# colcon build 不带 --cmake-args 时 CMAKE_BUILD_TYPE 为空，CMake 会按「无优化
+# 标志」编译，等同 -O0。本包的点云解析（PCL 模板 + Eigen）在开启优化前后差
+# 3-5 倍，因此给一个显式默认值；命令行仍可覆盖。完整说明见 CHANGELOG 3.2.3。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "构建类型：Release/Debug/RelWithDebInfo" FORCE)
+  message(STATUS "${PROJECT_NAME}: 未指定 CMAKE_BUILD_TYPE，默认 Release（-O3 -DNDEBUG）")
+endif()
+
+# -fno-math-errno 不改变 NaN/Inf 语义，安全；-ffast-math 会，故不用（见 CHANGELOG）。
+add_compile_options(-fno-math-errno)
+
+# -mcpu 只在 aarch64 上给，x86 CI 容器加了会因无效取值直接编译失败。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-mcpu=cortex-a55" COMPILER_HAS_CORTEX_A55)
+  if(COMPILER_HAS_CORTEX_A55)
+    add_compile_options(-mcpu=cortex-a55)
+    message(STATUS "${PROJECT_NAME}: 启用 -mcpu=cortex-a55")
+  endif()
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)

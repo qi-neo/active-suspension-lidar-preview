@@ -39,6 +39,14 @@ public:
   const std::string& device() const { return device_; }
   int baud() const { return baud_; }
 
+  // USB 转串口低延迟模式是否已开启。CH340 类芯片默认把收到的字节攒一批
+  // 再上报，缓冲延迟约 16 ms；对预览系统这等于凭空多 16 ms 帧龄。
+  // 开启后改为逐包上报，实测延迟降到 ~1 ms。
+  // 非 Linux、非 usb-serial 设备、或内核无该属性时恒为 false——
+  // 这只表示"少了一项优化"，不影响收发功能。
+  bool lowLatencyEnabled() const { return low_latency_enabled_; }
+  const std::string& lowLatencyNote() const { return low_latency_note_; }
+
   // 返回读到的字节数；0 表示当前无数据（非阻塞）；-1 表示出错，err 有原因。
   int readSome(std::uint8_t* buf, std::size_t cap, std::string& err);
 
@@ -46,6 +54,8 @@ private:
   int fd_{-1};
   std::string device_;
   int baud_{0};
+  bool low_latency_enabled_{false};
+  std::string low_latency_note_;
 };
 
 }  // namespace unilidar_driver

@@ -451,6 +451,116 @@ CH340 误码率与 P0 板流板仍阻塞在硬件，与 B1 同口径）：
 - v2 纯函数断言 69 → **149** 项（新增 80：31 + 31 + 18），仓库离线断言总数 596 → **676** 项；
   README 中英同步，新增 [docs/calibration.md](docs/calibration.md)
 
+## [3.2.3] - 2026-10-26
+
+### 性能与实时性：构建默认 Release、控制线程 SCHED_FIFO、串口低延迟
+
+本版三处改动都不动算法、不改接口，但直接决定此前所有优化能不能兑现。
+与上面 [未发布] 段的 3.3.x 内容互不依赖，可单独发布。
+
+**一、构建默认 Release（影响最大的一项）**
+
+四个包的 `CMakeLists.txt` 此前只设了 `-Wall -Wextra -Wpedantic`，既没有
+`-O` 标志也没设 `CMAKE_BUILD_TYPE`。`colcon build` 不带 `--cmake-args` 时
+CMake 会按「无优化标志」编译，等同 `-O0`——点云解码的浮点公式、PCL 模板、
+Eigen 矩阵乘全部不内联、不做常量折叠。`-O0` 与 `-O3` 在这类代码上通常差
+3-5 倍，也就是说此前任何算法级优化的收益都会被这个默认值吃掉。
+
+- 未指定构建类型时默认 `Release`，`--cmake-args -DCMAKE_BUILD_TYPE=Debug`
+  仍可覆盖
+- `-fno-math-errno`：不改变 NaN/Inf 语义，安全
+- **刻意不开 `-ffast-math`**：`input_validator` 与 `control_loop` 用
+  `std::isfinite()` 拦 NaN/Inf，`-ffast-math` 允许编译器假设"无 NaN 无 Inf"
+  并把校验优化掉，等于把坏数据防护删掉
+- `-mcpu=cortex-a55` 限定在 Linux + aarch64。实测 AppleClang 也接受该取值
+  （`check_cxx_compiler_flag` 在 macOS arm64 上返回成功），但为 Apple Silicon
+  按 A55 调度模型编译是错的，守卫因此加上 `CMAKE_SYSTEM_NAME`
+- LTO 以 `ENABLE_LTO` 选项提供、默认 OFF：板端（4×A55 + 8 GB）链接期内存
+  峰值可能 OOM，开发机按需开启
+
+**二、控制线程实时化**
+
+200 Hz 控制环此前跑在 `rclcpp::spin()` 的单线程 executor 上，与点云剖面、
+IMU、状态发布排同一个队列。任一回调占几毫秒，控制周期就迟到几毫秒；而
+rclcpp 的 timer 到期后不补偿，迟到的拍直接顺延——`max_step_dt` 的封顶逻辑
+防住了「累计时长判据误触发」，但**控制律拿到的 dt 本身已经是错的**。
+
+做法上刻意不另起线程：`SuspensionControlLoop` 内部没有任何互斥量，
+`submit_profile`/`submit_attitude` 由订阅回调写、`step` 由定时器读，单线程下
+这种无锁是安全的；把 `step` 挪到独立线程就是真实的数据竞争。而
+`rclcpp::spin()` 本身单线程，定时器回调本来就在主线程上跑，所以**给主线程
+设实时调度即可达成同样的确定性**，完全不触碰并发模型。
+
+新增 `suspension_control_v3/realtime.{hpp,cpp}`（不依赖 ROS/PCL）：
+
+- `SCHED_FIFO`，优先级先按 `sched_get_priority_max` 钳位再传——越界会让
+  `pthread_setschedparam` 直接 `EINVAL`，错误信息会指向错误的原因
+- `mlockall(MCL_CURRENT|MCL_FUTURE)`，避免运行期换页造成毫秒级停顿
+- `/dev/cpu_dma_latency` 写 0 并**持有 fd**：约束只在 fd 打开期间有效，
+  写完就关等于没做（最易写错的一处）
+- 可选绑核，配合 `isolcpus` 使用
+
+每项尽力而为，失败只 WARN 并给出补救办法（capabilities / systemd
+`LimitMEMLOCK`），不退出。普通用户没有 `CAP_SYS_NICE`/`CAP_IPC_LOCK` 时
+三项会全失败，此时按 CFS 运行，功能不受影响，只是抖动更大——静默降级
+会让人误以为已经跑在实时配置下，从而把抖动归因到「算法不行」。
+
+**三、串口 low_latency**
+
+CH340 类 USB 转串口默认把字节攒一批再上报，缓冲延迟约 16 ms。对预瞄系统
+这 16 ms 是纯白送的：2 m/s 车速下等于 32 mm 的路面定位误差，而且它不报
+任何错。`SerialReceiver::open()` 成功后尝试写
+`/sys/bus/usb-serial/devices/<tty>/low_latency = 1`。
+
+- 不能走 `TIOCSSERIAL` + `ASYNC_LOW_LATENCY`：那是 8250 平台串口的标志，
+  usb-serial 驱动不读它
+- 属性不存在是常态（板载 UART、老内核、经 by-id 传入的长设备名），
+  静默跳过，不影响收发
+- 启动日志单独报一行，因为这是「精度问题」而非「能不能跑」的问题
+
+### 验证
+
+本机（macOS，无 ROS）可编译并运行的部分全部通过：
+
+| 自检 | 项数 | 结果 |
+|------|------|------|
+| `decoder_selftest` | 202 | 全过 |
+| `serial_receiver_selftest` | 80（Linux 81） | 全过 |
+| `serial_stress_selftest`（2 Mbps，3 s） | 14 | 全过；6332 帧零丢失，缓冲峰值 2056 B |
+| `udp_receiver_selftest` | 38 | 全过 |
+| `node_loop_selftest` | 65 | 全过 |
+| `trend / obstacle / protocol / level` | 29 / 32 / 82 / 69 | 全过 |
+| `height_calib_selftest` / `calibration_tool` | 46 / 46 | 全过 |
+| `p0_link_selftest` | 18 | 全过 |
+| `control_selftest` | **454**（新增 [43] 11 项） | 全过 |
+
+仓库离线自检合计 **1175 项**（macOS 口径；Linux 的串口自检多 1 项 2 Mbps
+断言，为 1176）。四个包的 `CMakeLists.txt` 用 stub 依赖做过真实 `cmake`
+configure：三包直接通过，`suspension_control_v3` 卡在原有的 v2 导入目标
+检查上（stub 环境没有真 v2 包，与本版改动无关）；四包均正确识别默认
+Release，且 `-mcpu` 在 macOS 上不再被误加。
+
+### 未验证项（明确记录）
+
+- **ROS 节点未在真实 ROS 环境编译**：本机无 ROS2。`suspension_control_node`
+  的改动做了「抽出函数体 + 桩宏」的独立编译（默认 / 关闭 / 绑核三条分支
+  均通过）与整文件括号配平检查，但不等于 `colcon build` 通过。CI 是唯一
+  能给出结论的地方
+- **实时性与 low_latency 均未在板端实测**：本机是 macOS，`#ifdef __linux__`
+  分支的代码路径没有执行过。抖动直方图（改前/改后 p99.9 与 max）需要在
+  香橙派上采集
+- `realtime_priority` / `realtime_cpu` 的推荐取值需按板上 `isolcpus` 配置
+  与负载实测调整，默认 80 / -1 只是保守起点
+
+### 版本号
+
+`package.xml` 此前落后于 CHANGELOG（`suspension_control_v3` 停在 3.2.1，
+而 CHANGELOG 已有 3.2.2），本版一并对齐：
+
+- `suspension_control_v3` 3.2.1 → **3.2.3**
+- `unilidar_driver` 1.0.1 → **1.1.0**（新增 `lowLatencyEnabled()` 等公开方法）
+- `suspension_preview_v2` 2.0.0 → **2.0.1**（默认构建类型变化对产物可见）
+
 ## [3.2.2] - 2026-10-25
 
 ### 修复：B3 提交引入的构建断裂与标定层三处静默缺陷

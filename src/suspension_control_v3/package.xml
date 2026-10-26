@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>suspension_control_v3</name>
-  <version>3.2.1</version>
+  <version>3.2.3</version>
   <description>
     主动悬架闭环控制：预瞄前馈加姿态反馈，经运动学解耦输出四轮目标行程。
     含输入校验（坏数据拒绝）与安全状态机（标定、找平、闭环、降级、急停）。

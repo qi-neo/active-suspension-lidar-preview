@@ -22,11 +22,11 @@
 > - 自研宇树 L1 的 CH340 串口报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑多组离线自检（v3 控制 395 项、驱动解析 63 项、
-> v2 纯函数 179 项（B3 新增标定与 P0 板接口层 80 项 + 缺陷回归 30 项）、虚拟水平面 69 项，共 706 项）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑多组离线自检（v3 控制 454 项、驱动解析 202 项、
+> 驱动传输与主循环 197 项、v2 纯函数 322 项，共 1175 项；Linux 上串口自检多 1 项 2 Mbps 断言）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
-> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（395 项检查）。
+> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（454 项检查）。
 
 ## 目录
 
@@ -42,10 +42,11 @@
     - [car_balancer](#car_balancer--早期姿态平衡包)
 6. [关键参数](#6-关键参数)
 7. [实测结果](#7-实测结果)
-8. [下行带宽](#8-下行带宽)
-9. [常见问题](#9-常见问题)
-10. [许可证](#10-许可证)
-11. [English Abstract](#11-english-abstract)
+8. [性能与实时性](#8-性能与实时性)
+9. [下行带宽](#9-下行带宽)
+10. [常见问题](#10-常见问题)
+11. [许可证](#11-许可证)
+12. [English Abstract](#12-english-abstract)
 
 ## 1. 项目简介
 
@@ -178,7 +179,7 @@ ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重
 ros2 run suspension_preview_v2 height_calib_selftest   # 高度标定表（插值/钳位/CSV/缺陷回归），46 项检查
 ros2 run suspension_preview_v2 calibration_tool --selftest  # 标定工具自检，46 项检查
 ros2 run suspension_preview_v2 p0_link_selftest         # P0 板接口层（PTY 仿真 0x13 帧），18 项检查
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，443 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，454 项检查
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
@@ -331,7 +332,7 @@ flowchart LR
 （`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
 联调时能直接看到"前馈到底按多远取了样"。
 
-离线自检 395 项，不需要 ROS 与硬件：
+离线自检 454 项，不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -392,7 +393,105 @@ ros2 run car_balancer test_imu_node
 
 论文原文为 PDF（已脱敏），文字版见 `docs/paper/`。
 
-## 8. 下行带宽
+## 8. 性能与实时性
+
+本节记录 3.2.3 的三处底层改动：都不动算法、不改接口，但决定了上面那些算法
+能不能真的跑出设计性能。
+
+### 8.1 先看瓶颈在哪
+
+按 config 里的真实速率算，这套系统的算力是过剩的：
+
+| 指标 | 实际值 | 平台能力 | 占用 |
+|------|--------|---------|------|
+| 串口输入 | 188 KB/s（180 线/s × 1044 B） | 2 Mbps 链路 | — |
+| 点云解码 | 54,000 点/s | 4×A55 @1.6 GHz | < 5% 单核 |
+| 点云发布 | 1.3 MB/s（10 Hz × 130 KB） | LPDDR4X 25.6 GB/s | 0.005% |
+| 控制环 | 200 Hz，每拍约 50 次乘加 | 同上 | < 1% |
+
+微基准实测（M1，`-O2`）显示三处算法热点的优化倍数很好——CRC32 改 slice-8
+查表 17.6×、逐点三角改递推 2.4×、分箱改扁平常量 + `nth_element` 5.6×——
+但折算到 A55 后合计只省 **约 2.3% 单核**。**真正的瓶颈是时延确定性，不是吞吐。**
+
+### 8.2 构建默认 Release
+
+`colcon build` 不带 `--cmake-args` 时 `CMAKE_BUILD_TYPE` 为空，CMake 按
+「无优化标志」编译，等同 `-O0`。四个包此前都没有设它——PCL 模板、Eigen
+矩阵乘、点云解码公式全部不内联、不做常量折叠，与 `-O3` 相差 3–5 倍。
+
+现在未指定时默认 `Release`，命令行仍可覆盖：
+
+```bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Debug   # 需要调试时
+```
+
+`-ffast-math` **刻意不开**：`input_validator` 与 `control_loop` 用
+`std::isfinite()` 拦 NaN/Inf，开了它编译器会假设「无 NaN 无 Inf」并把这些
+校验优化掉，等于删掉坏数据防护。
+
+`-mcpu=cortex-a55` 只在 Linux + aarch64 上生效（macOS 的 AppleClang 也接受
+该取值，但为 Apple Silicon 按 A55 调度模型编译是错的）。
+LTO 用 `-DENABLE_LTO=ON` 开启，默认关闭：板端链接期内存峰值可能 OOM。
+
+### 8.3 控制线程实时化
+
+200 Hz 控制环跑在 `rclcpp::spin()` 的单线程 executor 上。任一回调（点云剖面、
+IMU、状态发布）占几毫秒，控制周期就迟到几毫秒；而 rclcpp 的 timer 到期后
+不补偿，迟到的拍直接顺延——`max_step_dt` 防住了判据误触发，但**控制律拿到的
+dt 本身已经是错的**。
+
+节点启动时把主线程提为 `SCHED_FIFO`、`mlockall`、禁用 CPU 深睡，可选绑核。
+**不另起线程**：`SuspensionControlLoop` 内部没有互斥量，挪线程就是数据竞争；
+而 `rclcpp::spin()` 本身单线程，定时器回调本来就在主线程上，给主线程设实时
+调度即可。
+
+每项尽力而为，失败只 WARN 不退出。让它生效（二选一）：
+
+```bash
+# 方式一：给可执行文件加 capabilities
+sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' \
+  install/suspension_control_v3/lib/suspension_control_v3/suspension_control_node
+
+# 方式二：systemd 单元里加
+#   LimitMEMLOCK=infinity
+#   AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+```
+
+配合板上 CPU 隔离（`/boot/firmware/cmdline.txt`）：
+
+```
+isolcpus=3 nohz_full=3 rcu_nocbs=3
+```
+
+然后把 `realtime_cpu` 设为 `3`，控制线程就独占那个核。
+
+### 8.4 串口 low_latency
+
+CH340 类 USB 转串口默认攒批上报，缓冲延迟约 16 ms。启动时自动尝试写
+`/sys/bus/usb-serial/devices/<tty>/low_latency = 1`，开不了就跳过并打印原因。
+**帧龄可再降约 15 ms**，2 m/s 车速下等于 30 mm 的路面定位精度。
+
+### 8.5 怎么确认改完了
+
+改前务必先采基线，否则改完无法证明收益：
+
+```bash
+# 实时调度是否生效：启动日志会逐项打印
+#   控制线程已切到 SCHED_FIFO（priority=80）
+#   CPU 深睡已禁用（cpu_dma_latency=0）
+#   实时性汇总：SCHED_FIFO 生效 | 内存锁定 生效 | 禁深睡 生效 | 绑核 未请求
+
+# 串口低延迟是否生效
+cat /sys/bus/usb-serial/devices/ttyUSB0/low_latency   # 1 = 已开
+
+# 编译产物里到底有没有 -O3
+grep -r "CMAKE_CXX_FLAGS_RELEASE" build/*/CMakeCache.txt
+```
+
+板端实测项（抖动直方图 p99.9 与 max）尚未采集，见
+[CHANGELOG](CHANGELOG.md) 3.2.3 的「未验证项」。
+
+## 9. 下行带宽
 
 每帧发送左右两条轮迹，各 100 点：
 
@@ -403,7 +502,7 @@ ros2 run car_balancer test_imu_node
 
 v1 在 115200 bps 下的上限与雷达 10–20 Hz 的输出正好对冲，这是 v2 改用 int16 与提高波特率选项的原因。
 
-## 9. 常见问题
+## 10. 常见问题
 
 <details>
 <summary>收不到点云，节点启动后没有输出</summary>
@@ -462,13 +561,13 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 
 </details>
 
-## 10. 许可证
+## 11. 许可证
 
 [MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
 
 版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
-## 11. English Abstract
+## 12. English Abstract
 
 <details>
 <summary>点击展开英文摘要</summary>
