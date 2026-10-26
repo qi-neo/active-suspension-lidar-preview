@@ -128,12 +128,18 @@ add_executable(height_calib_selftest
   examples/height_calib_selftest.cpp src/height_calibration.cpp)
 target_include_directories(height_calib_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+# 把模板 CSV 的绝对路径编进去：ctest 在构建目录里跑，相对路径命中不了会让
+# [H7] 两条断言静默跳过（本机 46 项、CI 44 项，口径不一致且少测 2 项）
+target_compile_definitions(height_calib_selftest PRIVATE
+  CALIB_TEMPLATE_CSV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/examples/calibration_template.csv")
 
 # 标定 CLI 工具：validate / generate / sample / --selftest（同用一份检查逻辑）
 add_executable(calibration_tool
   examples/calibration_tool.cpp src/height_calibration.cpp)
 target_include_directories(calibration_tool PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+target_compile_definitions(calibration_tool PRIVATE
+  CALIB_TEMPLATE_CSV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/examples/calibration_template.csv")
 
 # P0 板接口层自检：用 PTY 仿真板端，验证「mm -> 标定 -> 0xAA55(0x13) 帧」全链路
 find_package(Threads REQUIRED)

@@ -235,6 +235,12 @@ inline int run_calibration_checks() {
         // 有可能），所以按候选路径依次尝试；找不到就跳过而不是判失败——
         // 这条是防"校验过严"的护栏，不是被测对象本身
         const char* candidates[] = {
+#ifdef CALIB_TEMPLATE_CSV_PATH
+            // CMake 注入的绝对路径：ctest 的工作目录是构建目录，相对路径全部
+            // 命中不了，会让这两条断言在 CI 里被静默跳过（本机 46 项 / CI 44 项）。
+            // 用绝对路径后两处一致，跳过分支只作为非 CMake 手工编译时的兜底。
+            CALIB_TEMPLATE_CSV_PATH,
+#endif
             "calibration_template.csv",
             "src/suspension_preview_v2/examples/calibration_template.csv",
             "../examples/calibration_template.csv",
