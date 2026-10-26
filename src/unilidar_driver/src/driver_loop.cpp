@@ -13,7 +13,15 @@ DriverLoop::DriverLoop(LoopConfig cfg, const DecodeParams& params, CloudSink clo
       cloud_sink_(std::move(cloud_sink)),
       imu_sink_(std::move(imu_sink)),
       parser_(cfg_.max_packet, cfg_.max_buffered),
-      buf_(cfg_.recv_chunk) {}
+      buf_(cfg_.recv_chunk) {
+  // 预拼帧的容量按理论上限一次预留：cloud_scan_num 条线 × 每线最多
+  // kMaxPoints3D 点。不预留的话，18 次 insert 会触发多次 realloc，
+  // 每次都把已有的十几万字节整体搬一遍。
+  pending_.reserve(cfg_.cloud_scan_num * kMaxPoints3D);
+  // 单条扫描线的解码缓冲：300 点是协议上限，一次预留即可复用
+  pts_buf_.reserve(kMaxPoints3D);
+  frame_buf_.reserve(cfg_.max_packet);
+}
 
 std::size_t DriverLoop::pollOnce(const ReadFn& read, double now_sec, std::string* err_out) {
   const auto t0 = std::chrono::steady_clock::now();
@@ -49,19 +57,26 @@ std::size_t DriverLoop::pollOnce(const ReadFn& read, double now_sec, std::string
   const std::uint64_t ns =
       static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
   stats_.poll_ns_total += ns;
-  poll_ns_.push_back(ns);
+  // 封顶后环形覆盖：样本量与内存都有界，分位数仍反映最近的轮询表现
+  if (poll_ns_.size() < kMaxPollSamples) {
+    poll_ns_.push_back(ns);
+  } else {
+    poll_ns_[poll_ns_cursor_] = ns;
+    poll_ns_cursor_ = (poll_ns_cursor_ + 1) % kMaxPollSamples;
+  }
   return got;
 }
 
 void DriverLoop::drainFrames(double now_sec) {
-  std::vector<std::uint8_t> frame;
+  // 用成员缓冲而非局部 vector：此函数每轮都会调用，局部声明会让每条扫描线
+  // （180 次/秒）都做一次 1 KB 级分配 + 释放
   std::uint32_t type = 0;
-  while (parser_.pull(frame, type) == PullStatus::kFrameReady) {
+  while (parser_.pull(frame_buf_, type) == PullStatus::kFrameReady) {
     ++stats_.frames_decoded;
     if (type == kTypePointCloud3D) {
-      handleCloud(frame, now_sec);
+      handleCloud(frame_buf_, now_sec);
     } else if (type == kTypeImu) {
-      handleImu(frame, now_sec);
+      handleImu(frame_buf_, now_sec);
     }
   }
 }
@@ -70,7 +85,7 @@ void DriverLoop::handleCloud(const std::vector<std::uint8_t>& frame, double now_
   // ring = 这条扫描线在整圈中的序号（1 基，与官方 SDK 从 1 起算一致）。
   // 协议里一个点云报文就是一条扫描线，单包内没有"第几条线"字段（官方单包内
   // 每点 ring 写死为 1），只能由拼帧顺序给出：本帧第 k 条线（k 从 0 起）→ k+1。
-  std::vector<PointXYZIT> pts;
+  std::vector<PointXYZIT>& pts = pts_buf_;  // 复用容量，不再每线分配
   double stamp = 0.0;
   const std::uint16_t ring = static_cast<std::uint16_t>(pending_scans_ + 1);
   if (!decodePointCloud(frame, params_, now_sec, pts, stamp, dstats_, ring)) return;
@@ -135,6 +150,7 @@ std::uint64_t DriverLoop::pollNsMax() const {
 void DriverLoop::resetStats() {
   stats_ = LoopStats{};
   poll_ns_.clear();
+  poll_ns_cursor_ = 0;
 }
 
 }  // namespace unilidar_driver

@@ -719,5 +719,47 @@ int main(int argc, char** argv) {
   } else {
     std::printf("\n");
   }
+  // ---------------------------------------------------------------------
+  // [5] 轮询耗时样本封顶
+  //
+  // 此前 poll_ns_ 只 push 不清：500 Hz 轮询下跑一天是 4320 万个样本
+  // （约 345 MB），而 pollNsQuantile() 每次调用还要完整拷贝并排序整个
+  // vector —— 跑久了诊断日志本身会变成秒级卡顿，且内存单调增长。
+  // 这里灌入远超上限的轮询次数，断言样本量被封住、统计计数不受影响、
+  // 且封顶后分位数查询仍然可用（不是返回 0 或崩溃）。
+  // ---------------------------------------------------------------------
+  {
+    std::printf("\n[5] 轮询耗时样本封顶\n");
+    LoopConfig cfg;
+    DriverLoop loop(
+        cfg, DecodeParams{},
+        [](const std::vector<PointXYZIT>&, double) {},
+        [](const ImuSample&) {});
+    // 空数据源：每轮立即返回 0，只推进轮询与计时，不做解码
+    DriverLoop::ReadFn empty_read = [](std::uint8_t*, std::size_t, std::string&) { return 0; };
+
+    const std::size_t rounds = DriverLoop::kMaxPollSamples + 500;
+    for (std::size_t i = 0; i < rounds; ++i) {
+      loop.pollOnce(empty_read, nowSec(), nullptr);
+    }
+    log.check(loop.pollSampleCount() == DriverLoop::kMaxPollSamples,
+              "耗时样本数封顶在 kMaxPollSamples（不再随运行时长增长）");
+    log.check(loop.stats().polls == rounds, "轮询计数不受样本封顶影响");
+    log.check(loop.pollNsP50() > 0, "封顶后中位数仍可查");
+    log.check(loop.pollNsP99() >= loop.pollNsP50(), "封顶后 p99 仍可查且不小于中位数");
+    std::printf("  轮询 %zu 次 · 样本 %zu 条（上限 %zu）· p50=%llu ns p99=%llu ns\n", rounds,
+                loop.pollSampleCount(), DriverLoop::kMaxPollSamples,
+                static_cast<unsigned long long>(loop.pollNsP50()),
+                static_cast<unsigned long long>(loop.pollNsP99()));
+
+    // resetStats 之后样本归零，游标也要复位——否则下一轮覆盖写会从
+    // 上一轮的中途开始，样本顺序错乱（分位数不受影响，但语义不干净）
+    loop.resetStats();
+    log.check(loop.pollSampleCount() == 0, "resetStats 清空耗时样本");
+    loop.pollOnce(empty_read, nowSec(), nullptr);
+    log.check(loop.pollSampleCount() == 1, "复位后可重新累积样本");
+  }
+
+  std::printf("\n");
   return log.report();
 }
