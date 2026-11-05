@@ -122,11 +122,11 @@ jobs:
           cd src/active-suspension-lidar-preview
           g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
-            -I src/unilidar_driver/include \
-            src/unilidar_driver/examples/serial_receiver_selftest.cpp \
-            src/unilidar_driver/src/protocol.cpp \
-            src/unilidar_driver/src/packet_parser.cpp \
-            src/unilidar_driver/src/serial_receiver.cpp \
+            -I src/unilidar_driver/src/unilidar_driver/include \
+            src/unilidar_driver/src/unilidar_driver/examples/serial_receiver_selftest.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/serial_receiver.cpp \
             -o /tmp/asan_serial_receiver
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_receiver
 
@@ -138,11 +138,11 @@ jobs:
           cd src/active-suspension-lidar-preview
           g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
-            -I src/unilidar_driver/include \
-            src/unilidar_driver/examples/udp_receiver_selftest.cpp \
-            src/unilidar_driver/src/protocol.cpp \
-            src/unilidar_driver/src/packet_parser.cpp \
-            src/unilidar_driver/src/udp_receiver.cpp \
+            -I src/unilidar_driver/src/unilidar_driver/include \
+            src/unilidar_driver/src/unilidar_driver/examples/udp_receiver_selftest.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/udp_receiver.cpp \
             -o /tmp/asan_udp_receiver
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_udp_receiver
 
@@ -155,11 +155,11 @@ jobs:
           cd src/active-suspension-lidar-preview
           g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
-            -I src/unilidar_driver/include \
-            src/unilidar_driver/examples/serial_stress_selftest.cpp \
-            src/unilidar_driver/src/protocol.cpp \
-            src/unilidar_driver/src/packet_parser.cpp \
-            src/unilidar_driver/src/serial_receiver.cpp \
+            -I src/unilidar_driver/src/unilidar_driver/include \
+            src/unilidar_driver/src/unilidar_driver/examples/serial_stress_selftest.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/serial_receiver.cpp \
             -o /tmp/asan_serial_stress
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_serial_stress --seconds 3 --quiet
 
@@ -170,13 +170,13 @@ jobs:
           cd src/active-suspension-lidar-preview
           g++ -std=c++17 -g -O1 -fsanitize=address,undefined \
             -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror \
-            -I src/unilidar_driver/include \
-            src/unilidar_driver/examples/node_loop_selftest.cpp \
-            src/unilidar_driver/src/protocol.cpp \
-            src/unilidar_driver/src/packet_parser.cpp \
-            src/unilidar_driver/src/frame_decoder.cpp \
-            src/unilidar_driver/src/serial_receiver.cpp \
-            src/unilidar_driver/src/driver_loop.cpp \
+            -I src/unilidar_driver/src/unilidar_driver/include \
+            src/unilidar_driver/src/unilidar_driver/examples/node_loop_selftest.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/protocol.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/packet_parser.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/frame_decoder.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/serial_receiver.cpp \
+            src/unilidar_driver/src/unilidar_driver/src/driver_loop.cpp \
             -o /tmp/asan_node_loop
           ASAN_OPTIONS=detect_leaks=1 /tmp/asan_node_loop --seconds 2 --quiet
 
