@@ -159,6 +159,15 @@ install(DIRECTORY launch config
 install(DIRECTORY include/
   DESTINATION include)
 
+# 核心静态库必须一并安装：下面 ament_export_libraries() 声明了导出它，
+# 只导出不安装时，下游 find_package(suspension_control_v3) 会在 configure 阶段报
+# "exports the library 'suspension_control_core' which couldn't be found"。
+# 保持旧式 -l 导出范式（改动最小），只补齐安装产物，不引入 install(EXPORT)。
+install(TARGETS suspension_control_core
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ament_export_include_directories(include)
 ament_export_libraries(suspension_control_core)
 ament_export_dependencies(rosidl_default_runtime)

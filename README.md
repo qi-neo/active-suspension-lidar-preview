@@ -145,11 +145,12 @@ flowchart TB
 ```bash
 # 1. 工作空间准备：把本仓库放到 src/ 下
 mkdir -p ~/ws/src && cd ~/ws/src
-git clone https://github.com/qi-neo/active-suspension-lidar-preview
+git clone --recurse-submodules https://github.com/qi-neo/active-suspension-lidar-preview
+# 已经 clone 过、没带 submodule 的话：git submodule update --init --recursive
 # 如果还想用官方节点做对照，再 clone 官方 SDK（本仓库的驱动不依赖它）
 # git clone https://github.com/unitreerobotics/unitree_lidar_sdk
-# 雷达驱动另有独立仓库（含驱动编写思路文档），二者内容一致，按需选用：
-# git clone https://github.com/qi-neo/unilidar-driver
+# 雷达驱动以 submodule 形式锁定在 src/unilidar_driver（独立仓 qi-neo/unilidar-driver），
+# 不需要单独 clone；升级驱动请提 PR 更新 submodule 指针
 
 # 2. 编译
 cd ~/ws
@@ -190,7 +191,7 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，454
 ```
 active-suspension-lidar-preview/
 ├── src/
-│   ├── unilidar_driver/             宇树 L1 雷达驱动：自研 CH340 串口协议解析，发布点云与 IMU
+│   ├── unilidar_driver/             [submodule] 宇树 L1 雷达驱动：自研 CH340 串口协议解析，发布点云与 IMU
 │   ├── suspension_preview/          初版预瞄节点（C++）
 │   ├── suspension_preview_v2/       v2 接口化版本：核心库 + 两个节点 + 离线示例
 │   ├── suspension_control_v3/       v3 闭环控制：输入校验 + 安全状态机 + 控制器 + 离线自检
@@ -219,8 +220,9 @@ active-suspension-lidar-preview/
 本包统一按 `SensorDataQoS` 发布。
 
 > **本包已独立成仓**：[qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver)。
-> 雷达驱动是可复用资产，与主动悬架没有必然关系，故单独维护。本仓库内保留一份副本，
-> 便于单独 clone 本仓库时直接 `colcon build`；**改动请以独立仓库为准，再同步回来**。
+> 雷达驱动是可复用资产，与主动悬架没有必然关系，故单独维护。本仓库通过
+> `src/unilidar_driver` 的 **git submodule** 锁定其固定版本（当前 `41c1e13`），
+> 不再保留需要手工同步的副本；带 `--recurse-submodules` clone 后即可直接 `colcon build`。
 > 独立仓库另附 [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md)，
 > 讲驱动编写的通用思路（职责边界、四层架构、帧定界怎么选、不接硬件怎么验证）。
 

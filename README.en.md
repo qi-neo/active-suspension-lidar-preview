@@ -201,13 +201,14 @@ publishes as RELIABLE, while `suspension_control_v3` subscribes with
 to match both in-repo consumers.
 
 Details, on-target confirmation steps and verification scope:
-[`src/unilidar_driver/README.md`](src/unilidar_driver/README.md) (in Chinese).
+[`src/unilidar_driver/README.md`](https://github.com/qi-neo/unilidar-driver/blob/main/src/unilidar_driver/README.md) (in Chinese).
 
 > **Also available as a standalone repository**:
 > [qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver), since a LiDAR
-> driver is a reusable asset unrelated to active suspension specifically. A copy is kept
-> here so this repository builds standalone; **treat the standalone repo as the source of
-> truth** and sync changes back. It also ships
+> driver is a reusable asset unrelated to active suspension specifically. This repository
+> pins it as a **git submodule** at `src/unilidar_driver` (currently `41c1e13`) instead of
+> keeping a hand-synced copy; clone with `--recurse-submodules` and `colcon build` works
+> directly. It also ships
 > [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md),
 > a methodology write-up on writing sensor drivers (in Chinese).
 
@@ -350,13 +351,14 @@ entry, `balancer_node`, pointed at a module never shipped with the package and h
 ```bash
 # 1. Workspace: place the repository under src/
 mkdir -p ~/ws/src && cd ~/ws/src
-git clone https://github.com/qi-neo/active-suspension-lidar-preview
+git clone --recurse-submodules https://github.com/qi-neo/active-suspension-lidar-preview
+# Already cloned without submodules? git submodule update --init --recursive
 # To compare against the official node, also clone the official SDK
 # (the in-repo driver does not depend on it)
 # git clone https://github.com/unitreerobotics/unilidar_sdk
-# The driver also has a standalone repository (with a write-up of the driver design);
-# the contents are identical, use whichever suits you:
-# git clone https://github.com/qi-neo/unilidar-driver
+# The driver is pinned as a submodule at src/unilidar_driver
+# (standalone repo qi-neo/unilidar-driver); no separate clone is needed.
+# To upgrade the driver, open a PR that moves the submodule pointer.
 
 # 2. Build
 cd ~/ws

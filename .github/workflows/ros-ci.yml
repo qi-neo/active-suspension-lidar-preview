@@ -44,6 +44,9 @@ jobs:
         with:
           # colcon 会递归扫描 src/ 找包，所以放在子目录里也能被发现
           path: src/active-suspension-lidar-preview
+          # src/unilidar_driver 是指向独立仓固定版本的 submodule，
+          # 不递归拉取时 colcon build --packages-select unilidar_driver 会找不到包
+          submodules: recursive
 
       # rosdep 的唯一依据是 package.xml。CMakeLists 里 find_package 了但
       # package.xml 没声明的，本机往往看不出来（别的包或全局环境已经装上），
@@ -96,6 +99,10 @@ jobs:
                              suspension_control_v3 unilidar_driver car_balancer \
             --cmake-args -Wall -Wextra -Wpedantic \
             --event-handlers console_cohesion+ 2>&1 | tee /tmp/colcon.log
+          # P0：ament_export_libraries 声明导出的静态库必须真的装进 install 空间，
+          # 否则下游 find_package 在干净环境里会报 "exports the library ... which couldn't be found"
+          test -f install/suspension_control_v3/lib/libsuspension_control_core.a
+          test -f install/unilidar_driver/lib/libunilidar_driver_core.a
           # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
           # test-result 只是把"没有测试结果"打印出来而已。现在 v3 与 v2 都注册了
           # CTest，这里真的跑一遍并且不容忍失败
@@ -257,6 +264,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: src/active-suspension-lidar-preview
+          submodules: recursive
 
       - name: 安装工具
         run: |

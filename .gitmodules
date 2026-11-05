@@ -1,0 +1,3 @@
+[submodule "src/unilidar_driver"]
+	path = src/unilidar_driver
+	url = https://github.com/qi-neo/unilidar-driver.git
