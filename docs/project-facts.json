@@ -22,6 +22,14 @@
   "unreleased_note": "3.2.2 是内部集成版本号：CHANGELOG 有条目，但从未打 tag / 发 release；3.2.3 直接对齐并跳过对外发布该号。详见 CHANGELOG.archive.md 的 3.2.2 条目。",
   "ros_distribution": "humble",
   "ci_image": "ros:humble-ros-base",
+  "ci_arm64_runner": "ubuntu-24.04-arm",
+  "ci_arm64_runner_note": "ARM64 原生 CI 的 runner label。ROS 2 Humble 官方二进制只支持 Jammy 22.04，但 ROS 跑在 ros:humble-ros-base（ubuntu:jammy, amd64+arm64v8）容器里，与 runner OS 解耦；22.04 Arm64 runner 镜像已于 2026-09-17 结束 Active support，故选仍在 Active 的 24.04-arm。",
+  "node24_actions": {
+    "actions/checkout": "v7",
+    "actions/setup-python": "v7",
+    "actions/upload-artifact": "v7"
+  },
+  "node24_actions_note": "按各仓库官方 action.yml 的 runs.using: node24 核实后的主版本（2026-11-05 核实：checkout v7 / setup-python v7 / upload-artifact v7）。第三方教程里写的 v6/v6/v7 已落后于官方最新主版本，故不照抄。由 tools/check_facts.py 扫描本仓 workflow 防止回退。",
   "coverage_gate": {"line": 80, "branch": 65},
   "selftest_total": 1108,
   "selftest_count_source": "docs/selftest-counts.json",

@@ -13,6 +13,25 @@
 时间域 FIR、把"测什么"从凭感觉补用例改成按覆盖率指路、以及把 CI 补齐为
 构建 + 内存检查 + 覆盖率三道门禁。
 
+### ARM64 原生 CI、实时性真源与 Actions Node 24（2026-11-05）
+
+- `ros-ci.yml` 新增 `aarch64` job（`ubuntu-24.04-arm` runner + `ros:humble-ros-base`
+  容器），在真实部署架构上跑 `colcon build` / `colcon test` 与
+  `tools/build_selftest.sh coverage`，并断言 `uname -m=aarch64`、
+  `dpkg --print-architecture=arm64`、`ROS_DISTRO=humble`。
+  ROS 2 Humble 官方二进制只支持 Jammy 22.04，但 ROS 在容器内、与 runner OS 解耦；
+  22.04 Arm64 runner 镜像已结束 Active support，故选 24.04-arm。
+- 新增 `docs/realtime.json`（唯一真源）、`tools/check_realtime.py`（CI 校验口径）、
+  `tools/measure_realtime.sh`（目标板实测写回）。未实测前
+  `status=pending_measurement`，所有数值字段必须是 `null`；公开文档里写死
+  抖动数字会被校验器拒绝。CI 不产生实时性数据——hosted runner 既不是目标板
+  也没有 PREEMPT_RT 内核。
+- 5 仓 7 个 workflow 的 `actions/checkout` / `setup-python` / `upload-artifact`
+  升级到官方 `action.yml` 声明 `runs.using: node24` 的主版本 `v7`（共 16 处），
+  消除「Node.js 20 is deprecated, forced to Node.js 24」annotation；
+  `docs/project-facts.json` 登记 `ci_arm64_runner` 与 `node24_actions`，
+  由 `tools/check_facts.py` 扫描防止回退。
+
 ### 驱动：串口接收路径落地（`unilidar_driver`）
 
 L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2,000,000 bps

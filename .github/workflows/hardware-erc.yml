@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 kicad-cli（不可用则跳过）
         id: kicad
@@ -64,7 +64,7 @@ jobs:
 
       - name: 上传 ERC / DRC 报告
         if: steps.kicad.outputs.available == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hardware-erc-drc-report
           path: hardware-report/

@@ -104,6 +104,20 @@ for sec in facts["doc_skeleton"]["sections"]:
 if "Humble" not in zh or "Jazzy" in zh.split("## 目录")[0]:
     errors.append("README.md 的 ROS2 徽章口径与 project-facts.json 的 humble 不一致")
 
+# 8) ARM64 原生 CI 与 Node 24 Actions 主版本（防止升级后回退到 Node 20）
+arm = facts["ci_arm64_runner"]
+if f"runs-on: {arm}" not in ci:
+    errors.append(f"ros-ci.yml 缺少 ARM64 原生 runner {arm}")
+workflows_dir = ROOT / ".github/workflows"
+for wf in sorted(workflows_dir.glob("*.yml")):
+    body = wf.read_text(encoding="utf-8")
+    for action, tag in facts["node24_actions"].items():
+        for got in re.findall(rf"uses:\s*{re.escape(action)}@(\S+)", body):
+            if got != tag:
+                errors.append(
+                    f"{wf.name} 的 {action}@{got} 与 project-facts.json 的 {tag} 不一致"
+                )
+
 if errors:
     for err in errors:
         print(f"[check_facts] FAIL: {err}")
@@ -111,5 +125,6 @@ if errors:
 print(
     f"[check_facts] OK：{len(facts['versions'])} 个包版本、ROS {ros}、覆盖率门槛 "
     f"{gate['line']}/{gate['branch']}、自检 {facts['selftest_total']} 项、"
-    f"{len(facts['doc_skeleton']['sections'])} 组中英文章节骨架全部一致"
+    f"{len(facts['doc_skeleton']['sections'])} 组中英文章节骨架、"
+    f"ARM64 runner {arm}、{len(facts['node24_actions'])} 个 Node24 Actions 主版本全部一致"
 )

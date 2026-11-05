@@ -46,7 +46,7 @@ jobs:
       image: ros:humble-ros-base
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: src/active-suspension-lidar-preview
           # 驱动自检的源码在 submodule 里，必须一并拉下来

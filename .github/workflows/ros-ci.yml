@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # colcon 会递归扫描 src/ 找包，所以放在子目录里也能被发现
           path: src/active-suspension-lidar-preview
@@ -73,12 +73,13 @@ jobs:
 
       # P2：版本号 / 环境常量（project-facts.json）、隐私脱敏边界、硬件交付承诺
       # 各只有一份真源，纯文本校验、零耗时，漂移在编译前就暴露
-      - name: 项目事实 / 隐私 / 硬件交付一致性
+      - name: 项目事实 / 隐私 / 硬件交付 / 实时性真源一致性
         working-directory: src/active-suspension-lidar-preview
         run: |
           python3 tools/check_facts.py
           python3 tools/check_privacy.py
           python3 tools/check_hardware_deliverables.py
+          python3 tools/check_realtime.py
 
       - name: 安装构建与依赖工具
         run: |
@@ -229,6 +230,94 @@ jobs:
   # 失败后回传日志：必须是独立 job（needs build）。在 build 自己的步骤里回传时
   # 它还没结束，拿不到完整日志；这里 job 已结束，可以下载到全部输出。
   # 逻辑已抽成 .github/actions/report-failure（P1-5），两个 workflow 共用同一份。
+  # ARM64 原生 CI：在真实部署架构上验证编译与自检，而不是永远只在 x86_64 上验。
+  #
+  # 前置核实（2026-11-05，逐条查证官方来源，不照抄第三方教程）：
+  #   - ROS 2 Humble 官方二进制只支持 Ubuntu Jammy 22.04（amd64 / aarch64），
+  #     不支持 Noble 24.04；但本仓用容器装 ROS，ROS 版本与 runner OS 解耦。
+  #   - docker-library/official-images 的 library/ros 声明 humble-ros-base 为
+  #     Distro ubuntu:jammy、Architectures: amd64, arm64v8，容器可在 ARM runner 原生拉取。
+  #   - Ubuntu 22.04 Arm64 runner 镜像已于 2026-09-17 结束 Active support
+  #     （Deprecated 至 2027-04），故 runner 选仍在 Active 的 ubuntu-24.04-arm；
+  #     ROS 依旧跑在容器内的 Jammy arm64 上，不受 runner OS 影响。
+  aarch64:
+    name: aarch64 原生构建与离线自检
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          path: src/active-suspension-lidar-preview
+          submodules: recursive
+
+      - name: 确认目标架构与 ROS 环境
+        run: |
+          set -e
+          echo "uname -m   : $(uname -m)"
+          echo "dpkg arch  : $(dpkg --print-architecture)"
+          . /opt/ros/humble/setup.sh
+          echo "ROS_DISTRO : $ROS_DISTRO"
+          test "$(uname -m)" = "aarch64"
+          test "$(dpkg --print-architecture)" = "arm64"
+          test "$ROS_DISTRO" = "humble"
+
+      - name: 安装构建与依赖工具（arm64）
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3-colcon-common-extensions \
+            python3-rosdep \
+            python3-pip \
+            libpcl-dev \
+            g++
+          rosdep init || true
+          rosdep update
+
+      - name: rosdep 安装依赖（arm64）
+        run: |
+          set -e
+          . /opt/ros/humble/setup.sh
+          rosdep install --from-paths src --ignore-src -r -y --skip-keys libpcl-all-dev
+
+      - name: 单一真源一致性（含实时性真源）
+        working-directory: src/active-suspension-lidar-preview
+        run: |
+          python3 tools/check_claims.py
+          python3 tools/check_counts.py
+          python3 tools/check_facts.py
+          python3 tools/check_privacy.py
+          python3 tools/check_deps.py
+          python3 tools/check_realtime.py
+
+      - name: colcon build（aarch64）
+        run: |
+          set -e
+          . /opt/ros/humble/setup.sh
+          colcon build \
+            --packages-select suspension_preview suspension_preview_v2 \
+                             suspension_control_v3 unilidar_driver car_balancer \
+            --cmake-args -Wall -Wextra -Wpedantic \
+            --event-handlers console_cohesion+
+          test -f install/suspension_control_v3/lib/libsuspension_control_core.a
+          test -f install/unilidar_driver/lib/libunilidar_driver_core.a
+
+      - name: colcon test（aarch64）
+        run: |
+          set -e
+          . /opt/ros/humble/setup.sh
+          colcon test --packages-select \
+            suspension_control_v3 suspension_preview_v2 unilidar_driver car_balancer \
+            --event-handlers console_direct+ \
+            --return-code-on-test-failure
+          colcon test-result --verbose
+
+      - name: 离线自检统一入口（coverage / aarch64）
+        working-directory: src/active-suspension-lidar-preview
+        run: bash tools/build_selftest.sh coverage
+
   report-failure:
     name: 回传失败日志
     needs: [build]
@@ -240,6 +329,23 @@ jobs:
         with:
           run-id: ${{ github.run_id }}
           job-filter: "colcon build"
+          pr-number: ${{ github.event.pull_request.number }}
+
+  # aarch64 单独回传：filter 与 x86 的 "colcon build" 不冲突，两个 job 的
+  # 失败日志都能贴回 PR（composite action 只取第一个匹配 job，故拆成两个 job）。
+  report-failure-aarch64:
+    name: 回传 aarch64 失败日志
+    needs: [aarch64]
+    if: failure() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码（本地 composite action 需要）
+        uses: actions/checkout@v7
+      - name: 回传 aarch64 失败日志
+        uses: ./.github/actions/report-failure
+        with:
+          run-id: ${{ github.run_id }}
+          job-filter: "aarch64"
           pr-number: ${{ github.event.pull_request.number }}
 
   # 覆盖率。单独 job：插桩要改编译 flag，且 -O0 + --coverage 与 sanitizer 不共存。
@@ -258,7 +364,7 @@ jobs:
       image: ros:humble-ros-base
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: src/active-suspension-lidar-preview
           submodules: recursive
@@ -335,7 +441,7 @@ jobs:
             --json-summary -o build-cov/coverage-summary.json
 
       - name: 上传覆盖率明细
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: |

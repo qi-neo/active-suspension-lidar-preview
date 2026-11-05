@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "note": "实时性数据的唯一真源。CI 只校验口径与文档一致性，不产生数据；数据必须由 tools/measure_realtime.sh 在目标板上实测写回。status=pending_measurement 时所有实测数值字段必须为 null——未实测就写数字属于编造，tools/check_realtime.py 会拒绝。",
+  "status": "pending_measurement",
+  "target": {
+    "board": "OrangePi AI Pro / Ascend 310B",
+    "cpu_arch": "aarch64 (4x ARM Cortex-A55)",
+    "ros": "ROS 2 Humble / Ubuntu 22.04 Jammy",
+    "control_freq_hz": 200,
+    "control_period_ms": 5.0,
+    "serial_link": "/dev/ttyUSB0 via CH340 @ 2 Mbps"
+  },
+  "measurement": {
+    "collected_at": null,
+    "kernel": null,
+    "cyclictest": {
+      "method": "cyclictest -p 80 -m -i 5000 (rt-tests)，内核调度延迟",
+      "samples": null,
+      "max_latency_us": null
+    },
+    "control_loop": {
+      "method": "用户态 200 Hz 周期唤醒时间戳，相邻周期偏差",
+      "periods": null,
+      "p99_period_error_us": null,
+      "max_period_error_us": null,
+      "over_5ms_count": null
+    },
+    "notes": ""
+  },
+  "public_claim_policy": "status != measured 时，不得在 README / 主页 / profile 引用任何抖动数字；引用时必须与本文档数值逐字一致。cyclictest 的内核调度延迟与 control_loop 的用户态周期偏差是两个口径，不可混用或合并宣称。",
+  "forbidden_patterns": [
+    "(最大|max(imum)?).{0,12}(抖动|jitter).{0,12}[0-9]",
+    "(抖动|jitter).{0,12}[0-9]+\\s*(us|µs|μs|微秒|ms)",
+    "p99.{0,12}(抖动|jitter|周期偏差|period error).{0,12}[0-9]"
+  ],
+  "forbidden_patterns_note": "公开文档里写死的抖动/周期偏差数字，由 tools/check_realtime.py 逐行扫描并拒绝；正则本身也收敛在本文件，不在校验器里另写一份。注意只拦抖动语境，不误伤 CHANGELOG 里已有的串口压力测试实测值（例如 p99 0.065 ms）。"
+}
