@@ -26,6 +26,7 @@ g++ -std=c++17 -O2 \
   examples/control_selftest.cpp \
   src/input_validator.cpp src/controller.cpp src/attitude_filter.cpp \
   src/safety_state_machine.cpp src/control_loop.cpp src/temporal_fuser.cpp \
+  src/command_sink.cpp src/realtime.cpp \
   src/param_check.cpp \
   -o /tmp/control_selftest
 
@@ -79,6 +80,7 @@ g++ -std=c++17 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
   examples/control_selftest.cpp \
   src/input_validator.cpp src/controller.cpp src/attitude_filter.cpp \
   src/safety_state_machine.cpp src/control_loop.cpp src/temporal_fuser.cpp \
+  src/command_sink.cpp src/realtime.cpp \
   src/param_check.cpp \
   -o /tmp/asan && /tmp/asan
 ```

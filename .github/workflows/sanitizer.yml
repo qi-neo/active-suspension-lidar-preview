@@ -73,6 +73,7 @@ jobs:
             src/suspension_control_v3/src/control_loop.cpp \
             src/suspension_control_v3/src/temporal_fuser.cpp \
             src/suspension_control_v3/src/param_check.cpp \
+            src/suspension_control_v3/src/realtime.cpp \
             src/suspension_control_v3/src/command_sink.cpp \
             -o /tmp/asan_control
           /tmp/asan_control

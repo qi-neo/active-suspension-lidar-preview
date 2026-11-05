@@ -289,7 +289,7 @@ jobs:
           set -e
           cd src/active-suspension-lidar-preview
           mkdir -p build-cov
-          # v3：整个控制与安全内核（一条命令编完六个源文件）
+          # v3：整个控制与安全内核（一条命令编完九个源文件；ROS 节点 suspension_control_node.cpp 不在此列）
           g++ -std=c++17 -O0 --coverage \
             -I src/suspension_control_v3/include -I src/suspension_preview_v2/include \
             src/suspension_control_v3/examples/control_selftest.cpp \
@@ -300,6 +300,7 @@ jobs:
             src/suspension_control_v3/src/control_loop.cpp \
             src/suspension_control_v3/src/temporal_fuser.cpp \
             src/suspension_control_v3/src/param_check.cpp \
+            src/suspension_control_v3/src/realtime.cpp \
             src/suspension_control_v3/src/command_sink.cpp \
             -o build-cov/control_selftest
           ./build-cov/control_selftest > /dev/null
