@@ -91,8 +91,11 @@ jobs:
           {
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
           rosdep install --from-paths src --ignore-src -r -y --skip-keys libpcl-all-dev
+          # P1-4：去掉 || true。libpcl-dev 在 ros:humble-ros-base（Ubuntu 22.04）上可用，
+          # 这里让它失败即退出，把"依赖没装上"提前到 apt 阶段，而不是 5 分钟后
+          # 编译期才报"找不到 PCL"——此前 || true 把失败吞掉了。
           # libpcl-all-dev 在部分平台没有对应 rosdep 条目，单独装
-          apt-get install -y --no-install-recommends libpcl-dev || true
+          apt-get install -y --no-install-recommends libpcl-dev
           } 2>&1 | tee /tmp/rosdep.log
 
       - name: colcon build
@@ -113,7 +116,11 @@ jobs:
           # 以前这一句是 `colcon test-result --verbose || true`：从没跑过 test，
           # test-result 只是把"没有测试结果"打印出来而已。现在 v3 与 v2 都注册了
           # CTest，这里真的跑一遍并且不容忍失败
-          colcon test --packages-select suspension_control_v3 suspension_preview_v2 \
+          # P1-3：colcon test 覆盖全部带自检的包（v3/v2 的 CTest 在此，
+          # 驱动包的 7 个离线自检已注册进 CTest，car_balancer 走 pytest lint）。
+          # suspension_preview 是 v1 历史包、无自检，明确不进 CI 测试。
+          colcon test --packages-select \
+            suspension_control_v3 suspension_preview_v2 unilidar_driver car_balancer \
             --event-handlers console_direct+ \
             --return-code-on-test-failure 2>&1 | tee /tmp/test.log
           colcon test-result --verbose | tee -a /tmp/test.log
@@ -210,47 +217,21 @@ jobs:
           . install/setup.sh
           ros2 run suspension_preview_v2 offline_demo
 
-      # 构建/测试失败时，把日志作为 PR 评论回传。
-      # 动机：开发机没有 ROS/Docker，Actions 日志要认证才能看——这是唯一
-      # 不依赖本地环境的失败定位手段（以后任何 CI 回归都能自查）。
   # 失败后回传日志：必须是独立 job（needs build）。在 build 自己的步骤里回传时
   # 它还没结束，拿不到完整日志；这里 job 已结束，可以下载到全部输出。
-  # 动机：开发机没有 ROS/Docker，Actions 网页日志要认证，跑挂了只能看"红"。
+  # 逻辑已抽成 .github/actions/report-failure（P1-5），两个 workflow 共用同一份。
   report-failure:
     name: 回传失败日志
     needs: [build]
     if: failure() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: 下载 build 日志并评论到 PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -uo pipefail
-          API="https://api.github.com"
-          JOBS=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-            "$API/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")
-          JOB_ID=$(echo "$JOBS" | jq -r '.jobs[] | select(.name | contains("colcon build")) | .id' | head -1)
-          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
-            echo "找不到 build job"; exit 0
-          fi
-          echo "job id = $JOB_ID"
-          # 先取 302 的 Location，再匿名下载（避免把 token 带给存储域名）
-          LOC=$(curl -sS -o /dev/null -w '%{redirect_url}' \
-            -H "Authorization: Bearer $GH_TOKEN" "$API/repos/$REPO/actions/jobs/$JOB_ID/logs")
-          if [ -z "$LOC" ]; then echo "拿不到日志地址"; exit 0; fi
-          curl -sSL "$LOC" -o /tmp/joblog.txt
-          echo "log bytes: $(wc -c < /tmp/joblog.txt)"
-          tail -300 /tmp/joblog.txt > /tmp/tail.txt
-          jq -Rs '{body: ("## CI 失败日志（自动回传）\n\n完整日志尾部 300 行：\n```\n" + . + "\n```")}' \
-            /tmp/tail.txt > /tmp/body.json
-          curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-            "$API/repos/$REPO/issues/$PR/comments" -d @/tmp/body.json
-          echo "comment posted"
+      - name: 回传 ROS CI 失败日志
+        uses: ./.github/actions/report-failure
+        with:
+          run-id: ${{ github.run_id }}
+          job-filter: "colcon build"
+          pr-number: ${{ github.event.pull_request.number }}
 
   # 覆盖率。单独 job：插桩要改编译 flag，且 -O0 + --coverage 与 sanitizer 不共存。
   #
@@ -284,59 +265,14 @@ jobs:
           # 免得基础镜像一升级就挂在这行上。
           pip3 install gcovr 2>/dev/null || pip3 install --break-system-packages gcovr
 
-      - name: 插桩构建并运行四个自检
+      # 插桩构建 + 运行 v3/v2 自检：命令与源清单全部收敛到 tools/build_selftest.sh
+      # 与 tools/selftest_sources.sh（P1-1）。新增 .cpp 只改 selftest_sources.sh 一处，
+      # 这里与 sanitizer.yml、QUICKSTART.md 自动同步，不再手写 g++ 清单。
+      - name: 插桩构建并运行四个自检（单一真源 tools/build_selftest.sh）
         run: |
           set -e
           cd src/active-suspension-lidar-preview
-          mkdir -p build-cov
-          # v3：整个控制与安全内核（八个源文件插桩 + realtime.cpp 仅链接）
-          # realtime.cpp 是 SCHED_FIFO 实时调度封装：CI 容器非 root，RealtimeGuard::apply()
-          # 必然走"权限不足"失败分支，插桩进来会把分支覆盖从 74% 拖到 68.5% 跌破门禁。
-          # 它与 serial_port.cpp 同一类"环境受限"代码，按下方写法只作为链接依赖参与、
-          # 不进覆盖率分母（gcovr 不会为未插桩文件生成覆盖率数据，故不计入 74% 的基数）。
-          g++ -std=c++17 -O0 -I src/suspension_control_v3/include \
-            -c src/suspension_control_v3/src/realtime.cpp \
-            -o build-cov/realtime_noinstr.o
-          g++ -std=c++17 -O0 --coverage \
-            -I src/suspension_control_v3/include -I src/suspension_preview_v2/include \
-            src/suspension_control_v3/examples/control_selftest.cpp \
-            src/suspension_control_v3/src/input_validator.cpp \
-            src/suspension_control_v3/src/controller.cpp \
-            src/suspension_control_v3/src/attitude_filter.cpp \
-            src/suspension_control_v3/src/safety_state_machine.cpp \
-            src/suspension_control_v3/src/control_loop.cpp \
-            src/suspension_control_v3/src/temporal_fuser.cpp \
-            src/suspension_control_v3/src/param_check.cpp \
-            src/suspension_control_v3/src/command_sink.cpp \
-            build-cov/realtime_noinstr.o \
-            -o build-cov/control_selftest
-          ./build-cov/control_selftest > /dev/null
-          # v2：四个纯函数自检，与 PCL 无关
-          for pair in \
-            "trend_selftest:road_trend.cpp" \
-            "obstacle_selftest:obstacle_detect.cpp" \
-            "protocol_selftest:protocol.cpp" \
-            "level_selftest:level_calibration.cpp"; do
-            name="${pair%%:*}"
-            src="${pair##*:}"
-            g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
-              "src/suspension_preview_v2/examples/${name}.cpp" \
-              "src/suspension_preview_v2/src/${src}" -o "build-cov/${name}"
-            "./build-cov/${name}" > /dev/null
-          done
-          # 参数校验器也要跑，否则它在预览包的分母里贡献 0 覆盖。
-          # 但 serial_port.cpp 是纯 termios I/O：离线自检只能覆盖到
-          # is_baud_supported，实测 7% 行 / 3.5% 分支，插桩进来会把分支门禁
-          # 直接拖穿（本地复算：其余文件全在 94~100%）。所以它**不插桩**，
-          # 只作为链接依赖参与，不进分母。
-          g++ -std=c++17 -O0 -I src/suspension_preview_v2/include \
-            -c src/suspension_preview_v2/src/serial_port.cpp \
-            -o build-cov/serial_port_noinstr.o
-          g++ -std=c++17 -O0 --coverage -I src/suspension_preview_v2/include \
-            src/suspension_preview_v2/examples/param_selftest.cpp \
-            src/suspension_preview_v2/src/param_check.cpp \
-            build-cov/serial_port_noinstr.o -o build-cov/param_selftest
-          ./build-cov/param_selftest > /dev/null
+          bash tools/build_selftest.sh coverage
 
       - name: 汇总覆盖率
         run: |
@@ -367,6 +303,8 @@ jobs:
           # 与上面「汇总覆盖率」用同一组 filter。原来这里写的是整个包目录，把
           # examples/*_selftest.cpp 也算了进去——测试自身的断言分支上千个，会把
           # 分母撑大，分支覆盖从 74% 掉到 57%，artifact 与门槛两个口径互相打架。
+          # --html-details 会额外为每个源文件生成 coverage.*.html；P1-2 把上传路径
+          # 改成 build-cov/*.html，明细链接才打得开（之前只传了主页面）。
           gcovr -r . build-cov \
             --filter 'src/suspension_control_v3/src/' \
             --filter 'src/suspension_control_v3/include/' \
@@ -374,9 +312,24 @@ jobs:
             --filter 'src/suspension_preview_v2/include/' \
             --html-details --html-title "主动悬架 代码覆盖率" -o build-cov/coverage.html
 
+      - name: 生成覆盖率 JSON 摘要
+        run: |
+          set -e
+          cd src/active-suspension-lidar-preview
+          # P1-2：导出机器可读的覆盖率摘要，供 P0-5 的 check_counts / 外部看板消费，
+          # 不再只能从 text 报告里肉眼读。
+          gcovr -r . build-cov \
+            --filter 'src/suspension_control_v3/src/' \
+            --filter 'src/suspension_control_v3/include/' \
+            --filter 'src/suspension_preview_v2/src/' \
+            --filter 'src/suspension_preview_v2/include/' \
+            --json-summary -o build-cov/coverage-summary.json
+
       - name: 上传覆盖率明细
         uses: actions/upload-artifact@v4
         with:
           name: coverage-html
-          path: src/active-suspension-lidar-preview/build-cov/coverage.html
+          path: |
+            src/active-suspension-lidar-preview/build-cov/*.html
+            src/active-suspension-lidar-preview/build-cov/coverage-summary.json
           if-no-files-found: error

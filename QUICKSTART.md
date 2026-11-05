@@ -37,6 +37,20 @@ g++ -std=c++17 -O2 \
 这一条同时验证了：输入校验、安全状态机、两种控制律、预瞄前馈（单点与 FIR）、
 多帧融合、姿态滤波链、位置反馈与堵转判定、急停与降级路径。
 
+> **源清单单一真源（P1-1）**：上面这些 `g++` 命令用到的 `.cpp` 列表，与 CI 里
+> `ros-ci.yml`（覆盖率 job）、`sanitizer.yml` 完全一致，全部来自
+> `tools/selftest_sources.sh`；CI 实际调用的是 `tools/build_selftest.sh`
+>（`coverage` / `sanitize` 两模式）。要复现 CI 的完整插桩 / sanitizer 构建，
+> 在**仓库根目录**直接运行：
+>
+> ```bash
+> bash tools/build_selftest.sh coverage    # 插桩构建 + 运行 v3/v2 自检，产物在 build-cov/
+> bash tools/build_selftest.sh sanitize    # ASan+UBSan 构建 + 运行 v3/v2 自检
+> ```
+>
+> 新增内核源文件时**只改 `tools/selftest_sources.sh` 一处**，QUICKSTART、两个
+> workflow 自动同步，不再有散落四处的手写清单漂移。
+
 v2 的五个纯函数自检（同样不需要 ROS；**先回到仓库根目录**）：
 
 ```bash

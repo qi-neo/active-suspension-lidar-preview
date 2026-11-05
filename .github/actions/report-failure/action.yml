@@ -1,0 +1,49 @@
+name: Report Failure Log
+description: >-
+  下载指定 workflow job 的日志并作为 PR 评论回传。动机：开发机没有
+  ROS/Docker，Actions 网页日志要认证，跑挂了只能看"红"；用这个 action
+  把失败日志自动贴回 PR，是本仓库定位 CI 失败的唯一不依赖本地环境的手段。
+inputs:
+  run-id:
+    description: 当前 workflow run 的 id（传 ${{ github.run_id }}）
+    required: true
+  job-filter:
+    description: 用于筛选目标 job 名称的子串（如 "colcon build" 或 "ASan"）
+    required: true
+  pr-number:
+    description: PR 编号（传 ${{ github.event.pull_request.number }}）
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: 下载日志并评论到 PR
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ inputs.run-id }}
+        JOB_FILTER: ${{ inputs.job-filter }}
+        PR: ${{ inputs.pr-number }}
+      shell: bash
+      run: |
+        set -uo pipefail
+        API="https://api.github.com"
+        JOBS=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+          "$API/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")
+        JOB_ID=$(echo "$JOBS" | jq -r --arg f "$JOB_FILTER" '.jobs[] | select(.name | contains($f)) | .id' | head -1)
+        if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+          echo "找不到匹配的 job（filter=$JOB_FILTER）"; exit 0
+        fi
+        echo "job id = $JOB_ID"
+        # 先取 302 的 Location，再匿名下载（避免把 token 带给存储域名）
+        LOC=$(curl -sS -o /dev/null -w '%{redirect_url}' \
+          -H "Authorization: Bearer $GH_TOKEN" "$API/repos/$REPO/actions/jobs/$JOB_ID/logs")
+        if [ -z "$LOC" ]; then echo "拿不到日志地址"; exit 0; fi
+        curl -sSL "$LOC" -o /tmp/joblog.txt
+        echo "log bytes: $(wc -c < /tmp/joblog.txt)"
+        tail -300 /tmp/joblog.txt > /tmp/tail.txt
+        jq -Rs '{body: ("## CI 失败日志（自动回传）\n\n完整日志尾部 300 行：\n```\n" + . + "\n```")}' \
+          /tmp/tail.txt > /tmp/body.json
+        curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+          "$API/repos/$REPO/issues/$PR/comments" -d @/tmp/body.json
+        echo "comment posted"

@@ -9,7 +9,7 @@ Reads the road surface 0.5–5 m ahead with a LiDAR, speed-adaptive, fuses IMU a
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
 [![ASan + UBSan](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
+[![ROS2](https://img.shields.io/badge/ROS2-Humble%20%28CI%20verified%29-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
 [![Platform](https://img.shields.io/badge/Onboard-Orange%20Pi%20AI%20Pro-orange)](#hardware)
 
@@ -392,7 +392,7 @@ ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (
 ros2 run suspension_control_v3 control_selftest    # control and safety logic
 ```
 
-Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
+Dependencies: ROS2 (Humble recommended, CI-verified), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
 `tf2_ros`. The `unilidar_driver` package additionally needs `tf2` and `tf2_ros`, and does **not**
 depend on the Unitree Lidar SDK.
 
