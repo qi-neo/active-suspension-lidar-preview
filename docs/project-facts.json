@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "note": "会变的版本号、环境常量与文档骨架的唯一真源。长文档（README / README.en / QUICKSTART / CHANGELOG）不再手写这些值，统一引用本文件；由 tools/check_facts.py 在 CI 中零耗时校验。自检分项计数见 docs/selftest-counts.json，实测改善率见 docs/results.json。",
+  "repository": "qi-neo/active-suspension-lidar-preview",
+  "versions": {
+    "suspension_control_v3": "3.2.4",
+    "suspension_preview_v2": "2.0.2",
+    "suspension_preview": "0.1.0",
+    "car_balancer": "0.1.0",
+    "unilidar_driver": "1.0.1"
+  },
+  "version_files": {
+    "suspension_control_v3": "src/suspension_control_v3/package.xml",
+    "suspension_preview_v2": "src/suspension_preview_v2/package.xml",
+    "suspension_preview": "src/suspension_preview/package.xml",
+    "car_balancer": "src/car_balancer/package.xml"
+  },
+  "version_files_note": "unilidar_driver 是 git submodule，其 package.xml 不在本仓检出树内；版本由独立仓 qi-neo/unilidar-driver 管理，本文件仅记录当前对齐的发布版，不做本地文件校验。",
+  "latest_tag": "v3.2.4",
+  "released_versions": ["3.2.4", "3.2.3", "3.2.1", "3.1.0", "3.0.1", "3.0.0", "2.0.0"],
+  "unreleased_internal_versions": ["3.2.2"],
+  "unreleased_note": "3.2.2 是内部集成版本号：CHANGELOG 有条目，但从未打 tag / 发 release；3.2.3 直接对齐并跳过对外发布该号。详见 CHANGELOG.archive.md 的 3.2.2 条目。",
+  "ros_distribution": "humble",
+  "ci_image": "ros:humble-ros-base",
+  "coverage_gate": {"line": 80, "branch": 65},
+  "selftest_total": 1108,
+  "selftest_count_source": "docs/selftest-counts.json",
+  "driver_submodule": {
+    "path": "src/unilidar_driver",
+    "repo": "qi-neo/unilidar-driver",
+    "pinned_commit": "fbdc7b3067b443a3cec768ba8abccfdfcbbfe222"
+  },
+  "changelog_split": {
+    "recent_file": "CHANGELOG.md",
+    "recent_versions": ["未发布", "3.2.4", "3.2.3"],
+    "archive_file": "CHANGELOG.archive.md",
+    "archive_from_version": "3.2.2"
+  },
+  "doc_skeleton": {
+    "note": "中英文 README 章节编号顺序不同、篇幅也不同，但必须覆盖同一组主题；下表是唯一对应关系，新增章节时两侧同步登记。",
+    "sections": [
+      {"zh": "项目简介", "en": "Overview"},
+      {"zh": "系统架构", "en": "System architecture"},
+      {"zh": "快速开始", "en": "Quick start"},
+      {"zh": "仓库结构", "en": "Repository layout"},
+      {"zh": "模块说明", "en": "Packages"},
+      {"zh": "关键参数", "en": "Key parameters"},
+      {"zh": "实测结果", "en": "Experimental results"},
+      {"zh": "性能与实时性", "en": "Performance and real-time"},
+      {"zh": "下行带宽", "en": "Downlink bandwidth"},
+      {"zh": "常见问题", "en": "FAQ"},
+      {"zh": "许可证", "en": "License"}
+    ]
+  }
+}

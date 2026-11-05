@@ -86,6 +86,11 @@
 - **瓶颈在 XL4015 单通道 5 A**：四路堵转需 10 A，超过单通道上限，必须把四路舵机分到 ≥2 个通道（每通道 ≤2 路）。
 - **压差**：12 V − 8.4 V = 3.6 V ≥ 1.2 V 正常；电池低于约 9.6 V 时压差不足会掉压，避免深放。
 - **保护**：每个 XL4015 通道出口串 5 A 保险，舵机供电走线按 ≥5 A 设计。
+
+#### 整车与验证平台
+
+| 平台 | 规格 | 状态 |
+|------|------|------|
 | 整车样机 | 400 × 300 × 200 mm | 3–8 km/h 稳定行驶 |
 | 验证平台 | 传送带式单轮台架 | 模拟不同车速与路面 |
 
@@ -192,16 +197,37 @@ ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑
 
 ```
 active-suspension-lidar-preview/
+├── .github/
+│   ├── workflows/                   ROS CI / ASan+UBSan / 覆盖率 / 硬件 ERC
+│   └── actions/report-failure/      失败日志回传 composite action（两 workflow 共用）
 ├── src/
 │   ├── unilidar_driver/             [submodule] 宇树 L1 雷达驱动：自研 CH340 串口协议解析，发布点云与 IMU
 │   ├── suspension_preview/          初版预瞄节点（C++）
 │   ├── suspension_preview_v2/       v2 接口化版本：核心库 + 两个节点 + 离线示例
 │   ├── suspension_control_v3/       v3 闭环控制：输入校验 + 安全状态机 + 控制器 + 离线自检
 │   └── car_balancer/                早期姿态平衡包（Python）
-└── docs/
-    ├── paper/                       项目论文（文字版）
-    └── review/                      v1 代码审查报告、v2 升级说明
+├── hardware/                        硬件设计：主控板 KiCad/EasyEDA 工程、BOM、各板设计文档
+├── docs/
+│   ├── paper/                       项目论文（文字版，对应 v1 姿态反馈阶段）
+│   ├── review/                      v1 代码审查报告、v2 升级说明
+│   ├── figures/                     README 插图（整车实拍、架构图）
+│   ├── calibration.md                标定说明
+│   ├── results.json                 [真源] 对外实测改善率
+│   ├── selftest-counts.json         [真源] 离线自检分项计数
+│   ├── project-facts.json           [真源] 版本号与环境常量
+│   └── PRIVACY.md                   隐私与脱敏边界
+├── tools/                           CI 校验脚本 + 离线自检统一构建入口
+│   ├── build_selftest.sh            coverage | sanitize 两模式（单一真源）
+│   ├── selftest_sources.sh          .cpp 源清单（单一真源）
+│   └── check_*.py                   依赖 / 口径 / 计数 / 事实 / 隐私 / 硬件交付校验
+├── README.md · README.en.md · QUICKSTART.md
+├── CHANGELOG.md · CHANGELOG.archive.md（3.2.2 及更早）
+├── LICENSE · NOTICE · .gitmodules
+└── .gitignore
 ```
+
+> 中英文 README 共用同一章节骨架（章节编号一一对应），由 `tools/check_facts.py` 在 CI 中校验；
+> 会变的版本号、环境常量、自检总数集中在 `docs/project-facts.json`，不在长文档里手写。
 
 ## 5. 模块说明
 
@@ -575,9 +601,10 @@ v2 在取不到 TF 时会丢弃该帧而不是继续下发。检查 `base_link` 
 
 ## 11. 许可证
 
-[MIT](LICENSE)。转载或二次开发请保留出处；论文与硬件设计版权归项目团队所有。
+[MIT](LICENSE)。第三方派生与版权声明见 [`NOTICE`](NOTICE)；论文与硬件设计版权归项目团队所有。
 
-版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)。
+版本变更记录在 [`CHANGELOG.md`](CHANGELOG.md)（最近两版）与
+[`CHANGELOG.archive.md`](CHANGELOG.archive.md)（3.2.2 及更早，含未发布内部版本号说明）。
 
 ## 12. English Abstract
 

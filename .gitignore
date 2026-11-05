@@ -21,4 +21,5 @@ __pycache__/
 
 # Local secrets / env
 *.env
+secrets.h
 build-cov/

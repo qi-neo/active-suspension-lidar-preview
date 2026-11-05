@@ -71,6 +71,15 @@ jobs:
           python3 tools/check_claims.py
           python3 tools/check_counts.py
 
+      # P2：版本号 / 环境常量（project-facts.json）、隐私脱敏边界、硬件交付承诺
+      # 各只有一份真源，纯文本校验、零耗时，漂移在编译前就暴露
+      - name: 项目事实 / 隐私 / 硬件交付一致性
+        working-directory: src/active-suspension-lidar-preview
+        run: |
+          python3 tools/check_facts.py
+          python3 tools/check_privacy.py
+          python3 tools/check_hardware_deliverables.py
+
       - name: 安装构建与依赖工具
         run: |
           set -eo pipefail

@@ -1,0 +1,71 @@
+name: 硬件 ERC / DRC（尽力而为）
+
+# P2-5：硬件目录此前只做「网表文本一致性」校验，从未跑过真正的电气规则检查。
+# 本工作流在硬件文件变更时尝试用 kicad-cli 生成 ERC / DRC 报告并上传 artifact。
+#
+# 注意：GitHub runner 上不保证能装到 kicad-cli，且本仓库的硬件「未打样 / 未实测」
+# 状态不因一次 CI 通过而改变。因此整个 job 不阻塞合并（continue-on-error），
+# 报告缺失时以 hardware/README.md 的状态标签为准。
+on:
+  push:
+    paths:
+      - "hardware/**"
+      - ".github/workflows/hardware-erc.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardware-erc
+  cancel-in-progress: true
+
+jobs:
+  erc:
+    name: KiCad ERC / DRC（非阻塞）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 kicad-cli（不可用则跳过）
+        id: kicad
+        run: |
+          set -e
+          if command -v kicad-cli >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sudo apt-get update -qq
+          if sudo apt-get install -y --no-install-recommends kicad-cli >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::runner 上无法安装 kicad-cli，跳过 ERC/DRC；状态仍以 hardware/README.md 为准"
+          fi
+
+      - name: 原理图 ERC
+        if: steps.kicad.outputs.available == 'true'
+        run: |
+          mkdir -p hardware-report
+          kicad-cli sch erc \
+            --output hardware-report/erc.rpt \
+            --exit-code-violations \
+            hardware/main-control-board/kicad/P0_main_control.kicad_sch || true
+
+      - name: PCB DRC
+        if: steps.kicad.outputs.available == 'true'
+        run: |
+          kicad-cli pcb drc \
+            --output hardware-report/drc.rpt \
+            --exit-code-violations \
+            hardware/main-control-board/kicad/P0_main_control.kicad_pcb || true
+
+      - name: 上传 ERC / DRC 报告
+        if: steps.kicad.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-erc-drc-report
+          path: hardware-report/
+          if-no-files-found: warn
