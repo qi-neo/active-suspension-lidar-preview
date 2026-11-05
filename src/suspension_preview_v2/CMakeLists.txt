@@ -174,7 +174,7 @@ target_include_directories(p0_link_selftest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/examples)
 target_link_libraries(p0_link_selftest PRIVATE Threads::Threads)
 
-# 六个纯函数自检注册进 CTest：colcon test / ctest 会真正跑它们。
+# 八个纯函数自检注册进 CTest：colcon test / ctest 会真正跑它们。
 # 此前只有 install(TARGETS) 而没有 add_test，colcon test 是空的——
 # "装了可执行但没有任何步骤调用它"正是这些自检长期不进 CI 的原因。
 include(CTest)

@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "note": "对外实测改善率的唯一真源。所有 README / profile / 主页的改善率表述必须来自本文件；withdrawn 条目禁止再用于对外宣称。由 tools/check_claims.py 在 CI 中校验。",
+  "metric_definition": {
+    "fluctuation": "动态行驶段内姿态角 / 垂向加速度相对于该次运行自身均值的峰峰值（被动取 Mode=0 段，主动取整段）",
+    "improvement": "(passive - active) / passive",
+    "caveat": "三次运行在不同路段独立采集，路面输入不完全一致；工况 02 的俯仰与垂向、工况 03 的横滚出现负改善，按实测如实列出，不做择优引用"
+  },
+  "source": "试验记录原始表格，逐字对应 README.en.md 的 Experimental results 章节",
+  "experiments": [
+    {
+      "id": "01-ordinary-road",
+      "metrics": [
+        {"name": "车身横滚角", "passive": "−3.24° ~ +4.86°", "active": "−3.38° ~ +2.99°", "improvement_pct": 21},
+        {"name": "车身俯仰角", "passive": "−1.02° ~ +1.16°", "active": "−0.78° ~ +1.14°", "improvement_pct": 12},
+        {"name": "Z 轴加速度", "passive": "0.36g", "active": "0.32g", "improvement_pct": 10}
+      ]
+    },
+    {
+      "id": "02",
+      "metrics": [
+        {"name": "车身横滚角", "passive": "−2.11° ~ +3.18°", "active": "−2.30° ~ +2.97°", "improvement_pct": 0},
+        {"name": "车身俯仰角", "passive": "−2.65° ~ +1.18°", "active": "−2.43° ~ +1.75°", "improvement_pct": -9},
+        {"name": "Z 轴加速度", "passive": "0.30g", "active": "0.36g", "improvement_pct": -20}
+      ]
+    },
+    {
+      "id": "03-obstacle-impact",
+      "metrics": [
+        {"name": "车身横滚角", "passive": "−0.60° ~ +0.62°", "active": "−0.48° ~ +1.13°", "improvement_pct": -32},
+        {"name": "车身俯仰角", "passive": "−4.10° ~ +15.5°", "active": "−3.19° ~ +10.7°", "improvement_pct": 29},
+        {"name": "Z 轴加速度", "passive": "0.93g", "active": "0.57g", "improvement_pct": 38}
+      ]
+    }
+  ],
+  "public_claim_zh": "实车 A/B 测试（三次独立采集、路段不同）：越障工况俯仰角波动降约 29%、Z 轴加速度干扰降约 38%；常规路面横滚/俯仰波动降约 12–21%，另有工况出现负改善，详见 docs/results.json",
+  "public_claim_en": "On-vehicle A/B testing (three runs on independently collected road sections): on the obstacle-crossing run, pitch fluctuation down ~29% and Z-axis acceleration disturbance down ~38%; on ordinary-road runs, roll/pitch fluctuation down ~12–21% (road inputs were not identical across runs — see \"Experimental results\")",
+  "withdrawn": [
+    {
+      "id": "paper-exp1",
+      "values_pct": [81.4, 81.7, 60.0],
+      "source": "docs/paper/ 文字版表 1（论文成稿阶段的实验 1）",
+      "reason": "未核实、且未采用同路段重复 A/B；2026-10-19 已在 qi-neo/qi-neo 的 PR #1 中从对外门面撤下。中文 README 曾把该组数字写回，本轮改为试验记录口径。"
+    }
+  ],
+  "forbidden_in_public_docs": ["81.4", "81.7", "60.0", "各降约 81%", "降约 81%", "干扰降 60%"]
+}

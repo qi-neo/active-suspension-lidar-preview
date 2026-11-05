@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "note": "离线自检分项计数的唯一真源，与 .github/workflows/ros-ci.yml 各步骤名括号中的项数一一对应。由 tools/check_counts.py 在 CI 中校验。",
+  "source": ".github/workflows/ros-ci.yml 步骤名",
+  "policy": "对外文档（README.md / README.en.md / QUICKSTART.md / profile / 个人主页）不再写死具体项数，统一指向本文件与 CI；只有 CI 步骤名可以保留数字，且必须与本文件一致。",
+  "checks": {
+    "suspension_control_v3/control_selftest": 443,
+    "unilidar_driver/decoder_selftest": 202,
+    "unilidar_driver/serial_receiver_selftest": 81,
+    "unilidar_driver/udp_receiver_selftest": 38,
+    "unilidar_driver/serial_stress_selftest": 14,
+    "unilidar_driver/node_loop_selftest": 65,
+    "suspension_preview_v2/pure_functions": 196,
+    "suspension_preview_v2/level_selftest": 69
+  },
+  "total": 1108,
+  "historical_drift_examples": [1181, 708, 617, 410, 454, 265, 135, 63]
+}

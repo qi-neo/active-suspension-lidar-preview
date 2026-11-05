@@ -24,13 +24,13 @@ English | [简体中文](README.md) | **[Quick start (5 min)](QUICKSTART.md)**
 > - The control core depends on neither ROS nor PCL and self-tests without the vehicle; the safety state machine covers both a degraded path and an emergency path
 
 > CI runs `colcon build` on all five packages inside a ROS Humble container and
-> executes offline self-test groups (v3 control: 454 checks, driver packet parsing: 202
-> checks, driver transport & main loop: 203 checks, v2 pure functions: 322
-> checks — 1181 in total; Linux adds one 2 Mbps serial assertion). **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
+> executes every offline self-test group. Per-group counts live in
+> [`docs/selftest-counts.json`](docs/selftest-counts.json) and the CI step names; no hard-coded totals in docs.
+> **Tags before v3.1.0 do not build** in a clean environment; see [CHANGELOG](CHANGELOG.md).
 
 > **Just got the code?** Start with [QUICKSTART.md](QUICKSTART.md) — one `g++`
 > command, a few seconds, no ROS and no hardware needed to confirm the code is
-> complete and runnable (454 checks).
+> complete and runnable (offline self-tests; counts in docs/selftest-counts.json).
 
 ## Overview
 
@@ -323,7 +323,7 @@ The effective speed, sample distance and frame age are written into `ControlStat
 every tick (`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`),
 so "how far ahead did the feedforward actually look" is visible during integration.
 
-454 offline self-test checks, requiring neither ROS nor hardware:
+Offline self-tests (counts in docs/selftest-counts.json) require neither ROS nor hardware:
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -389,7 +389,7 @@ ros2 run unilidar_driver serial_stress_selftest     # serial stress (2 Mbps feed
 ros2 run unilidar_driver node_loop_selftest         # node main loop (latency and backpressure), 65 checks
 ros2 run suspension_preview_v2 offline_demo        # point cloud parsing chain
 ros2 run suspension_preview_v2 level_selftest      # virtual level calibration (Gram-Schmidt), 69 checks
-ros2 run suspension_control_v3 control_selftest    # control and safety logic, 454 checks
+ros2 run suspension_control_v3 control_selftest    # control and safety logic
 ```
 
 Dependencies: ROS2 (Humble or Jazzy recommended), `rclcpp`, `sensor_msgs`, `pcl_ros`, `pcl_conversions`,
@@ -593,7 +593,7 @@ CRC field itself**. Payload unit is **mm** (int16); invalid samples are `0x7FFF`
 
 ## Experimental results
 
-On-vehicle A/B testing, active versus passive (data taken from the raw trial-record spreadsheets; each run was collected independently on a different road section):
+On-vehicle A/B testing, active versus passive (data taken from the raw trial-record spreadsheets; each run was collected independently on a different road section). Machine-readable single source of truth: [`docs/results.json`](docs/results.json):
 
 | Run | Metric | Passive | Active | Improvement |
 |-----|--------|---------|--------|-------------|

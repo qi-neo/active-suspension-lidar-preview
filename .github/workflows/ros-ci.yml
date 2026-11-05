@@ -64,6 +64,13 @@ jobs:
         working-directory: src/active-suspension-lidar-preview
         run: python3 src/suspension_control_v3/tools/check_ros_params.py 2>&1 | tee /tmp/check_params.log
 
+      # P0：对外改善率口径与离线自检项数各只有一份真源，纯文本校验、零耗时
+      - name: 对外口径与自检计数一致性
+        working-directory: src/active-suspension-lidar-preview
+        run: |
+          python3 tools/check_claims.py
+          python3 tools/check_counts.py
+
       - name: 安装构建与依赖工具
         run: |
           set -eo pipefail

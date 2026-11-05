@@ -7,6 +7,7 @@
 激光雷达随车速自适应预瞄路面高程（0.5–5 m），融合 IMU 姿态反馈，驱动四轮独立数字舵机实时调节悬架，抑制非结构化路面上的车身振动与姿态波动。
 
 [![ROS CI](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/ros-ci.yml)
+[![ASan + UBSan](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml/badge.svg)](https://github.com/qi-neo/active-suspension-lidar-preview/actions/workflows/sanitizer.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E?logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B&logoColor=white)](https://isocpp.org/)
@@ -18,15 +19,16 @@
 
 > **要点**
 >
-> - 实车 A/B 测试：车身横滚、俯仰角波动各降约 81%，Z 轴加速度干扰降 60%
+> - 实车 A/B 测试（三次独立采集、路段不同）：越障工况俯仰角波动降约 29%、Z 轴加速度干扰降约 38%；常规路面横滚/俯仰波动降约 12–21%，另有工况出现负改善，详见 docs/results.json
 > - 自研宇树 L1 的 CH340 串口报文解析与几何换算，不链接官方静态库，可直接顶替官方节点
 > - 控制核心不依赖 ROS 与 PCL，可脱离整车单独编译自检；安全状态机含降级与急停两条异常分支
 
-> CI 在 ROS Humble 容器里 `colcon build` 五个包，并跑多组离线自检（v3 控制 454 项、驱动解析 202 项、
-> 驱动传输与主循环 203 项、v2 纯函数 322 项，共 1181 项；Linux 上串口自检多 1 项 2 Mbps 断言）。v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
+> CI 在 ROS Humble 容器里 `colcon build` 五个包并跑全部离线自检；分项计数以
+> [`docs/selftest-counts.json`](docs/selftest-counts.json) 与 CI 步骤名为准，不在文档里写死数字。
+> v3.1.0 之前的 tag 无法在干净环境构建，细节见 [CHANGELOG](CHANGELOG.md)。
 
 > **刚拿到代码？** 先看 [QUICKSTART.md](QUICKSTART.md)——一条 `g++` 命令、几秒钟，
-> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（454 项检查）。
+> 不需要 ROS 和硬件就能确认这套代码是完整可跑的（离线自检，项数见 docs/selftest-counts.json）。
 
 ## 目录
 
@@ -174,13 +176,13 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 四个包都提供不依赖 ROS 的离线验证，可在没有硬件时确认链路是否正常：
 
 ```bash
-ros2 run unilidar_driver decoder_selftest    # 报文解析，63 项检查
+ros2 run unilidar_driver decoder_selftest    # 报文解析
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
 ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
 ros2 run suspension_preview_v2 height_calib_selftest   # 高度标定表（插值/钳位/CSV/缺陷回归），46 项检查
 ros2 run suspension_preview_v2 calibration_tool --selftest  # 标定工具自检，46 项检查
 ros2 run suspension_preview_v2 p0_link_selftest         # P0 板接口层（PTY 仿真 0x13 帧），18 项检查
-ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑，454 项检查
+ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑
 ```
 
 依赖：ROS2（推荐 Humble / Jazzy）、`rclcpp`、`sensor_msgs`、`nav_msgs`、`pcl_ros`、`pcl_conversions`、`tf2_ros`。
@@ -334,7 +336,7 @@ flowchart LR
 （`speed_mps` / `lookahead_m` / `profile_age_ms` / `sample_position_m`），
 联调时能直接看到"前馈到底按多远取了样"。
 
-离线自检 454 项，不需要 ROS 与硬件：
+离线自检（项数见 docs/selftest-counts.json）不需要 ROS 与硬件：
 
 ```bash
 ros2 run suspension_control_v3 control_selftest
@@ -369,13 +371,21 @@ ros2 run car_balancer test_imu_node
 
 ## 7. 实测结果
 
-实车 A/B 测试（主动对比被动）：
+实车 A/B 测试（主动对比被动；数据取自试验记录原始表格，三次运行在不同路段独立采集）：
 
-| 指标 | 被动 | 主动 | 改善 |
-|------|------|------|------|
-| 车身横滚角波动 | −5.87° ~ +6.12° | −1.15° ~ +1.08° | **81.4%** |
-| 车身俯仰角波动 | −4.95° ~ +5.20° | −0.90° ~ +0.95° | **81.7%** |
-| Z 轴加速度干扰 | 0.85g ~ 1.15g | 0.94g ~ 1.06g | **60.0%** |
+| 工况 | 指标 | 被动 | 主动 | 改善 |
+|------|------|------|------|------|
+| 01 常规路面 | 车身横滚角 | −3.24° ~ +4.86° | −3.38° ~ +2.99° | +21% |
+| 01 常规路面 | 车身俯仰角 | −1.02° ~ +1.16° | −0.78° ~ +1.14° | +12% |
+| 01 常规路面 | Z 轴加速度 | 0.36g | 0.32g | +10% |
+| 02 | 车身横滚角 | −2.11° ~ +3.18° | −2.30° ~ +2.97° | +0% |
+| 02 | 车身俯仰角 | −2.65° ~ +1.18° | −2.43° ~ +1.75° | −9% |
+| 02 | Z 轴加速度 | 0.30g | 0.36g | −20% |
+| 03 越障冲击 | 车身横滚角 | −0.60° ~ +0.62° | −0.48° ~ +1.13° | −32% |
+| 03 越障冲击 | 车身俯仰角 | −4.10° ~ +15.5° | −3.19° ~ +10.7° | +29% |
+| 03 越障冲击 | Z 轴加速度 | 0.93g | 0.57g | +38% |
+
+波动 = 动态行驶段内姿态角 / 垂向加速度相对于该次运行自身均值的峰峰值；改善 =（被动 − 主动）/ 被动。三次运行在不同路段独立采集，路面输入不一致；工况 02 的俯仰与垂向、工况 03 的横滚为负改善，按实测如实列出。完整机器可读数据见 [`docs/results.json`](docs/results.json)。
 
 <p align="center"><img src="docs/figures/attitude_compare.png" width="660" alt="被动与主动悬架横滚角、俯仰角曲线对比"></p>
 <p align="center"><sub>图 1　常规路面工况（01）：横滚角与俯仰角，250 Hz 原始数据去均值、36 ms 滑动平均</sub></p>
@@ -384,7 +394,7 @@ ros2 run car_balancer test_imu_node
 <p align="center"><sub>图 2　越障工况（03）：俯仰角响应，主动悬架峰值明显收窄</sub></p>
 
 <p align="center"><img src="docs/figures/paper_exp1_compare.png" width="520" alt="论文图 1：实验 1 被动与主动悬架性能指标对比"></p>
-<p align="center"><sub>图 3　项目论文图 1（实验 1）：被动与主动悬架性能指标对比</sub></p>
+<p align="center"><sub>图 3　论文成稿阶段图 1（实验 1）：未采用同路段重复 A/B，其改善率已撤下，不作为对外口径；见 docs/results.json</sub></p>
 
 姿态控制器的核心方法：
 
@@ -393,7 +403,7 @@ ros2 run car_balancer test_imu_node
 - 无导数 PD：以陀螺仪角速度代替误差微分，避免噪声放大，整定 Kp=1.85、Kd=0.85；
 - 运动学解耦与迟滞 PWM：消除末端高频微震。
 
-论文原文为 PDF（已脱敏），文字版见 `docs/paper/`。
+论文原文为 PDF（已脱敏），文字版见 `docs/paper/`。论文中的实验数据为成稿阶段口径，与本节试验记录口径不同，对外引用请以 [`docs/results.json`](docs/results.json) 为准。
 
 ## 8. 性能与实时性
 

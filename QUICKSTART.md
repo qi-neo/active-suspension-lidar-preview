@@ -11,7 +11,7 @@
 控制律有一条 PD 和一条增量式 LQI 可选，预瞄前馈有时间域 FIR。
 
 **一句话定位**：感知（点云→路面剖面）+ 预瞄控制（提前量可算、可验证）+ 安全兜底
-（坏数据一律拒绝，故障分级降级）三件事都做完了，且有 454 项离线检查护着。
+（坏数据一律拒绝，故障分级降级）三件事都做完了，且有离线自检护着（项数见 docs/selftest-counts.json）。
 
 ## 1. 五分钟跑起来（不需要 ROS、不需要硬件）
 
@@ -29,46 +29,46 @@ g++ -std=c++17 -O2 \
   src/param_check.cpp \
   -o /tmp/control_selftest
 
-/tmp/control_selftest   # 编译器约 4 s；运行 0.01 s，输出 454 项检查结果
+/tmp/control_selftest   # 编译器约 4 s；运行 0.01 s，输出自检结果（项数见 docs/selftest-counts.json）
 ```
 
-看到 `检查项 454，失败 0 -> 全部通过` 就说明代码是完整的、逻辑是通的。
+看到自检输出「失败 0 / 全部通过」就说明代码是完整的、逻辑是通的（具体项数会随自检增减，不写死在文档里）。
 这一条同时验证了：输入校验、安全状态机、两种控制律、预瞄前馈（单点与 FIR）、
 多帧融合、姿态滤波链、位置反馈与堵转判定、急停与降级路径。
 
-v2 的四个纯函数自检（同样不需要 ROS；**先回到仓库根目录**）：
+v2 的五个纯函数自检（同样不需要 ROS；**先回到仓库根目录**）：
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"   # 回到仓库根
 
-# 路面趋势拟合（29 项）
+# 路面趋势拟合
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/trend_selftest.cpp \
   src/suspension_preview_v2/src/road_trend.cpp -o /tmp/trend && /tmp/trend
 
-# 障碍物检测（32 项）
+# 障碍物检测
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/obstacle_selftest.cpp \
   src/suspension_preview_v2/src/obstacle_detect.cpp -o /tmp/obst && /tmp/obst
 
-# 串口协议编解码（82 项）
+# 串口协议编解码
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/protocol_selftest.cpp \
   src/suspension_preview_v2/src/protocol.cpp -o /tmp/proto && /tmp/proto
 
-# 启动参数校验（21 组致命判据，53 项）
+# 启动参数校验（21 组致命判据）
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/param_selftest.cpp \
   src/suspension_preview_v2/src/param_check.cpp \
   src/suspension_preview_v2/src/serial_port.cpp -o /tmp/param && /tmp/param
 
-# 虚拟水平面（重力向量定姿，69 项）
+# 虚拟水平面（重力向量定姿）
 g++ -std=c++17 -O2 -I src/suspension_preview_v2/include \
   src/suspension_preview_v2/examples/level_selftest.cpp \
   src/suspension_preview_v2/src/level_calibration.cpp -o /tmp/level && /tmp/level
 ```
 
-# 这五条合计 265 项，加上 v3 的 454 项共 **708 项**
+> 五条 v2 自检与控制内核自检的分项计数见 docs/selftest-counts.json，不在本文档写死总数。
 
 ### 想跑内存与未定义行为检查
 
@@ -117,14 +117,14 @@ flowchart LR
 
 三层，逐层变严：
 
-1. **454 项离线检查** — 每条断言都针对一个具体行为（不是"跑了没崩"）。
+1. **离线自检** — 每条断言都针对一个具体行为（不是"跑了没崩"），项数见 docs/selftest-counts.json。
    上面第 1 节已经跑过。
 2. **ASan / UBSan** — 内存越界与未定义行为。独立 workflow（`sanitizer.yml`），
    徽章在 README 首屏。本项目靠它抓到过测试代码里的两处堆溢出（当时断言全绿）。
 3. **CI** — 每次推送在干净容器里重新构建、跑全部自检、跑 sanitizer、量覆盖率。
 
-覆盖率当前水位：`src/suspension_control_v3/src/` 六个源文件**行覆盖 100%**。
-这个数字不是目的，用途是按图索骥找没测到的分支——本项目三轮覆盖提升都是这么推着
+覆盖率门槛与明细以 CI 的 coverage job 为准（当前 line 80 / branch 70），HTML 明细见 CI artifact，
+不在文档里写死水位。用途是按图索骥找没测到的分支——本项目三轮覆盖提升都是这么推着
 做的，每一轮都顺手抓出真问题（死代码、永假检查、假通过的断言）。
 
 ## 5. 想改哪里
@@ -181,4 +181,4 @@ FIR 权重是按控制周期推的（时间域），落到空间剖面必须按 
 先用工具算好再填。
 
 **Q：改动之后怎么知道有没有弄坏？**
-跑第 1 节那条命令。454 项覆盖了主要路径与大部分错误路径。
+跑第 1 节那条命令。自检覆盖了主要路径与大部分错误路径。
