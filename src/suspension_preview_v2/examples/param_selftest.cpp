@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "suspension_preview_v2/param_check.hpp"
+#include "suspension_preview_v2/types.hpp"
 
 namespace {
 
@@ -457,6 +458,24 @@ void test_issue_messages_explain_consequence() {
     std::printf("  每项问题都带键名 + 现象说明（%zu 项）\n", issues.size());
 }
 
+// 点云时间戳归一化：零戳不能当采集时刻传给下游，否则剖面被标成 1970，
+// 下游按新鲜度校验整帧丢弃，表现为"节点在跑但没有剖面"。
+void test_stamp_normalization() {
+    using suspension_preview_v2::normalize_stamp_sec;
+    using suspension_preview_v2::valid_stamp_sec;
+    check(valid_stamp_sec(1.25), "有效采集时刻应通过");
+    check(!valid_stamp_sec(0.0), "零时间戳应判为无效");
+    check(!valid_stamp_sec(-1.0), "负时间戳应判为无效");
+    check(!valid_stamp_sec(std::numeric_limits<double>::quiet_NaN()),
+          "NaN 时间戳应判为无效");
+    check(normalize_stamp_sec(0.0, 12.5) == 12.5, "零戳应回退到到达时刻");
+    check(normalize_stamp_sec(-3.0, 12.5) == 12.5, "负戳应回退到到达时刻");
+    check(normalize_stamp_sec(std::numeric_limits<double>::quiet_NaN(), 12.5) == 12.5,
+          "NaN 戳应回退到到达时刻");
+    check(normalize_stamp_sec(1.25, 12.5) == 1.25, "有效戳应原样保留");
+    std::printf("  时间戳归一化：零戳/负戳/NaN -> 到达时刻，有效戳原样保留\n");
+}
+
 }  // namespace
 
 int main() {
@@ -471,6 +490,7 @@ int main() {
     test_disabled_groups_not_checked();
     test_multiple_errors_reported_at_once();
     test_issue_messages_explain_consequence();
+    test_stamp_normalization();
     std::printf("=== 检查项 %d，失败 %d ===\n", g_total, g_fail);
     return g_fail ? 1 : 0;
 }

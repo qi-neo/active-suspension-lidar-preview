@@ -45,6 +45,10 @@ public:
     // 硬件急停是否已经成功送达（失败会由实现自己重试）
     virtual bool emergency_stop_delivered() const = 0;
 
+    // 复位/解除急停时调用：清除本次急停事件的"已送达"状态。
+    // 不清除的话，下一次进入 Emergency 会被误判为"上次已经发过"而静默跳过。
+    virtual void reset_emergency_stop() = 0;
+
     // true = 异步通道（submit 只投递，真正写入与重试在后台线程）
     virtual bool is_async() const = 0;
 

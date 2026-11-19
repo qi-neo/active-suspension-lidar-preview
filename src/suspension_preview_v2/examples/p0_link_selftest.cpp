@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <string>
 #include <termios.h>
 #include <thread>
@@ -76,6 +77,7 @@ int main() {
         int pwm;
     };
     std::vector<RxFrame> received;
+    std::atomic<int> frame_count{0};
     std::atomic<bool> done{false};
 
     std::thread board([&]() {
@@ -112,6 +114,7 @@ int main() {
                                     ? -1
                                     : static_cast<int>(r.frame.payload[1]);
                         received.push_back(f);
+                        ++frame_count;
                         buf.erase(buf.begin(), buf.begin() + r.consumed);
                         continue;
                     }
@@ -155,6 +158,28 @@ int main() {
     // 给板端线程时间收齐四帧
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
+    // 4b) 四轮下发必须是"先全校验、再下发"：第三轮 NaN 时一帧都不能出去。
+    // 旧实现边校验边写，前两轮已经动作，车身会被拧斜。
+    // 复用同一条 PTY，避免第二个 master 影响 macOS 的 pts 编号。
+    link.disconnect();
+    const int frames_before_bad = frame_count.load();
+    {
+        P0BoardLink link_bad(slave_path, 115200);
+        std::string err_bad;
+        check(link_bad.loadCalibration(table, err_bad), "第二组载入标定应成功");
+        check(link_bad.connect(), "第二组连接应成功");
+        std::array<double, kSuspensionWheelCount> bad = target_mm;
+        bad[2] = std::numeric_limits<double>::quiet_NaN();
+        check(!link_bad.setTargetHeightMm(bad), "含 NaN 的四轮下发应失败");
+        check(!link_bad.last_error().empty(), "提前失败时 last_error 应非空");
+        check(link_bad.last_error().find("均未下发") != std::string::npos,
+              "错误信息应说明四轮均未下发");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        check(frame_count.load() == frames_before_bad,
+              "校验阶段失败时不应写出任何 0x13 帧");
+        link_bad.disconnect();
+    }
+
     // 4) 校验收到 4 帧 0x13，且轮号/PWM 与标定换算一致（不依赖到达顺序）
     done.store(true);
     board.join();
@@ -178,7 +203,9 @@ int main() {
     // 5) 未标定保护：新 link 不载入标定直接下发应失败，且给出非空错误
     link.disconnect();
     P0BoardLink link2(slave_path, 115200);
-    check(link2.connect(), "第二个 link 连接应成功");
+    const bool link2_ok = link2.connect();
+    if (!link2_ok) std::printf("    link2 connect 错误: %s\n", link2.last_error().c_str());
+    check(link2_ok, "第二个 link 连接应成功");
     check(!link2.setTargetHeightMm(0, 50.0), "未载入标定应拒绝下发");
     check(!link2.last_error().empty(), "失败时 last_error 应非空");
     link2.disconnect();

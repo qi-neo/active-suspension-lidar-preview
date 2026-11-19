@@ -380,6 +380,14 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     status_.hold_output = sm.hold_output;
     status_.output_zero = sm.output_zero;
 
+    // 每一次"新进入"Emergency 都是独立的安全事件：先清掉上一事件留下的
+    // "已送达"标志，否则 clear_estop -> 再次急停时会被误判为已经发过而静默跳过。
+    // 放在这里而不是 request_estop() 里，是因为姿态超限/链路丢失等也会由
+    // 状态机自行进入 Emergency，不一定经过外部 request_estop()。
+    if (state_changed && sm.state == ControlState::kEmergency && sink_) {
+        sink_->reset_emergency_stop();
+    }
+
     // ---- 模式变化时下发一次 ----
     if (params_.enable_driver && driver_) {
         if (!mode_pushed_ || sm.mode != last_mode_) {
@@ -548,6 +556,9 @@ void SuspensionControlLoop::request_estop(const char* reason) {
 
 void SuspensionControlLoop::clear_estop() {
     state_machine_->clear_estop();
+    // 让命令通道也回到"未送达"，这样后台 worker 不再持有旧急停请求，
+    // 下一次进入 Emergency 才能真正下发一次
+    if (sink_) sink_->reset_emergency_stop();
 }
 
 bool SuspensionControlLoop::request_reset() {
@@ -556,6 +567,9 @@ bool SuspensionControlLoop::request_reset() {
         validator_->reset();
         controller_->reset();
         attitude_.valid = false;
+        // 与状态机的 attitude_latched_ 同理：复位必须丢弃上一次故障的输入证据，
+        // 否则复位后第一拍会拿历史超限标志再次锁存急停
+        attitude_implausible_ = false;
         status_.last_validation = ValidationResult{};
         status_.faults = kFaultNone;
         last_command_ = {0, 0, 0, 0};

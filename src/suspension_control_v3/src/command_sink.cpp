@@ -55,6 +55,11 @@ public:
         return estop_delivered_;
     }
 
+    void reset_emergency_stop() override {
+        std::lock_guard<std::mutex> lk(mu_);
+        estop_delivered_ = false;
+    }
+
     bool is_async() const override { return false; }
 
     bool flush(double) override { return true; }  // 提交即完成，没有队列
@@ -121,6 +126,15 @@ public:
     bool emergency_stop_delivered() const override {
         std::lock_guard<std::mutex> lk(mu_);
         return estop_delivered_;
+    }
+
+    void reset_emergency_stop() override {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            estop_delivered_ = false;
+            estop_requested_ = false;
+        }
+        cv_.notify_all();
     }
 
     bool is_async() const override { return true; }

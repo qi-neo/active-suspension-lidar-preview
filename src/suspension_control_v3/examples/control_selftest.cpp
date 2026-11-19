@@ -3292,6 +3292,16 @@ void test_emergency_output_path() {
     check(fx.driver->cmd_calls_ > cmd_before, "复位后 LEVELING 应真的下发回中指令");
     std::printf("  硬件急停调用 %d 次，复位后回中下发 %d 次\n",
                 fx.driver->estop_calls_, fx.driver->cmd_calls_ - cmd_before);
+
+    // 复位后再次急停是一个全新的安全事件：必须再发一次硬件急停。
+    // 旧实现里 estop_delivered_ 永久为 true，第二次静默跳过——这条回归守护它。
+    fx.loop.request_estop("second");
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(fx.loop.status().state == ControlState::kEmergency,
+          "复位后第二次请求仍应进入 EMERGENCY");
+    check(fx.driver->estop_calls_ == 2, "复位后第二次急停必须重新下发硬件急停");
+    std::printf("  二次急停：硬件急停累计调用 %d 次\n", fx.driver->estop_calls_);
 }
 
 // ---------------------------------------------------------------- 场景 33
@@ -3342,6 +3352,15 @@ void test_attitude_implausible_trips_estop() {
           "应置位姿态超限故障");
     std::printf("  1.5 rad 姿态 -> %s，faults=0x%02x\n",
                 to_string(fx.loop.status().state), fx.loop.status().faults);
+
+    // 复位必须清掉"历史姿态超限"证据，否则下一拍会被旧标志再次锁存急停。
+    // 这里不提交新的 IMU 样本，专门验证不依赖回调到达顺序。
+    fx.loop.clear_estop();
+    check(fx.loop.request_reset(), "超限急停解除后复位应成功");
+    fx.t += 0.005;
+    fx.loop.step(fx.t, 0.005);
+    check(fx.loop.status().state != ControlState::kEmergency,
+          "复位后不应因历史超限标志再次急停");
 }
 
 // ---------------------------------------------------------------- 场景 35
@@ -3635,6 +3654,13 @@ void test_async_command_sink() {
         check(sink->flush(3.0), "急停请求应被处理");
         check(sink->emergency_stop_delivered(), "急停应送达");
         check(drv->estop_calls >= 1, "驱动器应真的收到急停");
+
+        // 4b) 复位后第二次急停：旧的 estop_delivered_ 不清会被静默跳过
+        sink->reset_emergency_stop();
+        check(!sink->emergency_stop_delivered(), "复位后不应保留已送达状态");
+        sink->request_emergency_stop();
+        check(sink->flush(3.0), "第二次急停请求应被处理");
+        check(drv->estop_calls >= 2, "第二次急停必须再次调用驱动器");
         drv->block_ms = 0;
     }
 

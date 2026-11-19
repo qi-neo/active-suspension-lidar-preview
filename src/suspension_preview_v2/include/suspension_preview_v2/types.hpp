@@ -16,6 +16,17 @@ constexpr uint8_t kMeasured = 1;      // 实测有效
 constexpr uint8_t kInterpolated = 2;  // 插值得到（可用，精度略低）
 constexpr uint8_t kFused = 3;         // 多帧位置对齐融合得到（控制侧生成，不回传串口）
 
+// 时间戳归一化：零戳/负戳/非有限戳不能当"采集时刻"传给下游。
+// 返回 fallback_sec 让调用方用"本机到达时刻"兜底，同时保证 TF 查询、
+// 剖面消息和障碍物消息用的是同一个时刻。
+inline bool valid_stamp_sec(double stamp_sec) {
+    return std::isfinite(stamp_sec) && stamp_sec > 0.0;
+}
+
+inline double normalize_stamp_sec(double raw_sec, double fallback_sec) {
+    return valid_stamp_sec(raw_sec) ? raw_sec : fallback_sec;
+}
+
 // 轮迹标识（数值与串口帧 id 对齐）
 enum class LaneId : uint8_t {
     Left = 0x01,
