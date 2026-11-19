@@ -97,6 +97,9 @@ public:
         {
             std::lock_guard<std::mutex> lk(mu_);
             stop_ = true;
+            // 急停若一直写失败，worker 会按 retry_interval_ 永久重试；
+            // 退出时必须撤掉请求，否则 break 条件永远不成立、join 挂死。
+            estop_requested_ = false;
         }
         cv_.notify_all();
         if (worker_.joinable()) worker_.join();

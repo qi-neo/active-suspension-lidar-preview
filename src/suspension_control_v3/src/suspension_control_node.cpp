@@ -200,8 +200,13 @@ private:
     // 启动前的参数统一校验。fatal 项一律拒绝启动——带着错配置跑比不跑更危险：
     // 现象看起来像"算法不行"，而真因埋在 YAML 里没人会想到去查
     void check_params() {
-        const auto issues =
+        auto issues =
             suspension_control_v3::validate_params(ctrl_, loop_params_, val_, sm_);
+        // 车速源互斥也要在启动期拦下：否则 assume_speed 会每拍静默覆盖 /odom
+        for (const auto& i : suspension_control_v3::validate_speed_sources(
+                 use_speed_adaptive_lookahead_, assume_speed_mps_)) {
+            issues.push_back(i);
+        }
         std::size_t fatal = 0;
         for (const auto& i : issues) {
             if (i.fatal) {
@@ -494,7 +499,7 @@ private:
                 static_cast<double>(msg->header.stamp.nanosec) * 1e-9,
             msg->header.frame_id, msg->spacing, msg->wheel_dist, msg->preview_dist,
             msg->left_height, msg->left_valid, msg->right_height, msg->right_valid,
-            frame);
+            frame, msg->link_fault);
         if (!ok) {
             // 高度与有效性数组长度对不上：发布方有 bug，截救不回来
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -515,6 +520,13 @@ private:
         a.stamp_sec = static_cast<double>(msg->header.stamp.sec) +
                       static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
         const auto& q = msg->orientation;
+        // 转换函数假设单位四元数；零四元数会伪装成"完美水平"，非单位会
+        // 系统性放大角度并误触 20° 急停。无效姿态一律按拒帧处理。
+        if (!suspension_control_v3::valid_quaternion(q.x, q.y, q.z, q.w)) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "IMU 四元数无效（非单位/非有限/全零），丢弃该帧");
+            a.valid = false;
+        }
         suspension_control_v3::quaternion_to_roll_pitch(
             q.x, q.y, q.z, q.w, a.roll_rad, a.pitch_rad);
         a.roll_rate = msg->angular_velocity.x;
@@ -604,6 +616,7 @@ private:
         out.state = static_cast<uint8_t>(st.state);
         out.mode = static_cast<uint8_t>(st.mode);
         out.faults = st.faults;
+        out.estop_reason = st.estop_reason;
         out.allow_control = st.allow_control;
         out.hold_output = st.hold_output;
         out.output_zero = st.output_zero;

@@ -338,4 +338,17 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
     return out;
 }
 
+std::vector<ParamIssue> validate_speed_sources(bool use_speed_adaptive_lookahead,
+                                               double assume_speed_mps) {
+    std::vector<ParamIssue> out;
+    if (use_speed_adaptive_lookahead && assume_speed_mps > 0.0) {
+        out.push_back({"assume_speed_mps",
+                       "use_speed_adaptive_lookahead=true 且 assume_speed_mps>0："
+                       "控制环每拍用假设车速覆盖 /odom 读数，里程计会静默失效；"
+                       "台架请关闭 use_speed_adaptive_lookahead，实车请把 assume_speed_mps 设为 0。",
+                       true});
+    }
+    return out;
+}
+
 }  // namespace suspension_control_v3

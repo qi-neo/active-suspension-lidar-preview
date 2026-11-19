@@ -206,8 +206,10 @@ Details, on-target confirmation steps and verification scope:
 > **Also available as a standalone repository**:
 > [qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver), since a LiDAR
 > driver is a reusable asset unrelated to active suspension specifically. This repository
-> pins it as a **git submodule** at `src/unilidar_driver` (currently `41c1e13`) instead of
-> keeping a hand-synced copy; clone with `--recurse-submodules` and `colcon build` works
+> pins it as a **git submodule** at `src/unilidar_driver` (current commit recorded in
+> [`docs/project-facts.json`](docs/project-facts.json) under
+> `driver_submodule.pinned_commit`) instead of keeping a hand-synced copy;
+> clone with `--recurse-submodules` and `colcon build` works
 > directly. It also ships
 > [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md),
 > a methodology write-up on writing sensor drivers (in Chinese).
@@ -634,11 +636,12 @@ At the rates this project actually runs at, compute is over-provisioned:
 | Cloud publish | 1.3 MB/s (10 Hz × 130 KB) | LPDDR4X 25.6 GB/s | 0.005% |
 | Control loop | 200 Hz, ~50 FMAs per tick | same | < 1% |
 
-Micro-benchmarks (M1, `-O2`) give attractive speedups on the hot spots — CRC32
-via slice-by-8 **17.6×**, per-point trig via recurrence **2.4×**, binning via
-flat CSR + `nth_element` **5.6×** — but scaled to the A55 they save only
-**~2.3% of one core** in total. **The real bottleneck is timing determinism,
-not throughput.**
+Micro-benchmarks (M1, `-O2`) give attractive speedups on two hot spots — CRC32
+via slice-by-8 **17.6×**, per-point trig via recurrence **2.4×**. The initially
+reported **5.6 times** for flat-CSR binning was corrected to **1.33 times** after a fair
+`nth_element`-vs-`nth_element` re-measurement (~0.05% of one core on A55), so
+that change was **not adopted**; see CHANGELOG 3.2.4. **The real bottleneck is
+timing determinism, not throughput.**
 
 ### Build defaults to Release
 

@@ -18,6 +18,7 @@ const char* to_string(RejectReason reason) {
     switch (reason) {
         case RejectReason::kNone:            return "通过";
         case RejectReason::kNoData:          return "无数据";
+        case RejectReason::kLinkFault:       return "上游数据链故障";
         case RejectReason::kStaleProfile:    return "时间戳过旧";
         case RejectReason::kStampBackwards:  return "时间戳倒退";
         case RejectReason::kFrameMismatch:   return "坐标系不符";
@@ -46,6 +47,14 @@ ValidationResult RoadProfileValidator::validate(
     const suspension_preview_v2::RoadProfileFrame& frame, double now_sec) {
     ValidationResult r;
 
+    if (frame.link_fault) {
+        // 上游串口打开失败/写失败时，剖面数据再漂亮也不能进前馈链路。
+        // 拒帧会让 profile_fresh 变假，状态机按输入不健康走 Degraded。
+        last_reason_ = RejectReason::kLinkFault;
+        r.reason = last_reason_;
+        ++rejected_count_;
+        return r;
+    }
     if (frame.left.empty() || frame.right.empty()) {
         last_reason_ = RejectReason::kNoData;
         r.reason = last_reason_;

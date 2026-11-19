@@ -18,6 +18,18 @@
 
 namespace suspension_control_v3 {
 
+// 调用 quaternion_to_roll_pitch 前必须先过这一关：该函数假设单位四元数，
+// 非单位输入会让两个角度都错；全零四元数更会伪装成"完美水平"。
+inline bool valid_quaternion(double x, double y, double z, double w,
+                             double norm_tolerance = 0.1) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        !std::isfinite(w)) {
+        return false;
+    }
+    const double n2 = x * x + y * y + z * z + w * w;
+    return n2 > 1e-6 && std::fabs(n2 - 1.0) <= norm_tolerance;
+}
+
 // 四元数 (x, y, z, w) -> roll / pitch（弧度）。
 //
 // 约定与 sensor_msgs/Imu 一致：机体 x 轴向前、y 轴向左、z 轴向上，
@@ -49,7 +61,7 @@ inline bool road_profile_from_fields(
     double wheel_dist, double preview_dist, const std::vector<float>& left_height,
     const std::vector<uint8_t>& left_valid, const std::vector<float>& right_height,
     const std::vector<uint8_t>& right_valid,
-    suspension_preview_v2::RoadProfileFrame& out) {
+    suspension_preview_v2::RoadProfileFrame& out, bool link_fault = false) {
     const std::size_t n = std::min(left_height.size(), right_height.size());
     if (left_valid.size() < n || right_valid.size() < n) return false;
 
@@ -58,6 +70,7 @@ inline bool road_profile_from_fields(
     out.spacing = static_cast<float>(spacing);
     out.wheel_dist = static_cast<float>(wheel_dist);
     out.preview_dist = static_cast<float>(preview_dist);
+    out.link_fault = link_fault;
 
     out.left.reset(n);
     out.right.reset(n);

@@ -335,6 +335,10 @@ void test_bad_input_rejected() {
 
     cases.push_back({"时间戳过旧", RejectReason::kStaleProfile, make_frame(t - 1.0)});
 
+    RoadProfileFrame link_bad = make_frame(t);
+    link_bad.link_fault = true;
+    cases.push_back({"上游链路故障", RejectReason::kLinkFault, link_bad});
+
     RoadProfileFrame empty;
     empty.stamp_sec = t;
     empty.frame_id = "base_link";
@@ -424,11 +428,13 @@ void test_estop_latch() {
     check(fx.loop.status().state == ControlState::kEmergency, "急停后应进入 EMERGENCY");
     check((fx.loop.status().faults & kFaultEmergencyStop) != 0, "应置位急停故障");
     check(fx.loop.status().output_zero, "EMERGENCY 时输出应回中");
+    check(fx.loop.status().estop_reason == "测试急停", "状态应记录急停原因");
 
     check(!fx.loop.request_reset(), "急停未解除时复位应被拒绝");
     fx.loop.clear_estop();
     check(fx.loop.request_reset(), "解除急停后复位应成功");
     check(fx.loop.status().state == ControlState::kBoot, "复位后回到 BOOT");
+    check(fx.loop.status().estop_reason.empty(), "复位后应清空急停原因");
     std::printf("  急停锁存 -> 拒绝复位 -> clear_estop -> 复位成功\n");
 }
 
@@ -2225,6 +2231,34 @@ void test_msg_conversion() {
               "极端四元数也应给出有限值（asin 钳位起作用）");
     }
 
+    // ---- 26.4b 节点入口守卫：非单位/全零四元数必须在转换前被拒 ----
+    {
+        check(suspension_control_v3::valid_quaternion(0.0, 0.0, 0.0, 1.0),
+              "单位四元数应通过入口校验");
+        check(!suspension_control_v3::valid_quaternion(0.0, 0.0, 0.0, 0.0),
+              "全零四元数不得伪装成水平姿态");
+        const Quat q = quat_from_roll_pitch(0.3, 0.2);
+        check(!suspension_control_v3::valid_quaternion(q.x * 2.0, q.y * 2.0,
+                                                       q.z * 2.0, q.w * 2.0),
+              "模长为 2 的四元数应在入口被拒");
+        check(!suspension_control_v3::valid_quaternion(
+                  std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 1.0),
+              "非有限四元数应在入口被拒");
+    }
+
+    // ---- 26.4c 数据链故障位必须随消息传到内部控制帧 ----
+    {
+        const std::vector<float> lh{0.01f, 0.02f};
+        const std::vector<float> rh{0.03f, 0.04f};
+        const std::vector<uint8_t> lv{1, 1};
+        const std::vector<uint8_t> rv{1, 1};
+        RoadProfileFrame f;
+        check(suspension_control_v3::road_profile_from_fields(
+                  1.0, "base_link", 0.05, 0.6, 5.0, lh, lv, rh, rv, f, true) &&
+                  f.link_fault,
+              "link_fault 应随消息转换进 RoadProfileFrame");
+    }
+
     // ---- 26.5 剖面字段映射：正常等长 ----
     {
         const std::vector<float> lh{0.01f, 0.02f, 0.03f};
@@ -3415,6 +3449,25 @@ void test_param_check_attitude_ordering() {
     check(default_ok, "出厂默认参数不应有致命项");
 }
 
+// ---------------------------------------------------------------- 场景 36b
+// 车速源互斥：assume_speed_mps > 0 会每拍覆盖 /odom，必须在启动期拦下
+void test_param_check_speed_sources() {
+    section("36b. 参数校验：车速源互斥");
+    const auto both = suspension_control_v3::validate_speed_sources(true, 1.0);
+    bool fatal = false;
+    for (const auto& i : both) {
+        if (i.key == "assume_speed_mps" && i.fatal &&
+            i.message.find("/odom") != std::string::npos) {
+            fatal = true;
+        }
+    }
+    check(fatal, "里程计 + 假设车速同时启用时必须致命拒绝");
+    check(suspension_control_v3::validate_speed_sources(true, 0.0).empty(),
+          "只用里程计应通过");
+    check(suspension_control_v3::validate_speed_sources(false, 1.0).empty(),
+          "只用假设车速（台架）应通过");
+}
+
 
 // ---------------------------------------------------------------- 场景 37
 // 参数校验补齐：反馈增益符号、滤波系数、控制频率、跳变阈值与量程的关系
@@ -3674,6 +3727,33 @@ void test_async_command_sink() {
         }
         check(drv2->ok_calls >= 1, "通道析构前应把最后一帧冲刷出去");
     }
+
+    // 6) 急停一直写失败时，析构不能在重试循环里永久等待。
+    // 旧实现的 break 条件要求 estop_requested_ 被清，而失败时没人清它。
+    {
+        auto drv3 = std::make_shared<AsyncProbeDriver>();
+        drv3->connect();
+        drv3->estop_fail.store(true);
+        std::atomic<bool> destroyed{false};
+        std::thread killer([&]() {
+            {
+                auto sink3 = make_async_command_sink(drv3, 0.005);
+                sink3->request_emergency_stop();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            destroyed.store(true);
+        });
+        for (int i = 0; i < 400 && !destroyed.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(destroyed.load(), "急停持续失败时析构应在 2 s 内有界返回");
+        if (destroyed.load()) {
+            killer.join();
+            check(drv3->estop_calls.load() > 0, "退出前至少尝试过急停");
+        } else {
+            killer.detach();  // 回归失败时不要让挂住的线程拖死测试进程
+        }
+    }
 }
 
 // ---------------------------------------------------------------- 场景 42
@@ -3807,6 +3887,7 @@ int main() {
     test_attitude_implausible_trips_estop();
     test_estop_retry_until_delivered();
     test_param_check_attitude_ordering();
+    test_param_check_speed_sources();
     test_param_check_gaps();
     test_command_retry_on_send_failure();
     test_leveling_readiness();

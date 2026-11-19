@@ -143,6 +143,8 @@ jobs:
     if: failure() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      - name: 检出代码（本地 composite action 需要）
+        uses: actions/checkout@v7
       - name: 回传 ASan 失败日志
         uses: ./.github/actions/report-failure
         with:

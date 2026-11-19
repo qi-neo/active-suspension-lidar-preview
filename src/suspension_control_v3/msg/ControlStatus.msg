@@ -4,6 +4,7 @@ std_msgs/Header header
 uint8  state              # 0 BOOT 1 CALIBRATING 2 LEVELING 3 BALANCING 4 DEGRADED 5 EMERGENCY
 uint8  mode               # 下发给作动器的模式（与 v2 SuspensionMode 对齐）
 uint16 faults             # 故障位，见 FaultCode
+string estop_reason       # 本次急停原因，复位后为空
 
 bool allow_control        # 正在使用控制器输出
 bool hold_output          # 保持上一次下发值（降级）

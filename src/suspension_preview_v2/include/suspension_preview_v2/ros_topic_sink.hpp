@@ -1,6 +1,7 @@
 // 输出接口的 ROS 话题实现（唯一依赖 rclcpp 的 sink）
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -25,6 +26,9 @@ public:
     void send(const RoadProfileFrame& frame) override;
     const char* name() const override { return "ros_topic"; }
 
+    // 上游串口链路故障标志，发布到 RoadProfile.link_fault 供 v3 状态机降级。
+    void set_link_fault(bool fault) { link_fault_.store(fault); }
+
 private:
     void publish_markers(const RoadProfileFrame& frame);
     void publish_one_marker(const RoadProfileFrame& frame, const LaneProfile& lane,
@@ -36,6 +40,7 @@ private:
     std::string frame_id_;
     rclcpp::Logger logger_;
     bool warned_frame_mismatch_{false};
+    std::atomic<bool> link_fault_{false};
 };
 
 }  // namespace suspension_preview_v2

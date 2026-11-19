@@ -183,10 +183,11 @@ ros2 launch suspension_control_v3 control_v3.launch.py enable_driver:=false
 ```bash
 ros2 run unilidar_driver decoder_selftest    # 报文解析
 ros2 run suspension_preview_v2 offline_demo        # 点云解析链路
-ros2 run suspension_preview_v2 level_selftest      # 虚拟水平面标定（重力正交化），69 项检查
-ros2 run suspension_preview_v2 height_calib_selftest   # 高度标定表（插值/钳位/CSV/缺陷回归），46 项检查
-ros2 run suspension_preview_v2 calibration_tool --selftest  # 标定工具自检，46 项检查
-ros2 run suspension_preview_v2 p0_link_selftest         # P0 板接口层（PTY 仿真 0x13 帧），18 项检查
+# 各项数不再写死在文档里，以 CI 步骤名和 docs/selftest-counts.json 为准
+ros2 run suspension_preview_v2 level_selftest             # 虚拟水平面标定（重力正交化）
+ros2 run suspension_preview_v2 height_calib_selftest      # 高度标定表（插值/钳位/CSV/缺陷回归）
+ros2 run suspension_preview_v2 calibration_tool --selftest  # 标定工具自检
+ros2 run suspension_preview_v2 p0_link_selftest           # P0 板接口层（PTY 仿真 0x13 帧）
 ros2 run suspension_control_v3 control_selftest    # 控制与安全逻辑
 ```
 
@@ -249,7 +250,8 @@ active-suspension-lidar-preview/
 
 > **本包已独立成仓**：[qi-neo/unilidar-driver](https://github.com/qi-neo/unilidar-driver)。
 > 雷达驱动是可复用资产，与主动悬架没有必然关系，故单独维护。本仓库通过
-> `src/unilidar_driver` 的 **git submodule** 锁定其固定版本（当前 `41c1e13`），
+> `src/unilidar_driver` 的 **git submodule** 锁定固定版本（当前锁定 commit 见
+> [`docs/project-facts.json`](docs/project-facts.json) 的 `driver_submodule.pinned_commit`），
 > 不再保留需要手工同步的副本；带 `--recurse-submodules` clone 后即可直接 `colcon build`。
 > 独立仓库另附 [`docs/driver-design.md`](https://github.com/qi-neo/unilidar-driver/blob/main/docs/driver-design.md)，
 > 讲驱动编写的通用思路（职责边界、四层架构、帧定界怎么选、不接硬件怎么验证）。
@@ -448,8 +450,9 @@ ros2 run car_balancer test_imu_node
 | 控制环 | 200 Hz，每拍约 50 次乘加 | 同上 | < 1% |
 
 微基准实测（M1，`-O2`）显示三处算法热点的优化倍数很好——CRC32 改 slice-8
-查表 17.6×、逐点三角改递推 2.4×、分箱改扁平常量 + `nth_element` 5.6×——
-但折算到 A55 后合计只省 **约 2.3% 单核**。**真正的瓶颈是时延确定性，不是吞吐。**
+查表 17.6×、逐点三角改递推 2.4×；分箱改扁平 CSR 初报的 5.6 倍经复测只有
+**1.33 倍**（折算 A55 约 0.05% 单核），因此**未采纳**，详见 CHANGELOG 3.2.4。
+合计收益远小于早期估计，**真正的瓶颈是时延确定性，不是吞吐。**
 
 ### 8.2 构建默认 Release
 

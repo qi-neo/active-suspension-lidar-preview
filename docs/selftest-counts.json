@@ -4,15 +4,15 @@
   "source": ".github/workflows/ros-ci.yml 步骤名",
   "policy": "对外文档（README.md / README.en.md / QUICKSTART.md / profile / 个人主页）不再写死具体项数，统一指向本文件与 CI；只有 CI 步骤名可以保留数字，且必须与本文件一致。",
   "checks": {
-    "suspension_control_v3/control_selftest": 461,
+    "suspension_control_v3/control_selftest": 474,
     "unilidar_driver/decoder_selftest": 202,
     "unilidar_driver/serial_receiver_selftest": 81,
     "unilidar_driver/udp_receiver_selftest": 38,
     "unilidar_driver/serial_stress_selftest": 14,
     "unilidar_driver/node_loop_selftest": 65,
-    "suspension_preview_v2/pure_functions": 204,
+    "suspension_preview_v2/pure_functions": 208,
     "suspension_preview_v2/level_selftest": 69
   },
-  "total": 1134,
+  "total": 1151,
   "historical_drift_examples": [1181, 708, 617, 410, 454, 265, 135, 63]
 }

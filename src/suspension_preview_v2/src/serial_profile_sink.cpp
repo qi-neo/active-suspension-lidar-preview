@@ -6,8 +6,11 @@
 
 namespace suspension_preview_v2 {
 
-SerialProfileSink::SerialProfileSink(std::string device, int baud_rate)
-    : device_(std::move(device)), baud_rate_(baud_rate) {}
+SerialProfileSink::SerialProfileSink(std::string device, int baud_rate,
+                                     int write_timeout_ms)
+    : device_(std::move(device)),
+      baud_rate_(baud_rate),
+      port_(write_timeout_ms) {}
 
 SerialProfileSink::~SerialProfileSink() { stop(); }
 
@@ -62,6 +65,8 @@ void SerialProfileSink::tx_loop() {
             frame = std::move(*mailbox_);
             mailbox_.reset();
         }
+        // 正在退出时不再发起新的写；已在途的写由 SerialPort 的超时兜底
+        if (stop_) return;
         if (!port_.is_open()) continue;
         if (port_.write_all(frame)) {
             ++frames_sent_;

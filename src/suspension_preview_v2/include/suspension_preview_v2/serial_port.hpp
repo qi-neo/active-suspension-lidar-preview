@@ -1,5 +1,5 @@
 // 串口低层封装（与 ROS 解耦）
-// 关键点：raw 模式（cfmakeraw）、关硬件流控、阻塞写满 + tcdrain、错误可查
+// 关键点：raw 模式（cfmakeraw）、关硬件流控、有界写满、错误可查
 #pragma once
 
 #include <cstddef>
@@ -11,7 +11,7 @@ namespace suspension_preview_v2 {
 
 class SerialPort {
 public:
-    SerialPort() = default;
+    explicit SerialPort(int write_timeout_ms = 100);
     ~SerialPort();
 
     SerialPort(const SerialPort&) = delete;
@@ -22,7 +22,8 @@ public:
     void close();
     bool is_open() const { return fd_ >= 0; }
 
-    // 循环写满 + tcdrain，等待数据真正发出
+    // 循环写满，但每次 write 前用 poll 等待可写，总时长受 write_timeout_ms 约束。
+    // 超时返回 false 并给出可读错误；不再调用无超时的 tcdrain。
     bool write_all(const uint8_t* data, std::size_t len);
     bool write_all(const std::vector<uint8_t>& data) {
         return write_all(data.data(), data.size());
@@ -35,6 +36,7 @@ public:
 
 private:
     int fd_{-1};
+    int write_timeout_ms_{100};
     std::string device_;
     std::string last_error_;
 };

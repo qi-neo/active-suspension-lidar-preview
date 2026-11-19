@@ -83,12 +83,14 @@ bool SafetyStateMachine::request_reset() {
     link_lost_elapsed_ = 0.0;
     stall_elapsed_ = 0.0;
     output_.faults = kFaultNone;
+    last_estop_reason_.clear();
     enter(ControlState::kBoot);
     return true;
 }
 
-void SafetyStateMachine::request_estop(const char* /*reason*/) {
+void SafetyStateMachine::request_estop(const char* reason) {
     estop_latched_ = true;
+    last_estop_reason_ = reason != nullptr ? reason : "";
     output_.faults |= kFaultEmergencyStop;
 }
 
@@ -110,6 +112,10 @@ StateMachineOutput SafetyStateMachine::tick(const SafetyInputs& in, double dt) {
 
 StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double dt) {
     StateMachineOutput out = output_;
+    // 只在首次进入 Emergency 时记录原因；持续急停的每一拍不覆盖原始原因
+    auto note_estop = [&out, this](const char* reason) {
+        if (out.state != ControlState::kEmergency) last_estop_reason_ = reason;
+    };
 
     // 逐周期刷新的故障位可以清；锁存类的（姿态超限、急停）在锁存解除前必须保留，
     // 否则只要当拍没有新的越限事件，故障位就会消失，上层无从判断曾经出过事
@@ -126,6 +132,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     // ---- 全局锁存类故障：优先级最高 ----
     if (in.estop_requested) {
         estop_latched_ = true;
+        note_estop("external estop request");
         out.faults |= kFaultEmergencyStop;
     }
     if (in.attitude_valid) {
@@ -140,6 +147,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
     // "坏数据"丢掉而绕过安全判定
     if (in.attitude_implausible) {
         attitude_latched_ = true;
+        note_estop("attitude implausible");
         out.faults |= kFaultAttitudeExceeded;
     }
     if (estop_latched_ || attitude_latched_) {
@@ -156,6 +164,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
         link_lost_elapsed_ += dt;
         out.faults |= kFaultActuatorLinkLost;
         if (link_lost_elapsed_ >= params_.link_lost_timeout_s) {
+            note_estop("actuator link lost");
             out.state = ControlState::kEmergency;
             apply_contract(out);
             return out;
@@ -258,6 +267,7 @@ StateMachineOutput SafetyStateMachine::evaluate(const SafetyInputs& in, double d
                 // 那可能是 ±40 mm 的极限行程。宁可收回中位（output_zero），
                 // 也不要让车身长时间歪着跑。转 Emergency 的代价是需要显式复位——
                 // 输入断了这么久，本来就应当人工介入确认后再上电
+                note_estop("degraded hold timeout");
                 out.state = ControlState::kEmergency;
             }
             break;

@@ -376,6 +376,7 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     status_.state = sm.state;
     status_.mode = sm.mode;
     status_.faults = sm.faults;
+    status_.estop_reason = state_machine_->last_estop_reason();
     status_.allow_control = sm.allow_control;
     status_.hold_output = sm.hold_output;
     status_.output_zero = sm.output_zero;
@@ -572,6 +573,7 @@ bool SuspensionControlLoop::request_reset() {
         attitude_implausible_ = false;
         status_.last_validation = ValidationResult{};
         status_.faults = kFaultNone;
+        status_.estop_reason.clear();
         last_command_ = {0, 0, 0, 0};
         status_.commanded_mm = last_command_;
         mode_pushed_ = false;

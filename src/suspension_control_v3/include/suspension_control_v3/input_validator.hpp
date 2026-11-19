@@ -18,6 +18,7 @@ namespace suspension_control_v3 {
 enum class RejectReason : uint8_t {
     kNone = 0,
     kNoData,            // 没有任何数据
+    kLinkFault,         // 上游预瞄节点报告串口链路故障
     kStaleProfile,      // 时间戳过旧
     kStampBackwards,    // 时间戳倒退
     kFrameMismatch,     // 坐标系不符

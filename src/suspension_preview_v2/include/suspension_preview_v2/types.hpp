@@ -60,6 +60,9 @@ struct RoadProfileFrame {
     float spacing{0.05f};     // 纵向采样间距 (m)
     float wheel_dist{0.6f};   // 左右轮间距 (m)
     float preview_dist{5.0f}; // 预瞄距离 (m)
+    // 上游数据链故障标志（串口打开失败/写失败）。默认 false，
+    // 老版本发布者不带该字段时下游仍按健康处理。
+    bool link_fault{false};
 
     LaneProfile left;
     LaneProfile right;

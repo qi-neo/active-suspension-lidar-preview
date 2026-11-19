@@ -6,6 +6,7 @@
 #include <thread>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -33,6 +34,9 @@ speed_t to_speed(int baud) {
 }
 
 }  // namespace
+
+SerialPort::SerialPort(int write_timeout_ms)
+    : write_timeout_ms_(write_timeout_ms > 0 ? write_timeout_ms : 100) {}
 
 SerialPort::~SerialPort() { close(); }
 
@@ -63,8 +67,9 @@ bool SerialPort::open(const std::string& device, int baud_rate) {
     device_ = device;
     last_error_.clear();
 
-    // 阻塞模式打开（不用 O_NDELAY，避免部分写静默丢失）
-    fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY);
+    // 非阻塞打开 + poll 等待可写：保留"写满"语义，但每次写都有界。
+    // 旧实现用阻塞 fd + 无超时 tcdrain，线缆异常或对端不读时 worker 会永久卡住。
+    fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
         last_error_ = std::string("open 失败: ") + std::strerror(errno) +
                       "（请确认设备存在，并将用户加入 dialout 组）";
@@ -112,21 +117,49 @@ bool SerialPort::write_all(const uint8_t* data, std::size_t len) {
         last_error_ = "串口未打开";
         return false;
     }
+    if (data == nullptr || len == 0) return true;
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(write_timeout_ms_);
     std::size_t off = 0;
     while (off < len) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            last_error_ = "写超时（" + std::to_string(write_timeout_ms_) +
+                          " ms），已写出 " + std::to_string(off) + "/" +
+                          std::to_string(len) + " 字节";
+            return false;
+        }
+        const int remaining_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+
+        struct pollfd pfd {};
+        pfd.fd = fd_;
+        pfd.events = POLLOUT;
+        const int pr = ::poll(&pfd, 1, remaining_ms);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            last_error_ = std::string("poll 失败: ") + std::strerror(errno);
+            return false;
+        }
+        if (pr == 0) {
+            last_error_ = "写超时（" + std::to_string(write_timeout_ms_) +
+                          " ms），已写出 " + std::to_string(off) + "/" +
+                          std::to_string(len) + " 字节";
+            return false;
+        }
+
         const ssize_t w = ::write(fd_, data + off, len - off);
         if (w < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             last_error_ = std::string("write 失败: ") + std::strerror(errno);
             return false;
         }
+        if (w == 0) continue;  // 理论不会发生；交给 deadline 兜底
         off += static_cast<std::size_t>(w);
     }
-    ::tcdrain(fd_);
+    // 刻意不调用 tcdrain()：它在异常链路上没有超时，会把"有界写"重新变成挂死。
+    // 内核已接收全部字节；需要确认对端处理时应由协议层 ACK 负责。
     return true;
 }
 

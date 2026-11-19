@@ -35,4 +35,8 @@ std::vector<ParamIssue> validate_params(const ControlParams& control,
                                         const ValidatorParams& validator,
                                         const StateMachineParams& sm);
 
+// 车速源互斥：assume_speed_mps > 0 会每拍覆盖 /odom，二者不能同时启用。
+std::vector<ParamIssue> validate_speed_sources(bool use_speed_adaptive_lookahead,
+                                               double assume_speed_mps);
+
 }  // namespace suspension_control_v3

@@ -19,6 +19,7 @@ DOCS = ("README.md", "README.en.md", "QUICKSTART.md")
 FORBIDDEN = (
     r"\b1181\b", r"\b1108\b", r"\b708\b", r"\b617\b", r"\b410\b",
     r"\b454\b", r"\b265\b", r"\b135\s*项", r"\b63\s*项", r"共\s*\d+\s*项",
+    r"\d+\s*项检查",
 )
 errors = []
 

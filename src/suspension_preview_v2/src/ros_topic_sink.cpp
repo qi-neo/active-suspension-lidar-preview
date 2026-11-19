@@ -64,6 +64,7 @@ void RosTopicSink::send(const RoadProfileFrame& frame) {
     msg.left_valid = frame.left.valid;
     msg.right_valid = frame.right.valid;
     msg.quality = frame.quality();
+    msg.link_fault = link_fault_.load();
     pub_->publish(msg);
 
     if (publish_marker_ && marker_pub_) publish_markers(frame);

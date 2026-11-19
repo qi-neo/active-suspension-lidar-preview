@@ -139,7 +139,7 @@ flowchart LR
    徽章在 README 首屏。本项目靠它抓到过测试代码里的两处堆溢出（当时断言全绿）。
 3. **CI** — 每次推送在干净容器里重新构建、跑全部自检、跑 sanitizer、量覆盖率。
 
-覆盖率门槛与明细以 CI 的 coverage job 为准（当前 line 80 / branch 70），HTML 明细见 CI artifact，
+覆盖率门槛与明细以 CI 的 coverage job 为准（当前 line 80 / branch 65，阈值见 `docs/project-facts.json`），HTML 明细见 CI artifact，
 不在文档里写死水位。用途是按图索骥找没测到的分支——本项目三轮覆盖提升都是这么推着
 做的，每一轮都顺手抓出真问题（死代码、永假检查、假通过的断言）。
 

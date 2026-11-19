@@ -118,6 +118,16 @@ for wf in sorted(workflows_dir.glob("*.yml")):
                     f"{wf.name} 的 {action}@{got} 与 project-facts.json 的 {tag} 不一致"
                 )
 
+# 9) 对外文档不得再写死 submodule hash / 覆盖率分支旧门限（防止真源漂移）
+for rel in ("README.md", "README.en.md", "QUICKSTART.md"):
+    body = text(rel)
+    if re.search(r"\b41c1e13\b", body):
+        errors.append(f"{rel} 仍写死旧的 submodule hash 41c1e13；请指向 docs/project-facts.json")
+    if re.search(r"(branch|分支)\s*70", body, re.IGNORECASE):
+        errors.append(f"{rel} 仍写分支门禁 70；实际为 {gate['branch']}")
+if "docs/project-facts.json" not in zh:
+    errors.append("README.md 未指向 docs/project-facts.json 作为 submodule 版本真源")
+
 if errors:
     for err in errors:
         print(f"[check_facts] FAIL: {err}")

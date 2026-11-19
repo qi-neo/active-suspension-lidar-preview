@@ -13,3 +13,6 @@ uint8[]   left_valid         # 左轮迹掩码：0=无效 1=实测有效 2=插�
 uint8[]   right_valid        # 右轮迹掩码：0=无效 1=实测有效 2=插值
 
 uint8     quality            # 数据质量 0-100（有效格占比）
+
+bool      link_fault         # 上游数据链故障（串口打开失败或写失败）
+                             # 默认 false，兼容未带该字段的老发布者

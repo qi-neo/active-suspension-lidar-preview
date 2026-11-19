@@ -137,7 +137,7 @@ jobs:
 
       # 三个包都有不依赖 ROS 的离线自检，在这里真正跑一遍，
       # 确认控制逻辑与解析逻辑在 CI 上仍然是通的
-      - name: v3 控制与安全逻辑自检（461 项）
+      - name: v3 控制与安全逻辑自检（474 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
@@ -198,7 +198,7 @@ jobs:
 
       # 这三个自检是纯函数、不依赖 PCL，此前一直没进 CI——
       # install(TARGETS) 里装了可执行，却没有任何步骤调用它
-      - name: v2 纯函数自检（204 项）
+      - name: v2 纯函数自检（208 项）
         run: |
           set -e
           . /opt/ros/${{ matrix.ros_distribution }}/setup.sh
@@ -324,6 +324,8 @@ jobs:
     if: failure() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      - name: 检出代码（本地 composite action 需要）
+        uses: actions/checkout@v7
       - name: 回传 ROS CI 失败日志
         uses: ./.github/actions/report-failure
         with:

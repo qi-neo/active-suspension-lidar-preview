@@ -19,7 +19,7 @@ namespace suspension_preview_v2 {
 
 class SerialProfileSink : public IProfileSink {
 public:
-    SerialProfileSink(std::string device, int baud_rate);
+    SerialProfileSink(std::string device, int baud_rate, int write_timeout_ms = 100);
     ~SerialProfileSink() override;
 
     SerialProfileSink(const SerialProfileSink&) = delete;
@@ -51,7 +51,7 @@ private:
     std::mutex mtx_;
     std::condition_variable cv_;
     std::optional<std::vector<uint8_t>> mailbox_;
-    bool stop_{false};
+    std::atomic<bool> stop_{false};
     uint8_t seq_{0};
 
     std::atomic<std::size_t> frames_sent_{0};

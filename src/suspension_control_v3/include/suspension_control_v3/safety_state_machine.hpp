@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "suspension_control_v3/types.hpp"
 
@@ -127,6 +128,9 @@ public:
     StateMachineOutput output() const override { return output_; }
     ControlState state() const override { return output_.state; }
     uint16_t faults() const override { return output_.faults; }
+
+    // 本次急停的原因（外部请求或状态机自触发）。复位后清空。
+    const std::string& last_estop_reason() const { return last_estop_reason_; }
     StateMachineParams& params() override { return params_; }
 
     // 进入当前状态以来经过的时间，便于测试与诊断
@@ -146,6 +150,7 @@ private:
     double link_lost_elapsed_{0.0};
     double stall_elapsed_{0.0};
     bool estop_latched_{false};
+    std::string last_estop_reason_;
     bool attitude_latched_{false};
 };
 

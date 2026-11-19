@@ -59,8 +59,9 @@ public:
             suspension_preview_v2::make_grid_extractor(ep));
         // 输出坐标系显式传入 target_frame：v3 按 header.frame_id ==
         // expected_frame 校验剖面，不能让 frame_id 由 pipeline 调用方随手传
-        pipeline_->add_sink(std::make_shared<RosTopicSink>(
-            *this, publish_topic_, target_frame_, publish_marker_));
+        ros_sink_ = std::make_shared<RosTopicSink>(
+            *this, publish_topic_, target_frame_, publish_marker_);
+        pipeline_->add_sink(ros_sink_);
 
         if (enable_serial_) {
             auto serial = std::make_shared<SerialProfileSink>(serial_port_, baud_rate_);
@@ -72,6 +73,8 @@ public:
             } else {
                 RCLCPP_ERROR(get_logger(), "串口打开失败，本次仅发布 ROS 话题: %s",
                              serial->last_error().c_str());
+                // 让 v3 状态机看到链路故障，而不是只在本节点日志里红一下
+                ros_sink_->set_link_fault(true);
             }
         } else {
             RCLCPP_INFO(get_logger(), "enable_serial=false，仅发布 ROS 话题");
@@ -363,14 +366,24 @@ private:
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
         if (calib_done_) return;
 
+        // 与点云路径一致：零戳回退到到达时刻，且必须显式指定 clock type。
+        // 旧实现用 rclcpp::Time(msg->header.stamp) 的默认系统时钟，在
+        // use_sim_time / bag 回放下与 tf_buffer 的时钟域不一致，每帧查 TF 都失败，
+        // 标定窗口结束只看到一句"样本不够"，无法定位根因。
+        const double imu_stamp_sec = normalize_stamp_sec(
+            static_cast<double>(msg->header.stamp.sec) +
+                static_cast<double>(msg->header.stamp.nanosec) * 1e-9,
+            now().seconds());
         geometry_msgs::msg::TransformStamped tf_msg;
         try {
             tf_msg = tf_buffer_->lookupTransform(
-                target_frame_, msg->header.frame_id, rclcpp::Time(msg->header.stamp),
+                target_frame_, msg->header.frame_id,
+                rclcpp::Time(imu_stamp_sec, get_clock()->get_clock_type()),
                 rclcpp::Duration::from_nanoseconds(
                     static_cast<int64_t>(tf_timeout_ms_) * 1000000LL));
         } catch (const std::exception&) {
             // 标定窗口内拿不到 TF 的帧直接跳过：它既不是"静止"的证据，也不是坏样本
+            ++imu_tf_fail_;
             return;
         }
 
@@ -403,11 +416,11 @@ private:
     void finish_calibration() {
         if (!accel_.stable(static_cast<std::size_t>(level_calib_min_samples_),
                            level_calib_max_std_)) {
-            RCLCPP_WARN(get_logger(),
-                        "虚拟水平面标定失败：%zu 个样本、三轴抖动 %.3f m/s^2 未达静止要求"
-                        "（需 >=%d 个样本且抖动 <=%.3f）。点云不做校正",
-                        accel_.count(), accel_.max_std(), level_calib_min_samples_,
-                        level_calib_max_std_);
+        RCLCPP_WARN(get_logger(),
+                    "虚拟水平面标定失败：%zu 个样本、三轴抖动 %.3f m/s^2 未达静止要求"
+                    "（需 >=%d 个样本且抖动 <=%.3f；IMU TF 失败 %zu 帧）。点云不做校正",
+                    accel_.count(), accel_.max_std(), level_calib_min_samples_,
+                    level_calib_max_std_, static_cast<unsigned long>(imu_tf_fail_));
             return;
         }
 
@@ -539,12 +552,16 @@ private:
         if (serial_sink_) {
             dropped = serial_sink_->frames_dropped();
             errors = serial_sink_->write_errors();
+            // 一旦写出错就锁存故障，直到节点重启；避免"偶尔打一行 WARN、
+            // 控制闭环继续当链路正常"的假象
+            if (errors > 0 && ros_sink_) ros_sink_->set_link_fault(true);
         }
         RCLCPP_INFO(get_logger(),
-                    "帧:%lu TF失败:%lu 零戳回退:%lu 解析成功:%lu 解析失败:%lu | "
+                    "帧:%lu TF失败:%lu IMU-TF失败:%lu 零戳回退:%lu 解析成功:%lu 解析失败:%lu | "
                     "串口丢帧:%lu 写错:%lu",
                     static_cast<unsigned long>(frames_),
                     static_cast<unsigned long>(tf_fail_),
+                    static_cast<unsigned long>(imu_tf_fail_),
                     static_cast<unsigned long>(zero_stamp_frames_),
                     static_cast<unsigned long>(pipeline_->frames_processed()),
                     static_cast<unsigned long>(pipeline_->frames_failed()),
@@ -606,6 +623,7 @@ private:
     // 组件
     std::unique_ptr<PreviewPipeline> pipeline_;
     std::shared_ptr<SerialProfileSink> serial_sink_;
+    std::shared_ptr<RosTopicSink> ros_sink_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
@@ -618,6 +636,7 @@ private:
     std::size_t frames_{0};
     std::size_t tf_fail_{0};
     std::size_t zero_stamp_frames_{0};
+    std::size_t imu_tf_fail_{0};
 };
 
 int main(int argc, char** argv) {

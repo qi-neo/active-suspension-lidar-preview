@@ -36,6 +36,30 @@
 三处一致，`tools/check_counts.py` 通过。备份分支 `backup/pre-p0-20261119`，
 修复分支 `fix/p0-safety-20261119`。
 
+### P1 收敛：有界串口、真源一致性与输入健康度（2026-11-19）
+
+- **串口写有界**：`SerialPort` 改 `O_NONBLOCK + poll(POLLOUT)`，写超时默认
+  100 ms 并上报已写出字节数；移除无超时的 `tcdrain()`。
+  `SerialProfileSink::stop()` 与 `AsyncCommandSink` 析构不再被异常链路挂死。
+  PTY 自检灌 1 MiB 不读，断言 50 ms 内有界返回；异步通道自检覆盖
+  "急停一直写失败时析构必须 2 s 内退出"。
+- **真源与 CI 对齐**：QUICKSTART / CHANGELOG 的分支门禁统一为 80/65；
+  中英 README 不再写自检项数与 submodule hash，改指向真源；
+  已被 3.2.4 更正的"5.6 倍"从对外文档移除并记录为禁止口径；
+  两个 workflow 的失败日志回传 job 补 `actions/checkout`。
+  `check_facts.py` / `check_claims.py` / `check_counts.py` 扩展为能拦截这些回退。
+- **输入校验**：v3 节点拒收非单位/全零/非有限 IMU 四元数；
+  v2 水平标定的 TF 查询与点云路径统一时钟类型并补 `IMU-TF失败` 诊断；
+  `use_speed_adaptive_lookahead` 与 `assume_speed_mps>0` 由参数校验致命拒绝。
+- **链路健康可观测**：`RoadProfile` 新增 `bool link_fault`（默认 false 兼容老发布者），
+  v2 串口打不开或写失败时置位；v3 以 `kLinkFault` 拒帧，状态机按输入不健康降级。
+- **急停审计**：状态机记录 `last_estop_reason`（外部请求/姿态超限/链路丢失/
+  降级超时），经 `ControlStatus.estop_reason` 上报，复位时清空。
+
+自检项数真源同步：v3 控制自检 474 项、v2 纯函数组 208 项，仓库合计
+**1151 项**；备份分支 `backup/pre-p1-20261119`，修复分支
+`fix/p1-all-20261119`。
+
 ### ARM64 原生 CI、实时性真源与 Actions Node 24（2026-11-05）
 
 - `ros-ci.yml` 新增 `aarch64` job（`ubuntu-24.04-arm` runner + `ros:humble-ros-base`
@@ -283,7 +307,8 @@ L1 的原生通讯接口是 TTL UART，官方 SDK 默认经 CH340 类模块以 2
 - **节点消息转换层** `msg_convert.hpp`：四元数转 roll/pitch 与剖面字段映射
   抽成不依赖 ROS 的纯函数，使其能被离线自检覆盖（原先埋在节点里，CI 碰不到）
 - **CI 三道门禁**：新增 ASan/UBSan job（内存与未定义行为）与覆盖率 job
-  （gcovr，行 80% / 分支 70% / 函数 85% 三重门槛，HTML 明细上传 artifact）。
+  （gcovr，实际门槛为行 80% / 分支 65%；早期文档曾写"分支 70% / 函数 85% 三重门槛"，
+  与 CI 命令不符，现已更正——函数门槛从未设置）。
   v2 三个纯函数自检此前只装成可执行、没有步骤调用，现已补进 CI
 - **启动前参数统一校验**（`param_check.hpp`，不依赖 ROS 因此可被自检覆盖）：
   四组参数（控制律 / 回路 / 校验器 / 状态机）共 30 项判据，每条都写明"填错会

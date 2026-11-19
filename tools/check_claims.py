@@ -18,6 +18,7 @@ errors = []
 
 data = json.loads((ROOT / "docs/results.json").read_text(encoding="utf-8"))
 forbidden = list(data.get("forbidden_in_public_docs", []))
+forbidden += list(data.get("forbidden_perf_claims", []))
 for item in data.get("withdrawn", []):
     for value in item.get("values_pct", []):
         forbidden.append(f"{value}%")

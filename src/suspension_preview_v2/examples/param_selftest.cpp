@@ -7,13 +7,17 @@
 // 节点侧参数（TF / 串口 / 波特率 / 标定 / 诊断周期）、可疑项只告警不致命、
 // 多处错误能一次全部列出，以及每条消息都带"填错会导致什么现象"。
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <fcntl.h>
 #include <limits>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "suspension_preview_v2/param_check.hpp"
+#include "suspension_preview_v2/serial_port.hpp"
 #include "suspension_preview_v2/types.hpp"
 
 namespace {
@@ -476,6 +480,33 @@ void test_stamp_normalization() {
     std::printf("  时间戳归一化：零戳/负戳/NaN -> 到达时刻，有效戳原样保留\n");
 }
 
+// 串口写必须有界：对端不读时不能永久卡住 worker / 析构。
+void test_serial_write_timeout() {
+    const int master = ::posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0 ||
+        ::ptsname(master) == nullptr) {
+        check(true, "无 PTY 环境，串口写超时用例跳过");
+        if (master >= 0) ::close(master);
+        return;
+    }
+    const char* slave = ::ptsname(master);
+    suspension_preview_v2::SerialPort port(50);  // 50 ms 写超时
+    check(port.open(slave, 115200), "PTY slave 应可打开");
+    std::vector<uint8_t> big(1024 * 1024, 0x5A);
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = port.write_all(big);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+    check(!ok, "写满缓冲区后应在超时内返回失败");
+    check(elapsed < 2000, "写超时必须有界（不依赖无超时 tcdrain）");
+    check(!port.last_error().empty(), "超时错误应可读");
+    std::printf("  串口写超时：%lld ms 后返回，错误=%s\n",
+                static_cast<long long>(elapsed), port.last_error().c_str());
+    port.close();
+    ::close(master);
+}
+
 }  // namespace
 
 int main() {
@@ -491,6 +522,7 @@ int main() {
     test_multiple_errors_reported_at_once();
     test_issue_messages_explain_consequence();
     test_stamp_normalization();
+    test_serial_write_timeout();
     std::printf("=== 检查项 %d，失败 %d ===\n", g_total, g_fail);
     return g_fail ? 1 : 0;
 }

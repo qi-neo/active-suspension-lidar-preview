@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "suspension_control_v3/command_sink.hpp"
 #include "suspension_control_v3/controller.hpp"
@@ -80,6 +81,8 @@ struct ControlLoopStatus {
     suspension_preview_v2::SuspensionMode mode{
         suspension_preview_v2::SuspensionMode::Passive};
     uint16_t faults{kFaultNone};
+    // 本次急停的原因（外部请求 / 姿态超限 / 链路丢失 / 降级超时），复位后清空
+    std::string estop_reason;
     bool allow_control{false};
     bool hold_output{false};
     bool output_zero{true};
