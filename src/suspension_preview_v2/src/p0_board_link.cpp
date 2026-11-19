@@ -82,24 +82,36 @@ bool P0BoardLink::setTargetHeightMm(
         last_error_ = "未载入高度->PWM 标定表";
         return false;
     }
-    // 串口协议只定义了单轮 PWM 命令（0x13），四轮逐条下发。
-    // 同一个 SerialSuspensionDriver 内部 seq 自增，乱序到达由板端按 seq 重排。
+    // 两阶段：先把四轮全部换算并校验通过，再逐帧下发。
+    // 旧实现"校验一轮就写一轮"，第 3 轮非法时前 2 轮已真实动作，
+    // 车身会被拧成斜的，而调用方只收到一个 false。
+    std::array<int, kSuspensionWheelCount> pwm{};
     for (int i = 0; i < kSuspensionWheelCount; ++i) {
-        const double p = cal_->pwmForHeight(mm[i]);
+        const double p = cal_->pwmForHeight(mm[static_cast<std::size_t>(i)]);
         if (!std::isfinite(p)) {
-            last_error_ = "高度->PWM 换算得到非有限值（标定表为空？）";
+            last_error_ = "第 " + std::to_string(i) +
+                          " 轮高度->PWM 换算得到非有限值，四轮均未下发";
             return false;
         }
         if (p < kMinServoPwmUs || p > kMaxServoPwmUs) {
             last_error_ = "第 " + std::to_string(i) + " 轮高度 " +
-                          std::to_string(mm[i]) + " mm 换算出的 PWM " +
-                          std::to_string(p) + " us 超出舵机量程 [" +
-                          std::to_string(kMinServoPwmUs) + ", " +
-                          std::to_string(kMaxServoPwmUs) + "] us，拒绝下发";
+                          std::to_string(mm[static_cast<std::size_t>(i)]) +
+                          " mm 换算出的 PWM " + std::to_string(p) +
+                          " us 超出舵机量程 [" + std::to_string(kMinServoPwmUs) +
+                          ", " + std::to_string(kMaxServoPwmUs) +
+                          "] us，四轮均未下发";
             return false;
         }
-        if (!driver_.set_target_pwm(i, static_cast<int>(std::lround(p)))) {
-            last_error_ = driver_.last_error();
+        pwm[static_cast<std::size_t>(i)] = static_cast<int>(std::lround(p));
+    }
+
+    // 串口协议只定义了单轮 PWM 命令（0x13），四轮逐条下发。
+    // 同一个 SerialSuspensionDriver 内部 seq 自增，乱序到达由板端按 seq 重排。
+    // 这一阶段失败无法撤销已写出的帧，错误信息必须说清"已下发几轮"。
+    for (int i = 0; i < kSuspensionWheelCount; ++i) {
+        if (!driver_.set_target_pwm(i, pwm[static_cast<std::size_t>(i)])) {
+            last_error_ = "第 " + std::to_string(i) + " 轮 PWM 下发失败（前 " +
+                          std::to_string(i) + " 轮已下发）: " + driver_.last_error();
             return false;
         }
     }

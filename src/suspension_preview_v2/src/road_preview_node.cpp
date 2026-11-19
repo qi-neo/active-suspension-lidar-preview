@@ -291,17 +291,30 @@ private:
         return p;
     }
 
+    // 点云时间戳归一化：零戳/非有限戳不能当成"采集时刻"往下传。
+    // 旧实现里 TF 查询对零戳做了"取最新变换"的回退，但 pipeline 和障碍物话题
+    // 仍用原始 0，于是剖面被标成 1970 年，下游按新鲜度校验会整帧丢弃，
+    // 表现为"节点在跑但没有剖面"。这里让 TF、剖面、障碍物共用同一个时刻。
+    double normalized_cloud_stamp(const sensor_msgs::msg::PointCloud2::SharedPtr& msg) {
+        const double raw = static_cast<double>(msg->header.stamp.sec) +
+                           static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
+        if (suspension_preview_v2::valid_stamp_sec(raw)) return raw;
+        ++zero_stamp_frames_;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                             "点云时间戳无效（sec=%d），已改用本机到达时刻；累计 %lu 帧。"
+                             "请修复上游驱动的 header.stamp",
+                             msg->header.stamp.sec,
+                             static_cast<unsigned long>(zero_stamp_frames_));
+        return suspension_preview_v2::normalize_stamp_sec(raw, now().seconds());
+    }
+
     // TF 变换：失败返回 nullptr（fail-safe，宁可丢帧也不下发错误数据）
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr
-    transform_to_target(const sensor_msgs::msg::PointCloud2::SharedPtr& msg) {
+    transform_to_target(const sensor_msgs::msg::PointCloud2::SharedPtr& msg,
+                        double stamp_sec) {
         if (msg->header.frame_id.empty()) return nullptr;
 
-        rclcpp::Time stamp;
-        if (msg->header.stamp.sec == 0 && msg->header.stamp.nanosec == 0) {
-            stamp = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-        } else {
-            stamp = rclcpp::Time(msg->header.stamp, get_clock()->get_clock_type());
-        }
+        const rclcpp::Time stamp(stamp_sec, get_clock()->get_clock_type());
 
         geometry_msgs::msg::TransformStamped tf_msg;
         try {
@@ -485,7 +498,9 @@ private:
 
     void cloud_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         frames_++;
-        auto cloud = transform_to_target(msg);
+        // 先归一化时间戳，再供 TF / 剖面 / 障碍物三处共用，避免三处各算各的
+        const double stamp_sec = normalized_cloud_stamp(msg);
+        auto cloud = transform_to_target(msg, stamp_sec);
         if (!cloud) {
             tf_fail_++;
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -493,8 +508,6 @@ private:
                                  static_cast<unsigned long>(tf_fail_));
             return;
         }
-        const double stamp_sec = static_cast<double>(msg->header.stamp.sec) +
-                                 static_cast<double>(msg->header.stamp.nanosec) * 1e-9;
         // 点云已在 target_frame_ 下：剖面/障碍物统一用它作 header.frame_id，
         // v3 的剖面校验按 expected_frame 拒收，坐标系必须与 target_frame 一致
         pipeline_->process(cloud, stamp_sec, target_frame_);
@@ -503,7 +516,9 @@ private:
         if (obstacles_pub_) {
             const auto& obs = pipeline_->last_obstacles();
             suspension_preview_v2::msg::RoadObstacles m;
-            m.header.stamp = msg->header.stamp;
+            // 与剖面同源：否则零戳帧的剖面用了到达时刻、障碍物仍是 1970，
+            // 同一帧的两路输出无法对齐
+            m.header.stamp = rclcpp::Time(stamp_sec, get_clock()->get_clock_type());
             m.header.frame_id = target_frame_;
             m.obstacles.reserve(obs.size());
             for (const auto& o : obs) {
@@ -526,9 +541,11 @@ private:
             errors = serial_sink_->write_errors();
         }
         RCLCPP_INFO(get_logger(),
-                    "帧:%lu TF失败:%lu 解析成功:%lu 解析失败:%lu | 串口丢帧:%lu 写错:%lu",
+                    "帧:%lu TF失败:%lu 零戳回退:%lu 解析成功:%lu 解析失败:%lu | "
+                    "串口丢帧:%lu 写错:%lu",
                     static_cast<unsigned long>(frames_),
                     static_cast<unsigned long>(tf_fail_),
+                    static_cast<unsigned long>(zero_stamp_frames_),
                     static_cast<unsigned long>(pipeline_->frames_processed()),
                     static_cast<unsigned long>(pipeline_->frames_failed()),
                     static_cast<unsigned long>(dropped),
@@ -600,6 +617,7 @@ private:
 
     std::size_t frames_{0};
     std::size_t tf_fail_{0};
+    std::size_t zero_stamp_frames_{0};
 };
 
 int main(int argc, char** argv) {

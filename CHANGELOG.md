@@ -13,6 +13,29 @@
 时间域 FIR、把"测什么"从凭感觉补用例改成按覆盖率指路、以及把 CI 补齐为
 构建 + 内存检查 + 覆盖率三道门禁。
 
+### P0 安全修复：急停二次有效性、复位干净性、四轮原子预校验、时间戳归一化（2026-11-19）
+
+本轮只做 P0，不碰 P1/P2。四项都是"代码看着对、特定序列下失效"的问题：
+
+- **二次急停静默失效**：`ICommandSink` 新增 `reset_emergency_stop()`，同步/异步
+  实现都在解除急停与新进入 Emergency 时清除本次事件的"已送达"标志。
+  此前该标志永不复位，解除后再急停会被判为已发过而一帧不下发。
+  自检补"复位后第二次急停"与"异步通道二次急停"回归。
+- **复位漏清姿态超限证据**：`SuspensionControlLoop::request_reset()` 现在同步清零
+  `attitude_implausible_`，避免复位后第一拍拿历史标志再次锁存急停。
+- **四轮 PWM 部分写入**：`P0BoardLink::setTargetHeightMm(array)` 改为两阶段——
+  先四轮全部换算校验、全通过后再逐帧下发；失败信息带轮号与"四轮均未下发"/
+  "前 N 轮已下发"。PTY 自检注入第三轮 NaN，断言一帧都不写出。
+- **零时间戳剖面被下游整帧丢弃**：v2 预瞄节点抽出统一的时间戳归一化，TF 查询、
+  剖面发布、障碍物话题共用同一时刻；零戳/负戳/NaN 回退到本机到达时刻并计入
+  诊断。此前 TF 用"最新变换"而剖面仍标 1970，v3 新鲜度校验会全丢。
+  纯函数 `valid_stamp_sec`/`normalize_stamp_sec` 放在 `types.hpp` 并进参数自检。
+
+自检项数真源同步更新：v3 控制自检 461 项、v2 纯函数组 204 项，仓库合计
+**1134 项**；`docs/selftest-counts.json`、`docs/project-facts.json` 与 CI 步骤名
+三处一致，`tools/check_counts.py` 通过。备份分支 `backup/pre-p0-20261119`，
+修复分支 `fix/p0-safety-20261119`。
+
 ### ARM64 原生 CI、实时性真源与 Actions Node 24（2026-11-05）
 
 - `ros-ci.yml` 新增 `aarch64` job（`ubuntu-24.04-arm` runner + `ros:humble-ros-base`

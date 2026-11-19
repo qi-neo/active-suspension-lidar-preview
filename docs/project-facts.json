@@ -31,7 +31,7 @@
   },
   "node24_actions_note": "按各仓库官方 action.yml 的 runs.using: node24 核实后的主版本（2026-11-05 核实：checkout v7 / setup-python v7 / upload-artifact v7）。第三方教程里写的 v6/v6/v7 已落后于官方最新主版本，故不照抄。由 tools/check_facts.py 扫描本仓 workflow 防止回退。",
   "coverage_gate": {"line": 80, "branch": 65},
-  "selftest_total": 1108,
+  "selftest_total": 1134,
   "selftest_count_source": "docs/selftest-counts.json",
   "driver_submodule": {
     "path": "src/unilidar_driver",
