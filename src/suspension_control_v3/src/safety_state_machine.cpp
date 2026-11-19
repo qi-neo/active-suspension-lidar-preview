@@ -101,12 +101,17 @@ void SafetyStateMachine::clear_estop() {
 
 StateMachineOutput SafetyStateMachine::tick(const SafetyInputs& in, double dt) {
     const StateMachineOutput next = evaluate(in, dt);
-    if (next.state != output_.state) {
+    const bool transitioned = (next.state != output_.state);
+    if (transitioned) {
         enter(next.state);
+    } else {
+        // 只在"本拍没有换状态"时累加：enter() 已把新状态计时清零，
+        // 再 += dt 会让新状态首拍年龄凭空多一个周期（200 Hz 下 5 ms）。
+        // leveling_duration_s 这类短阈值会因此提前满足。
+        time_in_state_ += dt;
     }
     // 契约以外的量（faults）逐周期更新
     output_.faults = next.faults;
-    time_in_state_ += dt;
     return output_;
 }
 

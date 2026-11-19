@@ -4,6 +4,23 @@
 #include <cmath>
 
 namespace suspension_control_v3 {
+namespace {
+
+constexpr std::size_t kMaxCalibrationSamples = 512;
+
+double median_copy(const std::vector<double>& values) {
+    if (values.empty()) return 0.0;
+    std::vector<double> tmp = values;
+    const std::size_t mid = tmp.size() / 2;
+    std::nth_element(tmp.begin(), tmp.begin() + static_cast<long>(mid), tmp.end());
+    const double hi = tmp[mid];
+    if (tmp.size() % 2 == 1) return hi;
+    const std::size_t lo = mid - 1;
+    std::nth_element(tmp.begin(), tmp.begin() + static_cast<long>(lo), tmp.end());
+    return 0.5 * (tmp[lo] + hi);
+}
+
+}  // namespace
 
 SuspensionControlLoop::SuspensionControlLoop(const ControlLoopParams& params,
                                              const ValidatorParams& validator_params,
@@ -428,13 +445,18 @@ const ControlLoopStatus& SuspensionControlLoop::step(double now_sec, double dt) 
     // 放到后面会被提前 return 掉，一帧都采不到。
     // 车停在斜坡上时 IMU 读到的不是 0，把这个基准测出来，控制器才能以它为水平
     if (sm.state == ControlState::kCalibrating && attitude_.valid) {
-        calibration_sum_roll_ += attitude_.roll_rad;
-        calibration_sum_pitch_ += attitude_.pitch_rad;
-        ++status_.calibration_samples;
-        status_.calibrated_roll_rad =
-            calibration_sum_roll_ / static_cast<double>(status_.calibration_samples);
-        status_.calibrated_pitch_rad =
-            calibration_sum_pitch_ / static_cast<double>(status_.calibration_samples);
+        calibration_roll_samples_.push_back(attitude_.roll_rad);
+        calibration_pitch_samples_.push_back(attitude_.pitch_rad);
+        // 标定窗口最长几秒，200 Hz 下最多几百个样本；封顶防止异常长停留
+        if (calibration_roll_samples_.size() > kMaxCalibrationSamples) {
+            calibration_roll_samples_.erase(calibration_roll_samples_.begin());
+            calibration_pitch_samples_.erase(calibration_pitch_samples_.begin());
+        }
+        status_.calibration_samples = calibration_roll_samples_.size();
+        // 中值而不是算术均值：单个 IMU 尖峰（0.1 s 的 10° 跳变）会把均值
+        // 永久带偏，而中值只受少数样本影响
+        status_.calibrated_roll_rad = median_copy(calibration_roll_samples_);
+        status_.calibrated_pitch_rad = median_copy(calibration_pitch_samples_);
     }
 
     // ---- 按输出契约决定这一拍做什么 ----
@@ -577,8 +599,8 @@ bool SuspensionControlLoop::request_reset() {
         last_command_ = {0, 0, 0, 0};
         status_.commanded_mm = last_command_;
         mode_pushed_ = false;
-        calibration_sum_roll_ = 0.0;
-        calibration_sum_pitch_ = 0.0;
+        calibration_roll_samples_.clear();
+        calibration_pitch_samples_.clear();
         status_.calibration_samples = 0;
         status_.calibrated_roll_rad = 0.0;
         status_.calibrated_pitch_rad = 0.0;

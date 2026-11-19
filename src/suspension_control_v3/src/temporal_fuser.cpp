@@ -24,6 +24,16 @@ bool TemporalProfileFuser::fuse(double now_sec, bool has_speed, double speed_mps
     const Entry& newest = buf_.back();
     const double a_newest = std::max(0.0, now_sec - newest.stamp_sec);
 
+    // 退化路径的最常见两种情形先早退：无车速 / 只有一帧 / 关闭融合。
+    // 旧实现先 reserve + 遍历构造 usable 再判断，200 Hz 下每拍白做一次分配；
+    // 失败路径的分配也是"热路径零分配"治理里漏掉的一处。
+    const bool can_align = has_speed && std::isfinite(speed_mps) && speed_mps > 0.0;
+    if (!can_align || params_.frames <= 1 || buf_.size() <= 1) {
+        out = newest.frame;
+        last_used_frames_ = 1;
+        return true;
+    }
+
     // 可用帧：帧龄不超限、几何与最新帧一致（格数不同无法按位置对齐）。
     // 收集后只保留最新的 kMaxFrames 帧——params().frames 可被外部改大，
     // 而每格的取样数组是定长的，超出的帧直接不用（宁少勿越界）
@@ -46,10 +56,9 @@ bool TemporalProfileFuser::fuse(double now_sec, bool has_speed, double speed_mps
         usable.push_back(&newest);
     }
 
-    // ---- 退化路径：无车速 / 单帧 / 关闭融合 -> 直通最新帧 ----
-    // 无车速时位置无法对齐，强行融合等于把不同位置的路面混在一起，比不融更坏
-    const bool can_align = has_speed && std::isfinite(speed_mps) && speed_mps > 0.0;
-    if (!can_align || params_.frames <= 1 || usable.size() <= 1) {
+    // ---- 退化路径：可用帧不足 -> 直通最新帧 ----
+    // 无车速 / 关闭融合 / 只有一帧已在上方早退；这里只处理"过滤后只剩一帧"。
+    if (usable.size() <= 1) {
         out = newest.frame;
         last_used_frames_ = 1;
         return true;

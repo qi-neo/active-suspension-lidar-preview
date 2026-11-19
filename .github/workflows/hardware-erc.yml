@@ -11,6 +11,10 @@ on:
     paths:
       - "hardware/**"
       - ".github/workflows/hardware-erc.yml"
+  pull_request:
+    paths:
+      - "hardware/**"
+      - ".github/workflows/hardware-erc.yml"
   workflow_dispatch:
 
 permissions:
@@ -52,7 +56,7 @@ jobs:
           kicad-cli sch erc \
             --output hardware-report/erc.rpt \
             --exit-code-violations \
-            hardware/main-control-board/kicad/P0_main_control.kicad_sch || true
+            hardware/main-control-board/kicad/P0_main_control.kicad_sch
 
       - name: PCB DRC
         if: steps.kicad.outputs.available == 'true'
@@ -60,10 +64,34 @@ jobs:
           kicad-cli pcb drc \
             --output hardware-report/drc.rpt \
             --exit-code-violations \
-            hardware/main-control-board/kicad/P0_main_control.kicad_pcb || true
+            hardware/main-control-board/kicad/P0_main_control.kicad_pcb
+
+      - name: 在 job summary 中给出违规摘要
+        if: always() && steps.kicad.outputs.available == 'true'
+        run: |
+          {
+            echo "## 硬件 ERC / DRC"
+            echo ""
+            if [ -f hardware-report/erc.rpt ]; then
+              echo "### ERC（前 20 行）"
+              echo '```'
+              head -20 hardware-report/erc.rpt
+              echo '```'
+            else
+              echo "未生成 ERC 报告。"
+            fi
+            if [ -f hardware-report/drc.rpt ]; then
+              echo "### DRC（前 20 行）"
+              echo '```'
+              head -20 hardware-report/drc.rpt
+              echo '```'
+            else
+              echo "未生成 DRC 报告。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传 ERC / DRC 报告
-        if: steps.kicad.outputs.available == 'true'
+        if: always() && steps.kicad.outputs.available == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: hardware-erc-drc-report

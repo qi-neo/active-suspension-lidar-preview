@@ -557,14 +557,15 @@ private:
             if (errors > 0 && ros_sink_) ros_sink_->set_link_fault(true);
         }
         RCLCPP_INFO(get_logger(),
-                    "帧:%lu TF失败:%lu IMU-TF失败:%lu 零戳回退:%lu 解析成功:%lu 解析失败:%lu | "
-                    "串口丢帧:%lu 写错:%lu",
+                    "帧:%lu TF失败:%lu IMU-TF失败:%lu 零戳回退:%lu 解析成功:%lu "
+                    "解析失败:%lu（其中空帧:%lu） | 串口丢帧:%lu 写错:%lu",
                     static_cast<unsigned long>(frames_),
                     static_cast<unsigned long>(tf_fail_),
                     static_cast<unsigned long>(imu_tf_fail_),
                     static_cast<unsigned long>(zero_stamp_frames_),
                     static_cast<unsigned long>(pipeline_->frames_processed()),
                     static_cast<unsigned long>(pipeline_->frames_failed()),
+                    static_cast<unsigned long>(pipeline_->frames_empty()),
                     static_cast<unsigned long>(dropped),
                     static_cast<unsigned long>(errors));
     }

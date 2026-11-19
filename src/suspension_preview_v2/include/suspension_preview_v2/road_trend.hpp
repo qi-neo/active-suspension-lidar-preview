@@ -31,9 +31,11 @@ struct RoadTrend {
 float robust_median(const std::vector<float>& values);
 
 // 从逐格代表高度拟合局部趋势线。
-// 两段中位数法：把 [0, fit_range] 内的有效格按纵向位置分成前后两段，
-// 各取高度中位数与位置中位数，slope = Δh / Δx。对个别离群格稳健，O(n)。
-// 有效格不足 min_cells 或两段位置过近时返回 valid=false，由调用方退回到
+// 实现是 Theil–Sen：所有有效点对连线的斜率取中位数，再对截距取中位数。
+// 先等间隔抽稀到 kMaxFitPoints 个点，因此实际复杂度是 O(k² + n)，k≈48；
+// 不是"两段中位数"的 O(n)。对个别离群格稳健（崩溃点约 29%），代价是常数项
+// 明显高于最小二乘——格子数增大时要同步看这里的热点占比。
+// 有效格不足 min_cells 或点对不足时返回 valid=false，由调用方退回到
 // 旧的绝对窗口——宁可用旧行为，也不要拿一条拟合不出来的线去开窗。
 // cell_height 中 NaN 表示该格无代表高度
 RoadTrend fit_road_trend(const std::vector<float>& cell_height, double spacing,

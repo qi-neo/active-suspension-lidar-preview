@@ -82,7 +82,9 @@ PUBLIC = [
 ]
 docs_dir = ROOT / "docs"
 if docs_dir.is_dir():
-    PUBLIC += [str(p.relative_to(ROOT)) for p in sorted(docs_dir.glob("*.md"))]
+    # 递归扫描：docs/paper、docs/review 里的文字版同样属于对外材料，
+    # 不能只在 docs/*.md 这一层设防
+    PUBLIC += [str(p.relative_to(ROOT)) for p in sorted(docs_dir.rglob("*.md"))]
 SKIP = {"docs/PRIVACY.md"}
 patterns = []
 for raw in data.get("forbidden_patterns", []):

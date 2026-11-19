@@ -612,6 +612,30 @@ void test_zero_calibration() {
     check(fx.loop.status().calibration_samples == 0, "复位后标定样本应清零");
 }
 
+// ---------------------------------------------------------------- 场景 9b
+// 零位标定必须抗单帧尖峰：算术均值会被几个坏样本永久带偏，中值不会
+void test_zero_calibration_robust() {
+    section("9b. 零位标定抗尖峰");
+    LoopFixture fx;
+    constexpr double kDt = 0.005;
+    for (int i = 0; i < 140; ++i) {
+        if (i % 20 == 0) fx.loop.submit_profile(make_frame(fx.t), fx.t);
+        Attitude a;
+        a.valid = true;
+        a.stamp_sec = fx.t;
+        // 基准 0.2 rad；在第 20~24 拍注入 5 个 0.34 rad 尖峰（低于 0.35 安全阈值）
+        a.roll_rad = (i >= 20 && i < 25) ? 0.34 : 0.20;
+        fx.loop.submit_attitude(a, fx.t);
+        fx.loop.step(fx.t, kDt);
+        fx.t += kDt;
+    }
+    check(fx.loop.status().calibration_samples >= 50, "应采到足够标定样本");
+    check(std::fabs(fx.loop.status().calibrated_roll_rad - 0.20) < 0.005,
+          "5 个尖峰不应把零位基准带偏（中值应接近 0.20）");
+    std::printf("  含 5 个 0.34 rad 尖峰，标定基准 %.4f rad（真实 0.2000）\n",
+                fx.loop.status().calibrated_roll_rad);
+}
+
 // ---------------------------------------------------------------- 场景 10
 void test_attitude_filter() {
     section("10. 姿态低通滤波");
@@ -2875,6 +2899,25 @@ void test_driver_error_paths() {
         std::printf("  estop_requested -> 位置位并锁存，撤请求不消失\n");
     }
 
+    // ---- 31.4b 状态切换当拍不应把新状态年龄多算一拍 ----
+    {
+        StateMachineParams p;
+        SafetyStateMachine sm(p);
+        SafetyInputs boot;
+        sm.tick(boot, 0.005);
+        check(std::fabs(sm.time_in_state() - 0.005) < 1e-12,
+              "同一状态内时间应正常累加");
+        SafetyInputs healthy;
+        healthy.profile_valid = true;
+        healthy.profile_fresh = true;
+        healthy.profile_quality = 100;
+        healthy.attitude_valid = true;
+        const StateMachineOutput out = sm.tick(healthy, 0.005);
+        check(out.state == ControlState::kCalibrating, "Boot 健康输入应切到 Calibrating");
+        check(sm.time_in_state() == 0.0,
+              "切换当拍的新状态年龄应为 0，而不是多算一个 dt");
+    }
+
     // ---- 31.5 状态机：Leveling 阶段直接降级 ----
     // 既有用例只覆盖了 Balancing -> Degraded，Leveling 那条分支没走到
     {
@@ -3860,6 +3903,7 @@ int main() {
     test_closed_loop_output();
     test_require_driver();
     test_zero_calibration();
+    test_zero_calibration_robust();
     test_attitude_filter();
     test_reference_sync();
     test_degraded_hold_timeout();

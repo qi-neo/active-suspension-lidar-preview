@@ -25,6 +25,9 @@ public:
 
     std::size_t frames_processed() const { return frames_processed_; }
     std::size_t frames_failed() const { return frames_failed_; }
+    // 解析成功但一个有效格都没有的帧。它们不再被当成"成功"发给下游，
+    // 单独计数以便区分"点云没来"与"点云来了但全被滤掉/标定跑飞"
+    std::size_t frames_empty() const { return frames_empty_; }
     const RoadProfileFrame& last_frame() const { return last_frame_; }
 
     // 最近一帧检出的非地面障碍物（语义预瞄接口；默认实现返回空）
@@ -38,6 +41,7 @@ private:
     RoadProfileFrame last_frame_;
     std::size_t frames_processed_{0};
     std::size_t frames_failed_{0};
+    std::size_t frames_empty_{0};
 };
 
 }  // namespace suspension_preview_v2

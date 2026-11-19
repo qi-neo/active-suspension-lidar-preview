@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "suspension_control_v3/command_sink.hpp"
 #include "suspension_control_v3/controller.hpp"
@@ -317,8 +318,10 @@ private:
     bool new_profile_rejected_{false};
 
     // 零位标定累加量
-    double calibration_sum_roll_{0.0};
-    double calibration_sum_pitch_{0.0};
+    // 标定样本保留最近 kMaxCalibrationSamples 个，用中值而不是均值：
+    // 单个 IMU 尖峰不应该把零位基准带偏
+    std::vector<double> calibration_roll_samples_;
+    std::vector<double> calibration_pitch_samples_;
 };
 
 }  // namespace suspension_control_v3

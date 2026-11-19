@@ -31,7 +31,10 @@
   "forbidden_patterns": [
     "(最大|max(imum)?).{0,12}(抖动|jitter).{0,12}[0-9]",
     "(抖动|jitter).{0,12}[0-9]+\\s*(us|µs|μs|微秒|ms)",
-    "p99.{0,12}(抖动|jitter|周期偏差|period error).{0,12}[0-9]"
+    "p99.{0,12}(抖动|jitter|周期偏差|period error).{0,12}[0-9]",
+    "(p99|P99).{0,20}(jitter|period error|周期偏差|抖动).{0,20}[0-9]+\\s*(us|µs|μs|ms)",
+    "(control loop|控制环|控制周期).{0,20}(jitter|抖动|period error|周期偏差).{0,20}[0-9]+\\s*(us|µs|μs|ms)",
+    "(max(imum)?|最大).{0,20}(jitter|抖动).{0,20}[0-9]+\\s*(us|µs|μs|ms)"
   ],
   "forbidden_patterns_note": "公开文档里写死的抖动/周期偏差数字，由 tools/check_realtime.py 逐行扫描并拒绝；正则本身也收敛在本文件，不在校验器里另写一份。注意只拦抖动语境，不误伤 CHANGELOG 里已有的串口压力测试实测值（例如 p99 0.065 ms）。"
 }

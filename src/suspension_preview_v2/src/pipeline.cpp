@@ -22,6 +22,15 @@ bool PreviewPipeline::process(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cl
         return false;
     }
 
+    // 一个有效格都没有的帧不能算"解析成功"：雷达遮挡、标定跑飞、
+    // 点云全被地面窗滤掉时都会走到这里。继续下发只会让下游收到满屏 NaN，
+    // 诊断上却显示"处理成功"。单独计数并拒发，让状态机按无数据降级。
+    if (frame.quality() == 0) {
+        ++frames_failed_;
+        ++frames_empty_;
+        return false;
+    }
+
     for (auto& s : sinks_) {
         s->send(frame);
     }

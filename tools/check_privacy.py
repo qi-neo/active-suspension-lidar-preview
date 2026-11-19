@@ -24,11 +24,11 @@ FORBIDDEN = [
 ]
 
 # 这些文件是「检测器本身」或策略说明，允许含字面量
+# 只列真实存在的检测器/策略文件。此前还白名单了两个已不存在的脚本
+# （check_no_secrets.py / check_protocol_config.py），会让读者误以为仍在运行。
 POLICY_FILES = {
     "docs/PRIVACY.md",
     "tools/check_privacy.py",
-    "tools/check_no_secrets.py",
-    "tools/check_protocol_config.py",
 }
 SKIP_DIRS = {".git", "__pycache__", "build", "install", "log", ".vscode", "node_modules"}
 TEXT_EXT = {
